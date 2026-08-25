@@ -1,0 +1,493 @@
+/* dsh-request-log client styles — theme-native through --dsw-alias-* variables
+   (same system dsh-context rides), so light/dark follow the harness theme. */
+
+.rl-root {
+  padding: 16px 20px 32px;
+  overflow-y: auto;
+  height: 100%;
+  box-sizing: border-box;
+  color: var(--dsw-alias-label-primary);
+  font-size: 13px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.rl-root::-webkit-scrollbar { width: 10px; height: 10px; }
+.rl-root::-webkit-scrollbar-thumb { background: var(--dsw-alias-scrollbar-bg-l2); border-radius: 5px; }
+.rl-root::-webkit-scrollbar-thumb:hover { background: var(--dsw-alias-scrollbar-hover-l2); }
+
+.rl-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.rl-head-title { font-weight: 600; }
+
+.rl-head-actions { display: flex; gap: 4px; }
+
+/* Segmented-button chrome (mirrors .lc-gran / .lc-gran-btn). */
+.rl-head-actions, .rl-tabs {
+  display: inline-flex;
+  gap: 2px;
+  background: var(--dsw-alias-bg-layer-2);
+  border: 1px solid var(--dsw-alias-border-l1);
+  border-radius: 6px;
+  padding: 1px;
+}
+
+.rl-btn {
+  border: 0;
+  background: transparent;
+  color: var(--dsw-alias-label-secondary);
+  font-size: 11px;
+  line-height: 1;
+  padding: 4px 9px;
+  border-radius: 5px;
+  cursor: pointer;
+  font-family: inherit;
+  white-space: nowrap;
+}
+
+.rl-btn:hover { color: var(--dsw-alias-label-primary); }
+
+.rl-btn-on, .rl-btn-on:hover {
+  background: var(--dsw-alias-button-primary-fill);
+  color: var(--dsw-alias-label-primary-foreground);
+}
+
+/* Overview stat cells (mirrors .lc-stats / .lc-stat). */
+.rl-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(96px, 1fr));
+  gap: 6px;
+}
+
+.rl-stat {
+  background: var(--dsw-alias-bg-layer-2);
+  border: 1px solid var(--dsw-alias-border-l1);
+  border-radius: 8px;
+  padding: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.rl-stat-label {
+  color: var(--dsw-alias-label-secondary);
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.rl-stat-value {
+  color: var(--dsw-alias-label-primary);
+  font-size: 14px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  text-align: left;
+}
+
+.rl-stat-hit .rl-stat-value { color: var(--dsw-alias-state-success-primary); }
+.rl-stat-out .rl-stat-value { color: var(--dsw-alias-brand-text); }
+
+/* Call table. Header and every row are SEPARATE grids, so the column
+   template must never contain a content-sized track: max-content would size
+   the Model column PER ROW (badge rows wider than plain rows, header widest
+   of all) and shift every later column — the zigzag this table used to
+   suffer. One shared variable, px floors + fr shares only. */
+/* Load-older strip between the summary and the ledger. */
+.rl-loadmore {
+  display: flex;
+  justify-content: center;
+  gap: 4px;
+  flex: none;
+}
+
+.rl-table {
+  /* time · model · 7 metrics · msg/tools */
+  --rl-cols: 60px minmax(120px, 1.4fr) repeat(7, minmax(64px, 1fr)) 64px;
+  background: var(--dsw-alias-bg-layer-1);
+  border: 1px solid var(--dsw-alias-border-l1);
+  border-radius: 10px;
+  overflow: auto;
+  min-height: 0;
+}
+
+.rl-row {
+  display: grid;
+  grid-template-columns: var(--rl-cols);
+  gap: 10px;
+  align-items: center;
+  box-sizing: border-box;
+  width: 100%;
+  padding: 7px 12px;
+  font-size: 12px;
+  text-align: left;
+  border: none;
+  border-bottom: 1px solid var(--dsw-alias-border-l1);
+  background: transparent;
+  color: var(--dsw-alias-label-primary);
+  cursor: pointer;
+  font-family: inherit;
+}
+
+.rl-row:last-child { border-bottom: none; }
+.rl-row:hover { background: var(--dsw-alias-interactive-bg-hover); }
+
+.rl-row-head {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--dsw-alias-label-secondary);
+  cursor: default;
+  background: var(--dsw-alias-bg-layer-1);
+}
+
+.rl-row-head .rl-cell { text-overflow: clip; }
+
+.rl-row-head:hover { background: var(--dsw-alias-bg-layer-1); }
+
+.rl-cell {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.rl-c-time { color: var(--dsw-alias-label-tertiary); }
+
+/* Metrics and the trailing size column are LEFT-aligned like every other
+   column; headers share these classes, so labels sit over their values by
+   construction. The hairline left rule keeps each column bounded — text
+   starts one padding step right of it, never touching the rule. */
+.rl-c-num,
+.rl-c-size {
+  text-align: left;
+  border-left: 1px solid var(--dsw-alias-border-l1);
+  padding-left: 10px;
+}
+
+.rl-c-num {
+  color: var(--dsw-alias-label-primary);
+  white-space: nowrap;
+}
+
+.rl-th-hit { color: var(--dsw-alias-state-success-secondary); }
+.rl-th-out { color: var(--dsw-alias-brand-text); }
+.rl-td-hit { color: var(--dsw-alias-state-success-primary); }
+.rl-td-out { color: var(--dsw-alias-brand-text); }
+
+/* An absent value ('–') must recede, never wear the column's data color. */
+.rl-cell.rl-none { color: var(--dsw-alias-label-tertiary); }
+
+.rl-c-model { display: flex; align-items: center; gap: 6px; min-width: 0; }
+
+.rl-model-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--dsw-alias-label-secondary);
+  font-size: 11.5px;
+}
+
+.rl-badges { display: inline-flex; gap: 4px; flex: none; }
+
+.rl-badge {
+  flex: none;
+  font-size: 10px;
+  line-height: 14px;
+  padding: 0 6px;
+  border-radius: 4px;
+  background: var(--dsw-alias-bg-layer-2);
+  border: 1px solid var(--dsw-alias-border-l1);
+  color: var(--dsw-alias-label-tertiary);
+  font-style: italic;
+  max-width: 90px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rl-badge-retry {
+  color: var(--dsw-alias-state-warn-label);
+  border-color: color-mix(in srgb, var(--dsw-alias-state-warn-primary) 45%, transparent);
+  font-style: normal;
+  font-weight: 600;
+}
+
+.rl-dot {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  display: inline-block;
+}
+
+.rl-dot-ok { background: var(--dsw-alias-state-success-primary); }
+.rl-dot-bad { background: var(--dsw-alias-state-error-primary); }
+.rl-dot-open { background: var(--dsw-alias-state-warn-primary); }
+
+.rl-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  flex: 1;
+  color: var(--dsw-alias-label-secondary);
+  padding: 32px;
+  text-align: center;
+}
+
+.rl-empty-title { font-weight: 600; color: var(--dsw-alias-label-primary); }
+.rl-empty-hint { font-size: 12px; color: var(--dsw-alias-label-tertiary); max-width: 420px; }
+
+/* Detail cards (mirrors .lc-card). */
+.rl-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 12px;
+}
+
+.rl-card {
+  background: var(--dsw-alias-bg-layer-1);
+  border: 1px solid var(--dsw-alias-border-l1);
+  border-radius: 10px;
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.rl-card-title {
+  font-weight: 600;
+  margin-bottom: 6px;
+  color: var(--dsw-alias-label-primary);
+}
+
+.rl-sum-row {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  min-width: 0;
+  font-size: 12px;
+}
+
+.rl-sum-label {
+  flex: none;
+  width: 96px;
+  color: var(--dsw-alias-label-tertiary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.rl-sum-value {
+  color: var(--dsw-alias-label-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.rl-tokens {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(104px, 1fr));
+  gap: 6px;
+}
+
+.rl-token {
+  background: var(--dsw-alias-bg-layer-2);
+  border: 1px solid var(--dsw-alias-border-l1);
+  border-radius: 8px;
+  padding: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.rl-token-label {
+  color: var(--dsw-alias-label-secondary);
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.rl-token-value {
+  color: var(--dsw-alias-label-primary);
+  font-size: 14px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  text-align: left;
+}
+
+.rl-token-hit .rl-token-value { color: var(--dsw-alias-state-success-primary); }
+.rl-token-out .rl-token-value { color: var(--dsw-alias-brand-text); }
+.rl-token-total { border-style: dashed; }
+.rl-token-total .rl-token-value { color: var(--dsw-alias-label-primary); }
+
+/* Body JSON tree. */
+.rl-json {
+  flex: 1;
+  min-height: 160px;
+  overflow: auto;
+  margin: 0;
+  padding: 12px 14px;
+  background: var(--dsw-alias-markdown-code-block);
+  border: 1px solid var(--dsw-alias-border-l1);
+  border-radius: 10px;
+  color: var(--dsw-alias-label-primary);
+  font-family: ui-monospace, SFMono-Regular, Consolas, 'Courier New', monospace;
+  font-size: 11.5px;
+  line-height: 1.55;
+}
+
+.rl-json::-webkit-scrollbar { width: 10px; height: 10px; }
+.rl-json::-webkit-scrollbar-thumb { background: var(--dsw-alias-scrollbar-bg-l2); border-radius: 5px; }
+.rl-json::-webkit-scrollbar-thumb:hover { background: var(--dsw-alias-scrollbar-hover-l2); }
+
+.rl-tree { user-select: text; }
+
+/* Block rows: the caret anchors at the left edge, content indents one column,
+   so long keys and values wrap ALIGNED instead of breaking under the arrow. */
+.rl-tree-line {
+  position: relative;
+  display: block;
+  padding-left: 18px;
+  min-height: 18px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.rl-caret {
+  position: absolute;
+  left: 0;
+  top: 0;
+  border: 0;
+  background: transparent;
+  color: var(--dsw-alias-label-tertiary);
+  cursor: pointer;
+  padding: 0;
+  width: 14px;
+  font-size: 10px;
+  line-height: inherit;
+  font-family: inherit;
+  text-align: left;
+}
+
+.rl-caret:hover { color: var(--dsw-alias-label-primary); }
+
+.rl-tree-node { display: block; }
+
+.rl-tree-children {
+  margin-left: 8px;
+  padding-left: 10px;
+  border-left: 1px dashed var(--dsw-alias-border-l2);
+  display: block;
+}
+
+.rl-tree-summary {
+  color: var(--dsw-alias-label-tertiary);
+  font-style: italic;
+}
+
+/* Opened string block: its own panel with toolbars at BOTH ends, so a huge
+   system prompt can always be collapsed right where reading stops. */
+.rl-str-open { display: block; }
+
+.rl-str-tools {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 0;
+  flex-wrap: wrap;
+}
+
+.rl-str-count {
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 10px;
+  font-style: italic;
+}
+
+.rl-string-toggle {
+  border: 0;
+  background: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-label-secondary);
+  border-radius: 4px;
+  padding: 1px 7px;
+  font-size: 10px;
+  line-height: 15px;
+  cursor: pointer;
+  font-family: inherit;
+  white-space: nowrap;
+}
+
+.rl-string-toggle:hover { color: var(--dsw-alias-label-primary); }
+
+.rl-string-toggle-on {
+  color: var(--dsw-alias-label-primary);
+  background: var(--dsw-alias-interactive-bg-active);
+  font-weight: 600;
+}
+
+.rl-tree-string-block {
+  display: block;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--dsw-alias-state-success-primary);
+  background: color-mix(in srgb, var(--dsw-alias-state-success-primary) 6%, transparent);
+  border-left: 2px solid color-mix(in srgb, var(--dsw-alias-state-success-primary) 40%, transparent);
+  border-radius: 4px;
+  padding: 6px 10px;
+  margin: 2px 0;
+}
+
+.rl-str-truncated {
+  display: block;
+  margin-top: 6px;
+  color: var(--dsw-alias-state-warn-label);
+  font-style: italic;
+}
+
+.rl-tree-inline {
+  display: block;
+  margin: 2px 0;
+  padding: 4px 0 4px 10px;
+  border-left: 2px solid var(--dsw-alias-border-l2);
+}
+
+.rl-tree-string-clamp { display: inline; }
+
+.rl-j-key { color: var(--dsw-alias-label-primary-bluish); }
+.rl-j-str { color: var(--dsw-alias-state-success-primary); }
+.rl-j-num { color: var(--dsw-alias-state-warn-primary); }
+.rl-j-bool { color: var(--dsw-alias-state-business-primary); }
+.rl-j-punc { color: var(--dsw-alias-label-tertiary); }
+
+.rl-chain {
+  font-size: 12px;
+  color: var(--dsw-alias-label-secondary);
+  background: var(--dsw-alias-bg-layer-2);
+  border: 1px solid var(--dsw-alias-border-l1);
+  border-radius: 8px;
+  padding: 6px 12px;
+}
+
+.rl-chain-on {
+  color: var(--dsw-alias-state-success-secondary);
+  border-color: color-mix(in srgb, var(--dsw-alias-state-success-primary) 40%, transparent);
+}

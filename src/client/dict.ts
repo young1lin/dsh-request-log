@@ -70,12 +70,14 @@ export interface ViewDict {
   colIn: string
   colCacheRead: string
   hitRateHint: string
+  colHitRate: string
   colCacheWrite: string
   colOut: string
   size: string
   sizeHint: string
   retryOf: string
   sumCalls: string
+  sumBilledInput: string
   sumInput: string
   sumCacheRead: string
   sumHitRate: string

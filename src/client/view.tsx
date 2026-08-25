@@ -56,11 +56,14 @@ function prevIdOf(calls: CallIndexEntry[], index: number): string | undefined {
 /** Sum the loaded window's usage into the overview card. */
 function summarize(calls: CallIndexEntry[]): {
   count: number
+  /** Billed input = uncached input + cache hits + cache writes, per call. */
+  billed: number
   input: number
   cacheRead: number
   cacheWrite: number
   output: number
 } {
+  let billed = 0
   let input = 0
   let cacheRead = 0
   let cacheWrite = 0
@@ -68,12 +71,15 @@ function summarize(calls: CallIndexEntry[]): {
   for (const call of calls) {
     const usage = call.usage
     if (usage === undefined) continue
+    const read = usage.cacheReadTokens ?? 0
+    const write = usage.cacheWriteTokens ?? 0
     input += usage.inputTokens ?? 0
-    cacheRead += usage.cacheReadTokens ?? 0
-    cacheWrite += usage.cacheWriteTokens ?? 0
+    cacheRead += read
+    cacheWrite += write
+    billed += (usage.inputTokens ?? 0) + read + write
     output += usage.outputTokens ?? 0
   }
-  return { count: calls.length, input, cacheRead, cacheWrite, output }
+  return { count: calls.length, billed, input, cacheRead, cacheWrite, output }
 }
 
 function CallRow(props: {
@@ -123,11 +129,17 @@ function CallRow(props: {
     h('span', { className: numCls(ttft) }, ttft),
     h('span', { className: numCls(total) }, total),
     h('span', { className: numCls(speed), title: dict.speedHint }, speed),
-    h('span', { className: numCls(input) }, input),
     h('span', {
-      className: numCls(hit, 'rl-td-hit'),
-      title: dict.hitRateHint + ': ' + formatPct(usage?.cacheReadTokens, billed),
-    }, hit),
+      className: numCls(input),
+      // Uncached input; hover shows the call's billed input (the total the
+      // provider actually counted against the context).
+      title: dict.detail.billedInput + ': ' + (billed === undefined ? DASH : formatTokens(billed)),
+    }, input),
+    h('span', { className: numCls(hit, 'rl-td-hit') }, hit),
+    h('span', {
+      className: numCls(formatPct(usage?.cacheReadTokens, billed), 'rl-td-hit'),
+      title: dict.hitRateHint,
+    }, formatPct(usage?.cacheReadTokens, billed)),
     h('span', { className: numCls(write) }, write),
     h('span', { className: numCls(out, 'rl-td-out') }, out),
     h('span', {
@@ -263,9 +275,10 @@ export function makeRequestLogView(source: DictSource): (props: { sessionId?: st
           h('button', { className: 'rl-btn', onClick: refresh }, dict.refresh))),
       h('div', { className: 'rl-stats' },
         stat(dict.sumCalls, String(sums.count) + (sums.count < state.total ? '+' : '')),
+        stat(dict.sumBilledInput, formatTokens(sums.billed)),
         stat(dict.sumInput, formatTokens(sums.input)),
         stat(dict.sumCacheRead, formatTokens(sums.cacheRead), 'rl-stat-hit'),
-        stat(dict.sumHitRate, formatPct(sums.cacheRead, sums.input + sums.cacheRead + sums.cacheWrite), 'rl-stat-hit'),
+        stat(dict.sumHitRate, formatPct(sums.cacheRead, sums.billed), 'rl-stat-hit'),
         stat(dict.sumCacheWrite, formatTokens(sums.cacheWrite)),
         stat(dict.sumOutput, formatTokens(sums.output), 'rl-stat-out')),
       state.calls.length < state.total
@@ -284,6 +297,7 @@ export function makeRequestLogView(source: DictSource): (props: { sessionId?: st
           h('span', { className: 'rl-cell rl-c-num' }, dict.colSpeed),
           h('span', { className: 'rl-cell rl-c-num' }, dict.colIn),
           h('span', { className: 'rl-cell rl-c-num rl-th-hit' }, dict.colCacheRead),
+          h('span', { className: 'rl-cell rl-c-num rl-th-hit' }, dict.colHitRate),
           h('span', { className: 'rl-cell rl-c-num' }, dict.colCacheWrite),
           h('span', { className: 'rl-cell rl-c-num rl-th-out' }, dict.colOut),
           h('span', { className: 'rl-cell rl-c-size' }, dict.size)),

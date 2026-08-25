@@ -67,6 +67,7 @@ export interface ViewDict {
   totalTime: string
   colSpeed: string
   speedHint: string
+  colBilledInput: string
   colIn: string
   colCacheRead: string
   hitRateHint: string

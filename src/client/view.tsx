@@ -129,12 +129,14 @@ function CallRow(props: {
     h('span', { className: numCls(ttft) }, ttft),
     h('span', { className: numCls(total) }, total),
     h('span', { className: numCls(speed), title: dict.speedHint }, speed),
+    // Billed input first: the total context the provider counted for this
+    // call (uncached + cache hits + cache writes) — the number the In /
+    // Cache-hit columns decompose.
     h('span', {
-      className: numCls(input),
-      // Uncached input; hover shows the call's billed input (the total the
-      // provider actually counted against the context).
-      title: dict.detail.billedInput + ': ' + (billed === undefined ? DASH : formatTokens(billed)),
-    }, input),
+      className: numCls(billed === undefined ? DASH : formatTokens(billed)),
+      title: dict.sumBilledInputHint,
+    }, billed === undefined ? DASH : formatTokens(billed)),
+    h('span', { className: numCls(input) }, input),
     h('span', { className: numCls(hit, 'rl-td-hit') }, hit),
     h('span', {
       className: numCls(formatPct(usage?.cacheReadTokens, billed), 'rl-td-hit'),
@@ -303,6 +305,7 @@ export function makeRequestLogView(source: DictSource): (props: { sessionId?: st
           h('span', { className: 'rl-cell rl-c-num' }, dict.ttft),
           h('span', { className: 'rl-cell rl-c-num' }, dict.totalTime),
           h('span', { className: 'rl-cell rl-c-num' }, dict.colSpeed),
+          h('span', { className: 'rl-cell rl-c-num' }, dict.colBilledInput),
           h('span', { className: 'rl-cell rl-c-num' }, dict.colIn),
           h('span', { className: 'rl-cell rl-c-num rl-th-hit' }, dict.colCacheRead),
           h('span', { className: 'rl-cell rl-c-num rl-th-hit' }, dict.colHitRate),

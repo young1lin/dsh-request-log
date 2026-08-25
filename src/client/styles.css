@@ -130,8 +130,8 @@
 }
 
 .rl-table {
-  /* time · model · 8 metrics (ttft total speed in hit hit% write out) · msg/tools */
-  --rl-cols: 60px minmax(120px, 1.4fr) repeat(8, minmax(64px, 1fr)) 64px;
+  /* time · model · 9 metrics (ttft total speed total-in in hit hit% write out) · msg/tools */
+  --rl-cols: 60px minmax(120px, 1.4fr) repeat(9, minmax(56px, 1fr)) 64px;
   background: var(--dsw-alias-bg-layer-1);
   border: 1px solid var(--dsw-alias-border-l1);
   border-radius: 10px;

@@ -104,6 +104,23 @@
    the Model column PER ROW (badge rows wider than plain rows, header widest
    of all) and shift every later column — the zigzag this table used to
    suffer. One shared variable, px floors + fr shares only. */
+/* Sticky head + summary: the ledger pins to the bottom and the real
+   scroller may be an ancestor pane, so the totals must stick to the top
+   of whatever scrolls. Opaque bg (matches the table surface) so rows
+   never show through; same hairline the table rows use. */
+.rl-fixed-head {
+  position: sticky;
+  top: 0;
+  z-index: 4;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 8px 0;
+  margin: -8px 0 -4px;
+  background: var(--dsw-alias-bg-layer-1);
+  border-bottom: 1px solid var(--dsw-alias-border-l1);
+}
+
 /* Load-older strip between the summary and the ledger. */
 .rl-loadmore {
   display: flex;

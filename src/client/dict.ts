@@ -78,6 +78,8 @@ export interface ViewDict {
   retryOf: string
   sumCalls: string
   sumBilledInput: string
+  /** Tooltip: what the billed-input total counts. */
+  sumBilledInputHint: string
   sumInput: string
   sumCacheRead: string
   sumHitRate: string

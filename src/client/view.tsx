@@ -259,28 +259,36 @@ export function makeRequestLogView(source: DictSource): (props: { sessionId?: st
     }
 
     const sums = summarize(state.calls)
-    const stat = (label: string, value: string, cls?: string): React.ReactElement =>
-      h('div', { className: 'rl-stat' + (cls === undefined ? '' : ' ' + cls) },
+    const stat = (label: string, value: string, cls?: string, title?: string): React.ReactElement =>
+      h('div', {
+        className: 'rl-stat' + (cls === undefined ? '' : ' ' + cls),
+        ...title === undefined ? {} : { title },
+      },
         h('span', { className: 'rl-stat-label' }, label),
         h('span', { className: 'rl-stat-value' }, value))
 
+    // The head and summary ride a sticky wrapper: the ledger pins to the
+    // newest call at the bottom (and the real scroller may be an ancestor
+    // pane), so without it the totals land off-screen exactly when the
+    // reader arrives.
     return h('div', { className: 'rl-root', ref: scrollRef, onScroll },
-      h('div', { className: 'rl-head' },
-        h('span', { className: 'rl-head-title' }, dict.calls + ' · ' + String(state.total)),
-        h('span', { className: 'rl-head-actions' },
-          h('button', {
-            className: 'rl-btn' + (auto ? ' rl-btn-on' : ''),
-            onClick: () => { setAuto(value => !value) },
-          }, dict.auto),
-          h('button', { className: 'rl-btn', onClick: refresh }, dict.refresh))),
-      h('div', { className: 'rl-stats' },
-        stat(dict.sumCalls, String(sums.count) + (sums.count < state.total ? '+' : '')),
-        stat(dict.sumBilledInput, formatTokens(sums.billed)),
+      h('div', { className: 'rl-fixed-head' },
+        h('div', { className: 'rl-head' },
+          h('span', { className: 'rl-head-title' }, dict.calls + ' · ' + String(state.total)),
+          h('span', { className: 'rl-head-actions' },
+            h('button', {
+              className: 'rl-btn' + (auto ? ' rl-btn-on' : ''),
+              onClick: () => { setAuto(value => !value) },
+            }, dict.auto),
+            h('button', { className: 'rl-btn', onClick: refresh }, dict.refresh))),
+        h('div', { className: 'rl-stats' },
+          stat(dict.sumCalls, String(sums.count) + (sums.count < state.total ? '+' : '')),
+          stat(dict.sumBilledInput, formatTokens(sums.billed), undefined, dict.sumBilledInputHint),
         stat(dict.sumInput, formatTokens(sums.input)),
         stat(dict.sumCacheRead, formatTokens(sums.cacheRead), 'rl-stat-hit'),
         stat(dict.sumHitRate, formatPct(sums.cacheRead, sums.billed), 'rl-stat-hit'),
-        stat(dict.sumCacheWrite, formatTokens(sums.cacheWrite)),
-        stat(dict.sumOutput, formatTokens(sums.output), 'rl-stat-out')),
+          stat(dict.sumCacheWrite, formatTokens(sums.cacheWrite)),
+          stat(dict.sumOutput, formatTokens(sums.output), 'rl-stat-out'))),
       state.calls.length < state.total
         ? h('div', { className: 'rl-loadmore' },
             h('button', {

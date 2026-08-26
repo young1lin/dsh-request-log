@@ -55,13 +55,9 @@ const CSS_VIRTUAL_PREFIX = '\0dsh-css:'
 const GLOBAL_CSS_VIRTUAL_PREFIX = '\0dsh-global-css:'
 const CSS_VIRTUAL_SUFFIX = '.mjs'
 
-function styleInjectionModule(
-  id: string,
-  fileId: string,
-  css: string,
-): string {
-  const source = [
-    `const css = ${JSON.stringify(css)};`,
+/** The dedupe-guarded `<style>` injection both CSS channels emit before their exports. */
+function injectStyleTag(id: string, fileId: string): string {
+  return [
     `const tagId = ${JSON.stringify(`${id}/${basename(fileId)}`)};`,
     `if (typeof document !== 'undefined' && document.querySelector('style[data-plugin-css=' + JSON.stringify(tagId) + ']') === null) {`,
     `  const tag = document.createElement('style');`,
@@ -70,9 +66,34 @@ function styleInjectionModule(
     `  tag.textContent = css;`,
     `  document.head.appendChild(tag);`,
     `}`,
+  ].join('\n')
+}
+
+function styleInjectionModule(
+  id: string,
+  fileId: string,
+  css: string,
+): string {
+  return [
+    `const css = ${JSON.stringify(css)};`,
+    injectStyleTag(id, fileId),
     'export {};',
-  ]
-  return source.join('\n')
+  ].join('\n')
+}
+
+/** The default export is exactly the `styles` object an import site consumes. */
+function cssModulesInjectionModule(
+  id: string,
+  fileId: string,
+  css: string,
+  classes: Record<string, string>,
+): string {
+  return [
+    `const css = ${JSON.stringify(css)};`,
+    `const classes = ${JSON.stringify(classes)};`,
+    injectStyleTag(id, fileId),
+    'export default classes;',
+  ].join('\n')
 }
 
 function sourceAssetPath(source: string, importer: string): string {
@@ -86,6 +107,20 @@ function cssChannels(id: string) {
       if (!source.endsWith('.module.css')) return null
       const abs = importer !== undefined ? sourceAssetPath(source, importer) : source
       return CSS_VIRTUAL_PREFIX + abs + CSS_VIRTUAL_SUFFIX
+    },
+    async load(this: { addWatchFile(file: string): void }, virtualId: string) {
+      if (!virtualId.startsWith(CSS_VIRTUAL_PREFIX)) return null
+      const fileId = virtualId.slice(CSS_VIRTUAL_PREFIX.length, -CSS_VIRTUAL_SUFFIX.length)
+      // The virtual id otherwise hides the physical stylesheet from the watch graph.
+      this.addWatchFile(fileId)
+      const source = await readFile(fileId)
+      // lightningcss rewrites every local class to its hashed name in BOTH the
+      // emitted CSS and the returned export mapping, so the default export and
+      // the injected stylesheet always agree.
+      const { code, exports } = transform({ filename: fileId, code: source, cssModules: true })
+      const classes: Record<string, string> = {}
+      for (const [name, entry] of Object.entries(exports ?? {})) classes[name] = entry.name
+      return cssModulesInjectionModule(id, fileId, code.toString(), classes)
     },
   }, {
     name: 'dsh-css-global-inline',
@@ -113,9 +148,12 @@ export default defineConfig([
     outDir: 'lib',
     format: ['esm'],
     platform: 'node',
-    target: 'es2024',
+    // engines is node>=20; es2024 syntax would ship untranspilable on 20.x/21 runtimes.
+    target: 'es2023',
     fixedExtension: false,
     dts: true,
+    // Symmetric with the client bundle: stack traces resolve past the minifier.
+    sourcemap: true,
     clean: true,
     deps: {
       neverBundle: isProductionDependency,

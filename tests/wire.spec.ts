@@ -144,10 +144,12 @@ describe('openai chat rendering', () => {
     const message = choice.message as Record<string, unknown>
     expect(message.content).toBe('all done')
     expect(message.reasoning_content).toBe('short think')
+    // OpenAI reports the TOTAL input (cached_tokens is a subset of it):
+    // 100 uncached + 40 cached = 140 in, 160 total.
     expect(response.usage).toEqual({
-      prompt_tokens: 100,
+      prompt_tokens: 140,
       completion_tokens: 20,
-      total_tokens: 120,
+      total_tokens: 160,
       prompt_tokens_details: { cached_tokens: 40 },
     })
   })
@@ -180,11 +182,12 @@ describe('openai responses rendering', () => {
     expect(response.status).toBe('completed')
     const output = response.output as Record<string, unknown>[]
     expect(output.map(item => item.type)).toEqual(['reasoning', 'message', 'function_call'])
+    // Total input semantics: 100 uncached + 40 cached = 140 in, 160 total.
     expect(response.usage).toEqual({
-      input_tokens: 100,
+      input_tokens: 140,
       output_tokens: 20,
       input_tokens_details: { cached_tokens: 40 },
-      total_tokens: 120,
+      total_tokens: 160,
     })
   })
 })
@@ -222,8 +225,10 @@ describe('responses chaining', () => {
   it('chains against a prior call: delta input only, previous_response_id set', () => {
     const info = responsesChainOf(chainedRecord, prior)
     expect(info.chained).toBe(true)
+    // Item counts (what `input:` holds): the delta is 2 items, the full
+    // history would be 5 (one message expands into several items).
     expect(info.sentItems).toBe(2)
-    expect(info.skippedItems).toBe(2)
+    expect(info.skippedItems).toBe(3)
     expect(info.previousResponseId).toBeDefined()
 
     const exchange = renderOpenAiResponsesRequest(chainedRecord, { previous: prior })
@@ -261,10 +266,39 @@ describe('responses chaining', () => {
     expect(responsesChainOf(chainedRecord, failed).chained).toBe(false)
   })
 
+  it('degrades for a same-hash prior (concurrent identical sibling)', () => {
+    const sibling: CallRecord = { ...prior, id: chainedRecord.id + '-x', requestHash: chainedRecord.requestHash }
+    expect(responsesChainOf(chainedRecord, sibling).chained).toBe(false)
+  })
+
+  it('degrades when the record is handed to itself as prior', () => {
+    expect(responsesChainOf(chainedRecord, chainedRecord).chained).toBe(false)
+  })
+
+  it('degrades when the delta would be empty (all rows assistant)', () => {
+    const onlyAssistant: CallRecord = {
+      ...chainedRecord,
+      request: {
+        ...chainedRecord.request,
+        messages: [
+          ...prior.request.messages,
+          { id: 'm5', role: 'assistant', content: [{ type: 'text', text: 'local prefill' }] },
+        ],
+      },
+    }
+    const info = responsesChainOf(onlyAssistant, prior)
+    expect(info.chained).toBe(false)
+    // Full input then: every message ships, none held server-side.
+    expect(info.skippedItems).toBe(0)
+    const exchange = renderOpenAiResponsesRequest(onlyAssistant, { previous: prior })
+    expect(exchange.body.previous_response_id).toBeUndefined()
+  })
+
   it('reports full input without a prior call', () => {
     const info = responsesChainOf(chainedRecord, undefined)
     expect(info.chained).toBe(false)
-    expect(info.sentItems).toBe(4)
+    // 4 messages expand to 5 wire items (assistant rows fan out).
+    expect(info.sentItems).toBe(5)
     expect(info.skippedItems).toBe(0)
   })
 })

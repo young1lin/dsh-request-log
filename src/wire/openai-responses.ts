@@ -17,7 +17,7 @@
 
 import type { CallRecord, RecordedBlock, RecordedMessage } from '../shared/types'
 import type { WireExchange } from './common'
-import { requestMessagesOf, responseIdOf, responseReasoningOf, responseTextOf, responseToolCallsOf, textOf } from './common'
+import { billedInputOf, requestMessagesOf, responseIdOf, responseReasoningOf, responseTextOf, responseToolCallsOf, textOf } from './common'
 
 type ResponseItem = Record<string, unknown>
 
@@ -119,6 +119,11 @@ function chainStateOf(record: CallRecord, previous: CallRecord | undefined): Cha
     previous.sessionId !== record.sessionId
     || previous.purpose !== record.purpose
     || previous.status !== 'ok'
+    // A same-hash "previous" is a concurrent identical sibling (subagent
+    // fan-out), not the call this one chains after — degrade to full input.
+    || previous.requestHash === record.requestHash
+    // Self-reference (a record handed to itself as its own prior).
+    || previous.id === record.id
   ) return { chained: false, sent: all }
   const prefix = commonPrefixByMessageId(prior, all)
   // Chaining is only valid when the prior request is a strict message-id
@@ -127,6 +132,9 @@ function chainStateOf(record: CallRecord, previous: CallRecord | undefined): Cha
   // The server already holds the prefix AND the prior call's assistant reply
   // (the delta's leading assistant messages) — only new user/tool rows ship.
   const delta = all.slice(prefix).filter(message => message.role !== 'assistant')
+  // A delta that filters down to nothing would render an `input: []` body a
+  // real client never sends — degrade to the full-input form instead.
+  if (delta.length === 0) return { chained: false, sent: all }
   return { chained: true, sent: delta }
 }
 
@@ -141,13 +149,16 @@ export interface ResponsesChainInfo {
 /** Compute the chain annotation of one request against its prior call. */
 export function responsesChainOf(record: CallRecord, previous: CallRecord | undefined): ResponsesChainInfo {
   const state = chainStateOf(record, previous)
+  // The badge counts WIRE ITEMS (what `input:` actually holds), matching the
+  // rendered body — one message can expand into several items.
+  const totalItems = requestMessagesOf(record).flatMap(messageToItems).length
   if (!state.chained || previous === undefined) {
-    return { chained: false, sentItems: requestMessagesOf(record).length, skippedItems: 0 }
+    return { chained: false, sentItems: totalItems, skippedItems: 0 }
   }
   return {
     chained: true,
-    sentItems: state.sent.length,
-    skippedItems: requestMessagesOf(record).length - state.sent.length,
+    sentItems: state.sent.flatMap(messageToItems).length,
+    skippedItems: totalItems - state.sent.flatMap(messageToItems).length,
     previousResponseId: responseIdOf(previous),
   }
 }
@@ -156,7 +167,9 @@ const STATUS: Record<string, string> = {
   'stop': 'completed',
   'tool-calls': 'completed',
   'max-tokens': 'incomplete',
-  'aborted': 'incomplete',
+  // A user abort is a cancellation, not truncation (`incomplete` is
+  // reserved for max_output_tokens-style short stops).
+  'aborted': 'cancelled',
   'error': 'failed',
 }
 
@@ -214,12 +227,14 @@ export function renderOpenAiResponsesResponse(record: CallRecord): Record<string
     output,
     ...failure === undefined ? {} : { error: { message: failure.message, code: failure.code } },
     usage: {
-      input_tokens: usage?.inputTokens ?? 0,
+      // The Responses API reports the TOTAL input (cached_tokens is a
+      // subset breakdown), so the disjoint neutral counts fold back together.
+      input_tokens: billedInputOf(usage),
       output_tokens: usage?.outputTokens ?? 0,
       ...usage?.cacheReadTokens === undefined ? {} : {
         input_tokens_details: { cached_tokens: usage.cacheReadTokens },
       },
-      total_tokens: (usage?.inputTokens ?? 0) + (usage?.outputTokens ?? 0),
+      total_tokens: billedInputOf(usage) + (usage?.outputTokens ?? 0),
     },
   }
 }

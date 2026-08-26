@@ -10,7 +10,7 @@
  * @module dsh-request-log/wire/common
  */
 
-import type { CallRecord, RecordedBlock, RecordedMessage } from '../shared/types'
+import type { CallRecord, RecordedBlock, RecordedMessage, RecordedUsage } from '../shared/types'
 
 /** One rendered HTTP exchange: the method, path, and JSON body. */
 export interface WireExchange {
@@ -83,4 +83,17 @@ export function responseIdOf(record: CallRecord): string {
 /** The request messages with the system prompt carried separately. */
 export function requestMessagesOf(record: CallRecord): RecordedMessage[] {
   return record.request.messages
+}
+
+/**
+ * Billed input tokens: the neutral usage counts are DISJOINT (inputTokens is
+ * uncached input only), while the OpenAI wire shapes report the TOTAL input
+ * (their `cached_tokens`/`prompt_tokens_details` is a subset breakdown of
+ * that total, not an extra). Both OpenAI renderers therefore add the cache
+ * read/write parts back in — the Anthropic renderer keeps the disjoint
+ * split because that API reports it natively.
+ */
+export function billedInputOf(usage: RecordedUsage | undefined): number {
+  if (usage === undefined) return 0
+  return usage.inputTokens + (usage.cacheReadTokens ?? 0) + (usage.cacheWriteTokens ?? 0)
 }

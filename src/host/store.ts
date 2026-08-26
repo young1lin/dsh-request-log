@@ -16,7 +16,7 @@
  * @module dsh-request-log/host/store
  */
 
-import { appendFile, mkdir, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
+import { appendFile, mkdir, open, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { CallIndexEntry, CallIndexResponse, CallRecord } from '../shared/types'
 import { RECORD_SCHEMA, toIndexEntry } from '../shared/types'
@@ -38,12 +38,35 @@ interface IndexCacheEntry {
   size: number
   /** Chronological (file order) index entries. */
   entries: CallIndexEntry[]
+  /**
+   * Byte offset where complete parsed lines end: appends after this offset
+   * can be parsed incrementally instead of re-reading the whole file.
+   */
+  parsedBytes: number
 }
 
 /** Sanitize a session id into one safe path segment (ids are uuid-like already). */
 function fileNameOf(sessionId: string): string {
   const safe = sessionId.replace(/[^a-zA-Z0-9._-]/g, '_')
   return `${safe}.jsonl`
+}
+
+/**
+ * Stamp logical-call steps onto a chronological entry list (see
+ * {@link CallIndexEntry.step}). Ordinary calls consume a step each — attempt 1
+ * opens a new one, retries share the step they retry — while auxiliary calls
+ * (compaction / session-title) carry no step and consume none. A retry whose
+ * chain head was trimmed away still gets the step it opens at the window's
+ * head, so the numbering stays strictly increasing and gap-free.
+ */
+export function assignSteps(entries: CallIndexEntry[]): CallIndexEntry[] {
+  let step = 0
+  for (const entry of entries) {
+    if (entry.purpose !== undefined) continue
+    if (entry.attempt === 1 || step === 0) step += 1
+    entry.step = step
+  }
+  return entries
 }
 
 /** Parse one JSONL line into a record of the schema this build understands. */
@@ -64,6 +87,11 @@ export class CallStore {
   private mkdirPromise: Promise<void> | undefined
 
   constructor(private readonly config: StoreConfig) {}
+
+  /** The configured per-session cap — the API derives its page ceiling from it. */
+  get maxCallsPerSession(): number {
+    return this.config.maxCallsPerSession
+  }
 
   private pathOf(sessionId: string): string {
     return join(this.config.directory, fileNameOf(sessionId))
@@ -89,24 +117,72 @@ export class CallStore {
     await appendFile(this.pathOf(record.sessionId), `${JSON.stringify(record)}\n`, 'utf8')
   }
 
-  private async readAll(sessionId: string): Promise<CallRecord[]> {
+  private async readAll(sessionId: string): Promise<{ records: CallRecord[]; parsedBytes: number }> {
     let text: string
     try {
       text = await readFile(this.pathOf(sessionId), 'utf8')
     } catch {
-      return []
+      return { records: [], parsedBytes: 0 }
     }
+    // Only complete lines count: a torn trailing write (no newline) is left
+    // for a later pass so its completed form is parsed then.
+    const completeEnd = text.endsWith('\n') ? text.length : Math.max(text.lastIndexOf('\n') + 1, 0)
+    const complete = text.slice(0, completeEnd)
     const records: CallRecord[] = []
-    for (const line of text.split('\n')) {
+    for (const line of complete.split('\n')) {
       const record = parseLine(line)
       if (record !== undefined) records.push(record)
     }
-    return records
+    return { records, parsedBytes: Buffer.byteLength(complete, 'utf8') }
+  }
+
+  /**
+   * Parse only the bytes appended past `fromByte` (a prior pass's parsed
+   * extent). A trailing chunk without its newline is a torn write — it stays
+   * unparsed so the next pass retries it once complete. Returns null when the
+   * file shrank or the offset no longer sits on a line boundary (a trim
+   * rewrote the file): callers fall back to a full re-read.
+   */
+  private async readTail(sessionId: string, fromByte: number): Promise<{ records: CallRecord[]; parsedBytes: number } | null> {
+    if (fromByte <= 0) return null
+    const handle = await open(this.pathOf(sessionId), 'r').catch(() => null)
+    if (handle === null) return null
+    try {
+      const { size } = await handle.stat()
+      if (size < fromByte) return null
+      const buffer = Buffer.alloc(size - fromByte)
+      if (buffer.length > 0) {
+        const { bytesRead } = await handle.read(buffer, 0, buffer.length, fromByte)
+        if (bytesRead !== buffer.length) return null
+      }
+      const text = buffer.toString('utf8')
+      const lastNewline = text.lastIndexOf('\n')
+      if (lastNewline !== text.length - 1) {
+        // Torn trailing line: parse up to the last complete line only.
+        const complete = lastNewline === -1 ? '' : text.slice(0, lastNewline + 1)
+        const records: CallRecord[] = []
+        for (const line of complete.split('\n')) {
+          const record = parseLine(line)
+          if (record !== undefined) records.push(record)
+        }
+        return { records, parsedBytes: fromByte + Buffer.byteLength(complete, 'utf8') }
+      }
+      const records: CallRecord[] = []
+      for (const line of text.split('\n')) {
+        const record = parseLine(line)
+        if (record !== undefined) records.push(record)
+      }
+      return { records, parsedBytes: size }
+    } finally {
+      await handle.close().catch(() => {})
+    }
   }
 
   /**
    * Chronological index entries for one session, served from the (mtime, size)
-   * cache when the file is unchanged since the last projection.
+   * cache when the file is unchanged since the last projection. A grown file
+   * parses only its appended tail — the 3s poll on a long session costs a
+   * stat plus the new lines, never a re-parse of the whole history.
    */
   private async entriesOf(sessionId: string): Promise<CallIndexEntry[]> {
     let info
@@ -120,12 +196,29 @@ export class CallStore {
     if (cached !== undefined && cached.mtimeMs === info.mtimeMs && cached.size === info.size) {
       return cached.entries
     }
-    const entries = (await this.readAll(sessionId)).map(toIndexEntry)
+    let entries: CallIndexEntry[]
+    let parsedBytes: number
+    if (cached !== undefined && info.size > cached.parsedBytes) {
+      const tail = await this.readTail(sessionId, cached.parsedBytes)
+      if (tail !== null) {
+        entries = [...cached.entries, ...tail.records.map(toIndexEntry)]
+        parsedBytes = tail.parsedBytes
+      } else {
+        const full = await this.readAll(sessionId)
+        entries = full.records.map(toIndexEntry)
+        parsedBytes = full.parsedBytes
+      }
+    } else {
+      const full = await this.readAll(sessionId)
+      entries = full.records.map(toIndexEntry)
+      parsedBytes = full.parsedBytes
+    }
+    assignSteps(entries)
     if (this.indexCache.size >= 16 && !this.indexCache.has(sessionId)) {
       const oldest = this.indexCache.keys().next().value
       if (oldest !== undefined) this.indexCache.delete(oldest)
     }
-    this.indexCache.set(sessionId, { mtimeMs: info.mtimeMs, size: info.size, entries })
+    this.indexCache.set(sessionId, { mtimeMs: info.mtimeMs, size: info.size, entries, parsedBytes })
     return entries
   }
 

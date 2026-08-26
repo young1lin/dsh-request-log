@@ -16,6 +16,7 @@ The wire views are reconstructed from the exact capture, mirroring the mapping d
 ## Features
 
 - **Every attempt recorded** — including each retry of a failed call (retries are correlated by a request hash and numbered `attempt: N`).
+- **Step numbers** — each ordinary call wears a `#N` badge numbering its place in the session's conversation loop (what was called at step 1, step 2, …); retries share their step, auxiliary calls take none. The detail view shows the same step in its call card.
 - **Auxiliary calls too** — session-title and compaction calls are tagged with their `purpose`.
 - **Timing** — start time, TTFB (first chunk), and total duration per call.
 - **Usage** — input/output/cache-read/cache-write tokens exactly as the provider reported them.
@@ -40,9 +41,10 @@ Then start the web UI with `dsh web` (restart it if it was already running) and 
 
 Open any session and click the **Requests / 请求** tab:
 
-- The list is a chronological ledger — the newest call sits at the bottom (like the Trajectory tab), with status dot, model, finish reason, TTFB / total latency, token counts, and message/tool counts. It loads the newest 100 calls first and a **Load older** button pages in the rest; retries show a `×N` badge; auxiliary calls show their purpose.
-- **Auto** refreshes the list every 3s while the session is running.
+- The list is a chronological ledger — the newest call sits at the bottom (like the Trajectory tab), with status dot, model, step badge (`#N`), finish reason, TTFB / total latency, token counts, and message/tool counts. It loads the newest 100 calls first and a **Load older** button pages in the rest (your scroll position is anchored while older rows prepend); retries show a `×N` badge; auxiliary calls show their purpose.
+- **Auto** refreshes the list every 3s while the session is running (paused while the tab is hidden). A transient refresh failure keeps the loaded data and shows a stale-data banner instead of clearing the ledger.
 - Click a row to open the detail view: a summary card (provider, model, effort, timing, usage, finish) plus the full request/response JSON — switch between the four views, toggle line wrapping, or copy the JSON.
+- **Your place is kept** — the tab only renders while active, but per-session view memory (in-page + `sessionStorage`) reopens the call you were viewing, its request/response side and format, the paged-in window, and the Auto toggle when you switch tabs — or even refresh the page. Each session remembers its own view.
 
 ## How it works
 

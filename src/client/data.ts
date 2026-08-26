@@ -13,26 +13,22 @@ export class ApiError extends Error {
   }
 }
 
-async function getJson<T>(path: string): Promise<T> {
-  const response = await fetch(path, { headers: { accept: 'application/json' } })
+async function getJson<T>(path: string, signal?: AbortSignal): Promise<T> {
+  const response = await fetch(path, { headers: { accept: 'application/json' }, ...signal === undefined ? {} : { signal } })
   if (!response.ok) {
     throw new ApiError(response.status, 'HTTP ' + String(response.status))
   }
   return await response.json() as T
 }
 
-export function fetchHealth(): Promise<{ ok: true; version: string }> {
-  return getJson(PREFIX + '/health')
-}
-
-export function fetchCalls(sessionId: string, limit: number, offset: number): Promise<CallIndexResponse> {
+export function fetchCalls(sessionId: string, limit: number, offset: number, signal?: AbortSignal): Promise<CallIndexResponse> {
   const path = PREFIX + '/sessions/' + encodeURIComponent(sessionId) + '/calls?limit=' + String(limit) + '&offset=' + String(offset)
-  return getJson(path)
+  return getJson(path, signal)
 }
 
-export function fetchCall(sessionId: string, callId: string): Promise<CallRecord> {
+export function fetchCall(sessionId: string, callId: string, signal?: AbortSignal): Promise<CallRecord> {
   const path = PREFIX + '/sessions/' + encodeURIComponent(sessionId) + '/calls/' + encodeURIComponent(callId)
-  return getJson(path)
+  return getJson(path, signal)
 }
 
 /** Format an epoch-milliseconds timestamp as a local HH:MM:SS string. */

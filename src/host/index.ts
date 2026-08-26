@@ -11,7 +11,7 @@
  * webServer seat is optional — without it, capture and storage still run.
  */
 
-import { Context } from '@deepseek-ai/cordis'
+import type { Context } from '@deepseek-ai/cordis'
 import { z } from 'zod'
 import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
 import { installApi } from './api'

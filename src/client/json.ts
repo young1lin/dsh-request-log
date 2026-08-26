@@ -71,17 +71,31 @@ function childPathOf(path: string, key: string, isArray: boolean): string {
   return isArray ? path + '[' + key + ']' : path + '.' + key
 }
 
+/**
+ * Parse cache: one long string can be probed several times per render and
+ * re-probed on every re-render (poll tick, locale switch, sibling toggle),
+ * while a 40KB+ system prompt pays a full JSON.parse each time. Keyed by the
+ * string itself, capped and wholesale-evicted to stay tiny.
+ */
+const PARSE_CACHE_MAX = 256
+const parseCache = new Map<string, unknown | undefined>()
+
 /** Parse a string as JSON when it plausibly is one (object/array literal). */
 function tryParseJsonString(text: string): unknown | undefined {
+  if (text.length < JSON_STRING_MIN_CHARS) return undefined
+  if (parseCache.has(text)) return parseCache.get(text)
   const trimmed = text.trim()
   if (!trimmed.startsWith('{') && !trimmed.startsWith('[')) return undefined
+  let parsed: unknown | undefined = undefined
   try {
     const value = JSON.parse(trimmed) as unknown
-    if (value === null || typeof value !== 'object') return undefined
-    return value
+    if (value !== null && typeof value === 'object') parsed = value
   } catch {
-    return undefined
+    // Not JSON — cached as undefined by falling through.
   }
+  if (parseCache.size >= PARSE_CACHE_MAX) parseCache.clear()
+  parseCache.set(text, parsed)
+  return parsed
 }
 
 function Caret(props: { open: boolean; onClick: () => void }): React.ReactElement {

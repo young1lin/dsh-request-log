@@ -49,6 +49,10 @@ function requestBlocksOf(message: RecordedMessage): AnthropicContent[] {
           if (inner.type === 'text') content.push({ type: 'text', text: textOf(inner) })
           else if (inner.type === 'image') content.push({ type: 'image', source: imageSourceOf(inner) })
         }
+        // The real API rejects an empty content array (non-empty string or
+        // non-empty array); an empty tool result renders a visible placeholder
+        // instead of a body a replay would be refused for.
+        if (content.length === 0) content.push({ type: 'text', text: '[empty tool result]' })
         blocks.push({ type: 'tool_result', tool_use_id: String(block.toolCallId), content })
         break
       }

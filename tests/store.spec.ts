@@ -7,7 +7,7 @@ import { mkdtemp, readFile, readdir, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { CallStore } from '../src/host/store.ts'
+import { assignSteps, CallStore } from '../src/host/store.ts'
 import { RECORD_SCHEMA, toIndexEntry } from '../src/shared/types'
 import type { CallRecord } from '../src/shared/types'
 
@@ -94,6 +94,75 @@ describe('CallStore', () => {
     expect(page.calls.map(call => call.id)).toEqual(['r4', 'r3', 'r2'])
     const text = await readFile(join(directory, 'sess-1.jsonl'), 'utf8')
     expect(text.split('\n').filter(line => line.length > 0).length).toBe(3)
+  })
+
+  it('stamps conversation-loop steps on the projected index', async () => {
+    const directory = await tempDir()
+    const store = new CallStore({ directory, retentionDays: 14, maxCallsPerSession: 100 })
+    await store.append(recordOf({ id: 's1', requestHash: 'h1' }))
+    await store.append(recordOf({ id: 's1-retry', requestHash: 'h1', attempt: 2 }))
+    await store.append(recordOf({ id: 'title', purpose: 'session-title' }))
+    await store.append(recordOf({ id: 's2', requestHash: 'h2' }))
+
+    const page = await store.listIndex('sess-1', 50, 0)
+    // Newest-first rows; step is gap-free across ordinary calls, retries
+    // share their step, and the auxiliary title call carries none.
+    const byId = new Map(page.calls.map(call => [call.id, call]))
+    expect(byId.get('s1')?.step).toBe(1)
+    expect(byId.get('s1-retry')?.step).toBe(1)
+    expect(byId.get('title')?.step).toBeUndefined()
+    expect(byId.get('s2')?.step).toBe(2)
+  })
+
+  it('assignSteps tolerates a trimmed retry chain head', () => {
+    const entries = [
+      { ...toIndexEntry(recordOf({ id: 'r2', requestHash: 'h1', attempt: 2 })), attempt: 2 },
+      { ...toIndexEntry(recordOf({ id: 'next', requestHash: 'h2', attempt: 1 })), attempt: 1 },
+    ]
+    assignSteps(entries)
+    // The orphaned retry opens the window's first step instead of stalling at 0.
+    expect(entries[0]?.step).toBe(1)
+    expect(entries[1]?.step).toBe(2)
+  })
+
+  it('serves appends incrementally and tolerates torn tails', async () => {
+    const directory = await tempDir()
+    const store = new CallStore({ directory, retentionDays: 14, maxCallsPerSession: 100 })
+    await store.append(recordOf({ id: 'a' }))
+    await store.append(recordOf({ id: 'b' }))
+    expect((await store.listIndex('sess-1', 50, 0)).total).toBe(2)
+
+    // A torn write: half a line with no trailing newline must be ignored,
+    // then picked up once the appending record completes it.
+    await writeFile(join(directory, 'sess-1.jsonl'), '{"id":"tor', { flag: 'a' })
+    let page = await store.listIndex('sess-1', 50, 0)
+    expect(page.total).toBe(2)
+
+    await store.append(recordOf({ id: 'c' }))
+    page = await store.listIndex('sess-1', 50, 0)
+    // The torn prefix physically fuses with the next appended record into
+    // one unparsable line: that fused record is lost (fail-soft skip), the
+    // earlier complete records survive, and nothing crashes.
+    expect(page.calls.map(call => call.id)).toEqual(['b', 'a'])
+
+    // After the fused line, a fresh append lands on its own line and the
+    // incremental path picks it up again.
+    await store.append(recordOf({ id: 'd' }))
+    page = await store.listIndex('sess-1', 50, 0)
+    expect(page.calls.map(call => call.id)).toContain('d')
+  })
+
+  it('re-reads fully after a trim shrinks the file', async () => {
+    const directory = await tempDir()
+    const store = new CallStore({ directory, retentionDays: 14, maxCallsPerSession: 2 })
+    await store.append(recordOf({ id: 'a', requestHash: 'h1' }))
+    await store.append(recordOf({ id: 'b', requestHash: 'h2' }))
+    await store.listIndex('sess-1', 50, 0) // warm the incremental cache
+    await store.append(recordOf({ id: 'c', requestHash: 'h3' }))
+    await store.sweep() // trims to the newest 2 lines and rewrites the file
+    const page = await store.listIndex('sess-1', 50, 0)
+    expect(page.total).toBe(2)
+    expect(page.calls.map(call => call.id)).toEqual(['c', 'b'])
   })
 
   it('deletes stale session files on sweep', async () => {

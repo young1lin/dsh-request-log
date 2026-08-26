@@ -8,13 +8,14 @@
 
 import { React, h } from './react'
 import type { CallRecord } from '../shared/types'
-import { WIRE_PROTOCOLS, detectProtocol, renderWire, responsesChainOf, type WireProtocol } from '../wire'
+import { WIRE_PROTOCOLS, detectProtocol, renderWire, responsesChainOf } from '../wire'
 import { ApiError, fetchCall, formatDateTime, formatDuration, formatPct, formatTokens, formatTokPerSec } from './data'
 import { JsonTree, type TreeMode } from './json'
 import { interp } from './dict'
+import type { DetailFormat, DetailPrefs, DetailSide } from './persist'
 import type { DictSource } from './view'
 
-type Format = 'neutral' | WireProtocol
+// DetailFormat (from ./persist): 'neutral' or a wire protocol; null = auto-detect.
 
 function Row(props: { label: string; children?: React.ReactNode; title?: string }): React.ReactElement {
   return h('div', { className: 'rl-sum-row', ...props.title === undefined ? {} : { title: props.title } },
@@ -22,12 +23,19 @@ function Row(props: { label: string; children?: React.ReactNode; title?: string 
     h('span', { className: 'rl-sum-value' }, props.children))
 }
 
-function CopyButton(props: { text: string; label: string; copiedLabel: string }): React.ReactElement {
+function CopyButton(props: { getText: () => string; label: string; copiedLabel: string }): React.ReactElement {
   const [copied, setCopied] = React.useState(false)
+  const timerRef = React.useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
+  React.useEffect(() => () => {
+    if (timerRef.current !== undefined) clearTimeout(timerRef.current)
+  }, [])
   const onClick = (): void => {
-    void navigator.clipboard?.writeText(props.text).then(() => {
+    // Stringify lazily: an MB-scale body is only paid for when the reader
+    // actually copies, not on every side/format switch.
+    const text = props.getText()
+    void navigator.clipboard?.writeText(text).then(() => {
       setCopied(true)
-      setTimeout(() => { setCopied(false) }, 1500)
+      timerRef.current = setTimeout(() => { setCopied(false) }, 1500)
     }).catch(() => {})
   }
   return h('button', { className: 'rl-btn', onClick }, copied ? props.copiedLabel : props.label)
@@ -47,13 +55,22 @@ export function makeCallDetail(source: DictSource): (props: {
   sessionId: string
   callId: string
   prevId?: string
+  /** Conversation-loop step of this call, when known from the index. */
+  step?: number
   onBack: () => void
+  /** Reading position restored from the per-session memory (see ./persist). */
+  initialPrefs?: DetailPrefs
+  /** Reports side/format changes back to the per-session memory. */
+  onPrefsChange?: (prefs: DetailPrefs) => void
 }) => React.ReactElement {
   function CallDetail(props: {
     sessionId: string
     callId: string
     prevId?: string
+    step?: number
     onBack: () => void
+    initialPrefs?: DetailPrefs
+    onPrefsChange?: (prefs: DetailPrefs) => void
   }): React.ReactElement {
     const [, force] = React.useState(0)
     React.useEffect(() => source.subscribe(() => { force(value => value + 1) }), [source])
@@ -61,27 +78,38 @@ export function makeCallDetail(source: DictSource): (props: {
     const d = dict.detail
     const [record, setRecord] = React.useState<CallRecord | null>(null)
     const [error, setError] = React.useState<string | null>(null)
-    const [side, setSide] = React.useState<'request' | 'response'>('request')
-    const [format, setFormat] = React.useState<Format | null>(null)
+    const [side, setSide] = React.useState<DetailSide>(props.initialPrefs?.side ?? 'request')
+    const [format, setFormat] = React.useState<DetailFormat | null>(props.initialPrefs?.format ?? null)
     const [treeMode, setTreeMode] = React.useState<TreeMode>('default')
     const [previous, setPrevious] = React.useState<CallRecord | undefined>(undefined)
 
+    // Reading-position memory: side/format changes ride out to the per-session
+    // store so a remount (tab switch, refresh) reopens where the reader left
+    // off. Fires once on mount too — an idempotent write of the same prefs.
+    React.useEffect(() => {
+      props.onPrefsChange?.({ side, format })
+    }, [side, format, props.onPrefsChange])
+
     React.useEffect(() => {
       let cancelled = false
+      const abort = new AbortController()
       setRecord(null)
       setError(null)
       const load = async (): Promise<void> => {
         try {
-          const value = await fetchCall(props.sessionId, props.callId)
+          const value = await fetchCall(props.sessionId, props.callId, abort.signal)
           if (cancelled) return
           setRecord(value)
         } catch (cause) {
-          if (cancelled) return
+          if (cancelled || abort.signal.aborted) return
           setError(cause instanceof ApiError ? cause.message : String(cause))
         }
       }
       void load()
-      return () => { cancelled = true }
+      return () => {
+        cancelled = true
+        abort.abort()
+      }
     }, [props.sessionId, props.callId])
 
     // The prior call is only needed for the chained Responses view; fetch it
@@ -89,9 +117,10 @@ export function makeCallDetail(source: DictSource): (props: {
     React.useEffect(() => {
       if (format !== 'openai-responses' || props.prevId === undefined) return
       let cancelled = false
+      const abort = new AbortController()
       const load = async (): Promise<void> => {
         try {
-          const value = await fetchCall(props.sessionId, props.prevId as string)
+          const value = await fetchCall(props.sessionId, props.prevId as string, abort.signal)
           if (cancelled) return
           setPrevious(value)
         } catch {
@@ -99,14 +128,17 @@ export function makeCallDetail(source: DictSource): (props: {
         }
       }
       void load()
-      return () => { cancelled = true }
+      return () => {
+        cancelled = true
+        abort.abort()
+      }
     }, [props.sessionId, props.prevId, format])
 
     // Hooks must run before the early returns below; both memos tolerate a
     // null record. Rendering the wire projection and its copy-text are the
     // expensive steps here (MB-scale bodies) — memoize them per inputs so a
     // locale force-render or tree toggle never re-stringifies the payload.
-    const effectiveFormat: Format = format ?? (record === null ? 'neutral' : detectProtocol(record))
+    const effectiveFormat: DetailFormat = format ?? (record === null ? 'neutral' : detectProtocol(record))
     const payload = React.useMemo<unknown>(() => {
       if (record === null) return null
       if (effectiveFormat === 'neutral') {
@@ -116,10 +148,8 @@ export function makeCallDetail(source: DictSource): (props: {
       }
       return renderWire(record, effectiveFormat, side, { previous })
     }, [record, side, effectiveFormat, previous])
-    const text = React.useMemo(
-      () => (payload === null ? '' : JSON.stringify(payload, null, 2)),
-      [payload],
-    )
+    const textRef = React.useRef(payload)
+    textRef.current = payload
 
     if (error !== null) {
       return h('div', { className: 'rl-root' },
@@ -146,7 +176,11 @@ export function makeCallDetail(source: DictSource): (props: {
         h('span', { className: 'rl-head-title' }, record.model
           + (record.reasoningEffort !== undefined ? ' · ' + record.reasoningEffort : '')),
         h('span', { className: 'rl-head-actions' },
-          h(CopyButton, { text, label: d.copy, copiedLabel: d.copied }))),
+          h(CopyButton, {
+            getText: () => textRef.current === null ? '' : JSON.stringify(textRef.current, null, 2),
+            label: d.copy,
+            copiedLabel: d.copied,
+          }))),
       h('div', { className: 'rl-cards' },
         h('div', { className: 'rl-card' },
           h('div', { className: 'rl-card-title' }, d.timingCard),
@@ -194,6 +228,7 @@ export function makeCallDetail(source: DictSource): (props: {
                   h('span', { className: 'rl-token-value' }, billed === undefined ? '–' : formatTokens(billed))))),
         h('div', { className: 'rl-card' },
           h('div', { className: 'rl-card-title' }, d.callCard),
+          props.step === undefined ? null : h(Row, { label: d.step }, '#' + String(props.step)),
           h(Row, { label: d.provider }, record.provider
             + (record.purpose !== undefined ? ' · ' + record.purpose : '')),
           h(Row, { label: d.model }, record.model),

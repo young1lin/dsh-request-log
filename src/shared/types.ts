@@ -124,6 +124,15 @@ export interface CallIndexEntry {
   reasoningEffort?: string
   requestHash: string
   attempt: number
+  /**
+   * 1-based ordinal of this LOGICAL call among the session's ordinary
+   * (non-auxiliary) conversation turns: attempt 1 starts a new step, retries
+   * (same hash, attempt > 1) share the step they retry. Auxiliary calls
+   * (compaction / session-title) take no step and don't consume one. Derived
+   * at projection time, so records written before the field existed get one
+   * too. Undefined only for auxiliary rows.
+   */
+  step?: number
   startedAt: number
   durationMs?: number
   ttfbMs?: number

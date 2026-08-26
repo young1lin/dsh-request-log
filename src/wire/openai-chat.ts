@@ -11,7 +11,7 @@
 
 import type { CallRecord, RecordedBlock, RecordedMessage } from '../shared/types'
 import type { WireExchange } from './common'
-import { blocksToPlainText, requestMessagesOf, responseIdOf, responseReasoningOf, responseTextOf, responseToolCallsOf, textOf } from './common'
+import { billedInputOf, blocksToPlainText, requestMessagesOf, responseIdOf, responseReasoningOf, responseTextOf, responseToolCallsOf, textOf } from './common'
 
 type ChatMessage = Record<string, unknown>
 
@@ -134,6 +134,7 @@ export function renderOpenAiChatResponse(record: CallRecord): Record<string, unk
     index,
   }))
   const usage = record.response?.usage
+  const body = responseTextOf(record)
   return {
     id: `chatcmpl-${responseIdOf(record)}`,
     object: 'chat.completion',
@@ -143,18 +144,25 @@ export function renderOpenAiChatResponse(record: CallRecord): Record<string, unk
       index: 0,
       message: {
         role: 'assistant',
-        content: responseTextOf(record),
+        // Tool-call-only turns report null (the request side's convention
+        // too): an empty string would misrepresent "no text" as "text: ''".
+        content: body.length > 0 ? body : null,
         ...reasoning.length > 0 ? { reasoning_content: reasoning } : {},
         ...toolCalls.length > 0 ? { tool_calls: toolCalls } : {},
       },
       finish_reason: FINISH_REASON[record.response?.finish.kind ?? 'stop'] ?? 'stop',
     }],
     usage: {
-      prompt_tokens: usage?.inputTokens ?? 0,
+      // OpenAI reports the TOTAL input here (cached_tokens is a subset
+      // breakdown), so the disjoint neutral counts fold back together.
+      prompt_tokens: billedInputOf(usage),
       completion_tokens: usage?.outputTokens ?? 0,
-      total_tokens: (usage?.inputTokens ?? 0) + (usage?.outputTokens ?? 0),
+      total_tokens: billedInputOf(usage) + (usage?.outputTokens ?? 0),
       ...usage?.cacheReadTokens === undefined ? {} : {
         prompt_tokens_details: { cached_tokens: usage.cacheReadTokens },
+      },
+      ...usage?.reasoningTokens === undefined ? {} : {
+        completion_tokens_details: { reasoning_tokens: usage.reasoningTokens },
       },
     },
   }

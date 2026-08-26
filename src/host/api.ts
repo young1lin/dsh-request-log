@@ -29,8 +29,6 @@ interface WebServerFace {
 }
 
 const DEFAULT_LIMIT = 50
-/** Matches the store's default per-session cap; a full ledger fits one page. */
-const MAX_LIMIT = 2000
 
 /**
  * Percent-decode one path segment. Malformed sequences (e.g. %FF, lone
@@ -65,6 +63,11 @@ function drain(req: IncomingMessage): void {
 export function installApi(ctx: Context, store: CallStore, version: string): () => void {
   const webServer = (ctx as Context & { webServer?: WebServerFace }).webServer
   if (webServer === undefined || typeof webServer.register !== 'function') return () => {}
+  // Derived from the live store config (not a frozen constant) so a
+  // deployment raising maxCallsPerSession above 2000 can still page its
+  // whole ledger — a full session then fits a single page.
+  const MAX_LIMIT = Math.max(store.maxCallsPerSession, DEFAULT_LIMIT)
+  const logger = ctx.logger
 
   return webServer.register({
     kind: 'prefix',
@@ -96,7 +99,8 @@ export function installApi(ctx: Context, store: CallStore, version: string): () 
           const offset = Number.isFinite(offsetRaw) ? Math.max(Math.trunc(offsetRaw), 0) : 0
           try {
             sendJson(res, 200, await store.listIndex(sessionId, limit, offset))
-          } catch {
+          } catch (error) {
+            logger?.warn('dsh-request-log: index read failed: %o', error)
             sendJson(res, 500, { error: 'index read failed' })
           }
           return
@@ -114,7 +118,8 @@ export function installApi(ctx: Context, store: CallStore, version: string): () 
             } else {
               sendJson(res, 200, record)
             }
-          } catch {
+          } catch (error) {
+            logger?.warn('dsh-request-log: record read failed: %o', error)
             sendJson(res, 500, { error: 'record read failed' })
           }
           return

@@ -1,6 +1,12 @@
 /**
  * The Requests tab body: session call summary, the call list with timing and
  * token columns, and drill-down into the detail viewer.
+ *
+ * The host view ring renders only the ACTIVE conversation.view tab, so every
+ * switch away unmounts this component and its useState with it. What the
+ * reader was on — the open detail, its side/format, the loaded window, the
+ * Auto toggle — therefore lives in per-session memory (./persist) and re-seeds
+ * the ledger on remount.
  */
 
 import { React, h } from './react'
@@ -8,6 +14,7 @@ import type { CallIndexEntry } from '../shared/types'
 import { ApiError, fetchCalls, formatDateTime, formatDuration, formatPct, formatTime, formatTokens, formatTokPerSec } from './data'
 import { makeCallDetail } from './detail'
 import { interp, type ViewDict } from './dict'
+import { PAGE_SIZE, loadViewMemory, updateViewMemory, type DetailPrefs, type SelectedCall } from './persist'
 
 export interface DictSource {
   dictOf: () => ViewDict
@@ -21,12 +28,40 @@ function useDict(source: DictSource): ViewDict {
   return source.dictOf()
 }
 
+const NO_CALLS: CallIndexEntry[] = []
+
+/** The element that actually scrolls for this ledger: .rl-root itself or a bounded ancestor pane. */
+function findScroller(root: HTMLElement): HTMLElement {
+  let node: HTMLElement | null = root
+  while (node !== null) {
+    if (node.scrollHeight > node.clientHeight + 1) return node
+    node = node.parentElement
+  }
+  return root
+}
+
+/**
+ * Reverse newest-first rows into the oldest-first ledger, REUSING the entry
+ * objects of a previous load wherever the id matches: React.memo(CallRow)
+ * then skips re-diffing unchanged rows across the 3s poll, because their
+ * `call` prop keeps its object identity.
+ */
+function reconcileCalls(next: CallIndexEntry[], prev: CallIndexEntry[] | undefined): CallIndexEntry[] {
+  if (prev === undefined) return next.slice().reverse()
+  const prevById = new Map(prev.map(call => [call.id, call]))
+  const reversed = next.slice().reverse()
+  for (let i = 0; i < reversed.length; i += 1) {
+    const call = reversed[i]
+    const old = call === undefined ? undefined : prevById.get(call.id)
+    if (old !== undefined) reversed[i] = old
+  }
+  return reversed
+}
+
 type LoadState =
   | { kind: 'loading' }
   | { kind: 'error'; message: string }
-  | { kind: 'ready'; calls: CallIndexEntry[]; total: number }
-
-const PAGE_SIZE = 100
+  | { kind: 'ready'; calls: CallIndexEntry[]; total: number; /** Set when the LAST refresh failed and the data shown is stale. */ warning?: string }
 
 function StatusDot(props: { status: string }): React.ReactElement {
   const cls = props.status === 'ok' ? 'rl-dot-ok' : props.status === 'open' ? 'rl-dot-open' : 'rl-dot-bad'
@@ -34,23 +69,35 @@ function StatusDot(props: { status: string }): React.ReactElement {
 }
 
 /**
- * The prior call of the same logical conversation (oldest-first list):
- * the nearest OLDER entry — a lower index — with a different request hash
+ * Precompute, for every entry, the id of the prior call of the same logical
+ * conversation: the nearest OLDER entry with a different request hash
  * (retries share one), the same purpose, and a successful finish — what the
- * Responses chained view reconstructs its delta against.
+ * Responses chained view reconstructs its delta against. One pass, O(n):
+ * per purpose the stack of recent ok entries has strictly alternating
+ * hashes (same-hash retries collapse into one slot), so a query consults at
+ * most the top two slots.
  */
-function prevIdOf(calls: CallIndexEntry[], index: number): string | undefined {
-  const current = calls[index]
-  if (current === undefined) return undefined
-  for (let j = index - 1; j >= 0; j -= 1) {
-    const candidate = calls[j]
-    if (candidate === undefined) continue
-    if (candidate.requestHash === current.requestHash) continue
-    if (candidate.purpose !== current.purpose) continue
-    if (candidate.status !== 'ok') continue
-    return candidate.id
+function prevIdsOf(calls: CallIndexEntry[]): Map<string, string | undefined> {
+  const result = new Map<string, string | undefined>()
+  const chains = new Map<string, { hash: string; id: string }[]>()
+  for (const call of calls) {
+    const chain = chains.get(call.purpose ?? '') ?? []
+    let prevId: string | undefined = undefined
+    // Same hash as the stack top means "same logical call" — look one slot
+    // deeper; adjacent slots always differ in hash by construction.
+    for (let i = chain.length - 1; i >= 0 && prevId === undefined; i -= 1) {
+      const slot = chain[i]
+      if (slot.hash !== call.requestHash) prevId = slot.id
+    }
+    result.set(call.id, prevId)
+    if (call.status === 'ok') {
+      const top = chain[chain.length - 1]
+      if (top === undefined || top.hash !== call.requestHash) chain.push({ hash: call.requestHash, id: call.id })
+      else top.id = call.id
+    }
+    chains.set(call.purpose ?? '', chain)
   }
-  return undefined
+  return result
 }
 
 /** Sum the loaded window's usage into the overview card. */
@@ -82,7 +129,9 @@ function summarize(calls: CallIndexEntry[]): {
   return { count: calls.length, billed, input, cacheRead, cacheWrite, output }
 }
 
-function CallRow(props: {
+// Memoized: a 3s poll re-renders the whole ledger, but an unchanged row
+// (same call object reference, same dict) skips its subtree diff entirely.
+const CallRow = React.memo(function CallRow(props: {
   call: CallIndexEntry
   dict: ViewDict
   onOpen: () => void
@@ -117,6 +166,12 @@ function CallRow(props: {
     h('span', { className: 'rl-cell rl-c-model' },
       h(StatusDot, { status: call.status }),
       h('span', { className: 'rl-model-name', title: call.provider + ' · ' + call.model }, call.model),
+      call.step !== undefined
+        ? h('span', {
+            className: 'rl-badge rl-badge-step',
+            title: dict.stepHint,
+          }, '#' + String(call.step))
+        : null,
       call.purpose !== undefined
         ? h('span', { className: 'rl-badge' }, call.purpose)
         : null,
@@ -151,21 +206,43 @@ function CallRow(props: {
         : ' · ' + call.toolNames.join(', ')),
     },
       String(call.messageCount) + '/' + String(call.toolCount)))
-}
+})
 
 export function makeRequestLogView(source: DictSource): (props: { sessionId?: string }) => React.ReactElement {
+  // Built once per source: a stable component identity, so the remounts that
+  // matter are the session-keyed ones below, not a re-created factory.
+  const CallDetail = makeCallDetail(source)
+
   function RequestLogView(props: { sessionId?: string }): React.ReactElement {
     const dict = useDict(source)
-    const CallDetail = React.useMemo(() => makeCallDetail(source), [source])
     const sessionId = props.sessionId
+    if (typeof sessionId !== 'string' || sessionId === '') {
+      return h('div', { className: 'rl-root' },
+        h('div', { className: 'rl-empty' }, dict.emptyHint))
+    }
+    // Keyed per session: switching sessions remounts the ledger, so nothing
+    // (open detail, loaded window, Auto) can leak from one session into
+    // another — and the remount re-seeds from that session's memory, bringing
+    // back what the reader left on when the tab was last closed.
+    return h(SessionLedger, { key: sessionId, sessionId, dict })
+  }
+
+  function SessionLedger(props: { sessionId: string; dict: ViewDict }): React.ReactElement {
+    const dict = props.dict
+    const sessionId = props.sessionId
+    const [initial] = React.useState(() => loadViewMemory(sessionId))
     const [state, setState] = React.useState<LoadState>({ kind: 'loading' })
-    const [auto, setAuto] = React.useState(true)
-    const [selected, setSelected] = React.useState<{ id: string; prevId?: string } | null>(null)
+    const [auto, setAuto] = React.useState(initial.auto)
+    const [selected, setSelected] = React.useState<SelectedCall | null>(initial.selected)
     const [tick, setTick] = React.useState(0)
     // How many of the newest calls the ledger shows; "Load older" grows it.
     // One fetch of `limit` newest entries keeps refresh simple and the whole
     // loaded window consistent (the server caps it at its own MAX_LIMIT).
-    const [limit, setLimit] = React.useState(PAGE_SIZE)
+    // Restored from memory so a paged-in window survives a tab switch.
+    const [limit, setLimit] = React.useState(initial.limit)
+    // Latest detail reading position, mirroring the per-session memory: a
+    // newly opened call mounts with the side/format the reader last used.
+    const prefsRef = React.useRef<DetailPrefs>(initial.detail)
     // Chronological ledger like the Trajectory tab: oldest first, the view
     // pinned to the newest call at the bottom until the user scrolls away.
     // The real scroller may be .rl-root itself OR a bounded ancestor pane
@@ -173,6 +250,10 @@ export function makeRequestLogView(source: DictSource): (props: { sessionId?: st
     const scrollRef = React.useRef<HTMLDivElement | null>(null)
     const stickToBottom = React.useRef(true)
     const pinnedRef = React.useRef<HTMLElement | null>(null)
+    // Set right before "Load older" prepends rows: after the update lands,
+    // the layout effect grows scrollTop by the added height so the viewport
+    // stays anchored on the row the reader was looking at.
+    const prependAnchor = React.useRef<{ scroller: HTMLElement; height: number } | null>(null)
     const onScroll = React.useCallback((event?: { target?: EventTarget | null }): void => {
       const el = (event?.target ?? scrollRef.current) as HTMLElement | null
       if (el === null || el === undefined) return
@@ -182,17 +263,17 @@ export function makeRequestLogView(source: DictSource): (props: { sessionId?: st
       if (state.kind !== 'ready') return
       const root = scrollRef.current
       if (root === null) return
-      let node: HTMLElement | null = root
-      let scroller: HTMLElement | null = null
-      while (node !== null) {
-        if (node.scrollHeight > node.clientHeight + 1) { scroller = node; break }
-        node = node.parentElement
-      }
-      const target = scroller ?? root
+      const target = findScroller(root)
       if (pinnedRef.current !== target) {
         if (pinnedRef.current !== null) pinnedRef.current.removeEventListener('scroll', onScroll)
         target.addEventListener('scroll', onScroll, { passive: true })
         pinnedRef.current = target
+      }
+      const anchor = prependAnchor.current
+      if (anchor !== null && anchor.scroller === target) {
+        target.scrollTop += target.scrollHeight - anchor.height
+        prependAnchor.current = null
+        return
       }
       if (stickToBottom.current) target.scrollTop = target.scrollHeight
     }, [state, onScroll])
@@ -204,35 +285,94 @@ export function makeRequestLogView(source: DictSource): (props: { sessionId?: st
       setTick(value => value + 1)
     }, [])
 
+    // Every state that shapes what the reader sees writes through to the
+    // per-session memory, so an unmount (tab switch) and even a page refresh
+    // reopen on the same view.
+    const openCall = React.useCallback((call: SelectedCall): void => {
+      setSelected(call)
+      updateViewMemory(sessionId, { selected: call })
+    }, [sessionId])
+    const backToList = React.useCallback((): void => {
+      stickToBottom.current = true
+      setSelected(null)
+      updateViewMemory(sessionId, { selected: null })
+      setTick(value => value + 1)
+    }, [sessionId])
+    const onPrefsChange = React.useCallback((prefs: DetailPrefs): void => {
+      prefsRef.current = prefs
+      updateViewMemory(sessionId, { detail: prefs })
+    }, [sessionId])
+
     React.useEffect(() => {
-      if (typeof sessionId !== 'string' || sessionId === '') return
       let cancelled = false
+      // Aborting on cleanup also cancels the in-flight fetch itself (session
+      // switch, tab unmount) instead of letting it run to a discarded setState.
+      const abort = new AbortController()
       const load = async (): Promise<void> => {
         try {
-          const page = await fetchCalls(sessionId, limit, 0)
+          const page = await fetchCalls(sessionId, limit, 0, abort.signal)
           if (cancelled) return
           // The API pages newest-first; the ledger renders oldest-first so
           // the newest call sits at the bottom, like the Trajectory tab.
-          setState({ kind: 'ready', calls: page.calls.slice().reverse(), total: page.total })
+          setState(previous => previous.kind === 'ready'
+            ? { kind: 'ready', calls: reconcileCalls(page.calls, previous.calls), total: page.total }
+            : { kind: 'ready', calls: reconcileCalls(page.calls, undefined), total: page.total })
         } catch (error) {
-          if (cancelled) return
+          if (cancelled || abort.signal.aborted) return
           const message = error instanceof ApiError ? error.message : String(error)
-          setState({ kind: 'error', message })
+          // Fail-soft: one transient poll failure never throws away the
+          // loaded ledger — the data stays and a banner marks it stale. Only
+          // a session with nothing loaded yet degrades to the error screen.
+          setState(prev => prev.kind === 'ready'
+            ? { kind: 'ready', calls: prev.calls, total: prev.total, warning: message }
+            : { kind: 'error', message })
         }
       }
       void load()
-      return () => { cancelled = true }
+      return () => {
+        cancelled = true
+        abort.abort()
+      }
     }, [sessionId, tick, limit])
 
     React.useEffect(() => {
       if (!auto || selected !== null) return
-      const timer = setInterval(() => { setTick(value => value + 1) }, 3000)
+      const timer = setInterval(() => {
+        // A hidden tab cannot be read; skip the tick so the poll costs
+        // nothing while the conversation is in the background.
+        if (typeof document === 'object' && document.visibilityState === 'hidden') return
+        setTick(value => value + 1)
+      }, 3000)
       return () => clearInterval(timer)
     }, [auto, selected])
 
-    if (typeof sessionId !== 'string' || sessionId === '') {
-      return h('div', { className: 'rl-root' },
-        h('div', { className: 'rl-empty' }, dict.emptyHint))
+    // One O(n) pass per loaded-window change instead of a per-row scan. Must
+    // sit above the conditional returns: it is a hook like the rest.
+    const readyCalls = state.kind === 'ready' ? state.calls : NO_CALLS
+    const prevIds = React.useMemo(() => prevIdsOf(readyCalls), [readyCalls])
+    // Memoized row openers keyed by call id: React.memo(CallRow) only pays
+    // off when the onOpen prop is ALSO stable across the 3s poll re-renders.
+    const openersRef = React.useRef(new Map<string, () => void>())
+    const openers = openersRef.current
+    React.useEffect(() => {
+      const alive = new Set(readyCalls.map(call => call.id))
+      for (const id of openers.keys()) {
+        if (!alive.has(id)) openers.delete(id)
+      }
+    }, [readyCalls])
+    const openerOf = (call: CallIndexEntry): (() => void) => {
+      const existing = openers.get(call.id)
+      if (existing !== undefined) return existing
+      const opener = (): void => {
+        const prevId = prevIds.get(call.id)
+        openCall({
+          id: call.id,
+          ...prevId === undefined ? {} : { prevId },
+          ...call.step === undefined ? {} : { step: call.step },
+        })
+      }
+      openers.set(call.id, opener)
+      return opener
     }
 
     if (selected !== null) {
@@ -240,7 +380,10 @@ export function makeRequestLogView(source: DictSource): (props: { sessionId?: st
         sessionId,
         callId: selected.id,
         ...selected.prevId === undefined ? {} : { prevId: selected.prevId },
-        onBack: () => { stickToBottom.current = true; setSelected(null); refresh() },
+        ...selected.step === undefined ? {} : { step: selected.step },
+        initialPrefs: prefsRef.current,
+        onPrefsChange,
+        onBack: backToList,
       })
     }
 
@@ -275,12 +418,18 @@ export function makeRequestLogView(source: DictSource): (props: { sessionId?: st
     // reader arrives.
     return h('div', { className: 'rl-root', ref: scrollRef, onScroll },
       h('div', { className: 'rl-fixed-head' },
+        state.warning === undefined ? null : h('div', { className: 'rl-warn', title: state.warning },
+          dict.stale),
         h('div', { className: 'rl-head' },
           h('span', { className: 'rl-head-title' }, dict.calls + ' · ' + String(state.total)),
           h('span', { className: 'rl-head-actions' },
             h('button', {
               className: 'rl-btn' + (auto ? ' rl-btn-on' : ''),
-              onClick: () => { setAuto(value => !value) },
+              onClick: () => {
+                const next = !auto
+                setAuto(next)
+                updateViewMemory(sessionId, { auto: next })
+              },
             }, dict.auto),
             h('button', { className: 'rl-btn', onClick: refresh }, dict.refresh))),
         h('div', { className: 'rl-stats' },
@@ -295,7 +444,16 @@ export function makeRequestLogView(source: DictSource): (props: { sessionId?: st
         ? h('div', { className: 'rl-loadmore' },
             h('button', {
               className: 'rl-btn',
-              onClick: () => { setLimit(value => value + PAGE_SIZE) },
+              onClick: () => {
+                const root = scrollRef.current
+                if (root !== null) {
+                  const scroller = findScroller(root)
+                  prependAnchor.current = { scroller, height: scroller.scrollHeight }
+                }
+                const next = limit + PAGE_SIZE
+                setLimit(next)
+                updateViewMemory(sessionId, { limit: next })
+              },
             }, interp(dict.loadMore, { count: state.total - state.calls.length })))
         : null,
       h('div', { className: 'rl-table' },
@@ -312,16 +470,14 @@ export function makeRequestLogView(source: DictSource): (props: { sessionId?: st
           h('span', { className: 'rl-cell rl-c-num' }, dict.colCacheWrite),
           h('span', { className: 'rl-cell rl-c-num rl-th-out' }, dict.colOut),
           h('span', { className: 'rl-cell rl-c-size' }, dict.size)),
-        state.calls.map((call, index) => {
-          const prevId = prevIdOf(state.calls, index)
-          return h(CallRow, {
-            key: call.id,
-            call,
-            dict,
-            onOpen: () => { setSelected({ id: call.id, ...prevId === undefined ? {} : { prevId } }) },
-          })
-        })))
+        state.calls.map(call => h(CallRow, {
+          key: call.id,
+          call,
+          dict,
+          onOpen: openerOf(call),
+        }))))
   }
 
   return RequestLogView
 }
+

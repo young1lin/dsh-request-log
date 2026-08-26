@@ -27,6 +27,8 @@ const DICT_EN: ViewDict = {
   emptyHint: 'Send a message in this session — every model call (retries included) will be listed here.',
   error: 'Failed to load',
   retry: 'Retry',
+  stepHint: 'Step of this session\'s conversation loop — attempt 1 opens a step, retries share it; auxiliary calls (compaction / title) take none',
+  stale: 'Last refresh failed — showing previously loaded data',
   refresh: 'Refresh',
   auto: 'Auto',
   calls: 'Provider calls',
@@ -57,6 +59,7 @@ const DICT_EN: ViewDict = {
   loadMore: 'Load older ({count} more)',
   detail: {
     back: 'Back',
+    step: 'Step',
     timingCard: 'Timing',
     startedAt: 'Started',
     waitPhase: 'Request wait',
@@ -107,6 +110,8 @@ const DICT_ZH: ViewDict = {
   emptyHint: '在本会话发送一条消息 —— 每次模型调用（含重试）都会列在这里。',
   error: '加载失败',
   retry: '重试',
+  stepHint: '本会话对话循环的步骤序号 —— 每次新调用开启一步，重试沿用其所属步骤；辅助调用（压缩 / 标题）不占步骤',
+  stale: '上次刷新失败 —— 当前展示的是已加载的数据',
   refresh: '刷新',
   auto: '自动',
   calls: '模型调用',
@@ -137,6 +142,7 @@ const DICT_ZH: ViewDict = {
   loadMore: '加载更早的调用（还有 {count} 条）',
   detail: {
     back: '返回',
+    step: '步骤',
     timingCard: '耗时',
     startedAt: '开始时间',
     waitPhase: '请求等待',

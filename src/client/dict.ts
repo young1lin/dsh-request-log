@@ -9,6 +9,8 @@ export function interp(template: string, params: Record<string, string | number>
 
 export interface DetailDict {
   back: string
+  /** Label of the step row in the call card; {n} = step number. */
+  step: string
   timingCard: string
   startedAt: string
   waitPhase: string
@@ -58,6 +60,10 @@ export interface ViewDict {
   emptyHint: string
   error: string
   retry: string
+  /** Tooltip: what the #N step badge on a row means. */
+  stepHint: string
+  /** Banner shown when the last refresh failed but stale data is kept. */
+  stale: string
   refresh: string
   auto: string
   calls: string

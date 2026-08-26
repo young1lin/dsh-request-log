@@ -11,7 +11,7 @@
 
 import { React, h } from './react'
 import type { CallIndexEntry } from '../shared/types'
-import { ApiError, fetchCalls, formatDateTime, formatDuration, formatPct, formatTime, formatTokens, formatTokPerSec } from './data'
+import { ApiError, fetchCalls, formatDateTime, formatDuration, formatPct, formatTime, formatToolDispatches, formatTokens, formatTokPerSec } from './data'
 import { makeCallDetail } from './detail'
 import { interp, type ViewDict } from './dict'
 import { PAGE_SIZE, loadViewMemory, updateViewMemory, type DetailPrefs, type SelectedCall } from './persist'
@@ -157,6 +157,7 @@ const CallRow = React.memo(function CallRow(props: {
   const hit = formatTokens(usage?.cacheReadTokens)
   const write = formatTokens(usage?.cacheWriteTokens)
   const out = formatTokens(usage?.outputTokens)
+  const called = formatToolDispatches(call.calledTools)
   return h('button', { className: 'rl-row', onClick: props.onOpen },
     h('span', {
       className: 'rl-cell rl-c-time',
@@ -201,11 +202,13 @@ const CallRow = React.memo(function CallRow(props: {
     h('span', { className: numCls(out, 'rl-td-out') }, out),
     h('span', {
       className: 'rl-cell rl-c-size',
-      title: dict.sizeHint + (call.toolNames === undefined || call.toolNames.length === 0
-        ? ''
-        : ' · ' + call.toolNames.join(', ')),
+      title: dict.sizeHint
+        + (called === '' ? '' : ' · ' + called)
+        + (call.toolNames === undefined || call.toolNames.length === 0
+          ? ''
+          : ' · ' + call.toolNames.join(', ')),
     },
-      String(call.messageCount) + '/' + String(call.toolCount)))
+      String(call.messageCount) + '/' + String(call.toolCalls ?? '\u2013')))
 })
 
 export function makeRequestLogView(source: DictSource): (props: { sessionId?: string }) => React.ReactElement {

@@ -7,9 +7,9 @@
  */
 
 import { React, h } from './react'
-import type { CallRecord } from '../shared/types'
+import { countToolCalls, type CallRecord } from '../shared/types'
 import { WIRE_PROTOCOLS, detectProtocol, renderWire, responsesChainOf } from '../wire'
-import { ApiError, fetchCall, formatDateTime, formatDuration, formatPct, formatTokens, formatTokPerSec } from './data'
+import { ApiError, fetchCall, formatDateTime, formatDuration, formatPct, formatToolDispatches, formatTokens, formatTokPerSec } from './data'
 import { JsonTree, type TreeMode } from './json'
 import { interp } from './dict'
 import type { DetailFormat, DetailPrefs, DetailSide } from './persist'
@@ -169,6 +169,11 @@ export function makeCallDetail(source: DictSource): (props: {
     const billed = usage === undefined
       ? undefined
       : usage.inputTokens + (usage.cacheReadTokens ?? 0) + (usage.cacheWriteTokens ?? 0)
+    // What the response actually invoked: native tool-call blocks, with a
+    // run_code program's inner dispatch sites standing in for the transport.
+    const dispatches = record.response === undefined ? undefined : countToolCalls(record.response.blocks)
+    const toolCalls = dispatches?.total
+    const called = formatToolDispatches(dispatches?.dispatches)
 
     return h('div', { className: 'rl-root' },
       h('div', { className: 'rl-head' },
@@ -242,8 +247,11 @@ export function makeCallDetail(source: DictSource): (props: {
             + (record.response?.finish.failure !== undefined
               ? ' · ' + record.response.finish.failure.message
               : '')),
-          h(Row, { label: d.size }, String(record.request.messages.length) + ' ' + d.msgs
-            + ' · ' + String(record.request.tools?.length ?? 0) + ' ' + d.toolsLabel))),
+          h(Row, {
+            label: d.size,
+            title: d.callsHint + (called === '' ? '' : ' — ' + called),
+          }, String(record.request.messages.length) + ' ' + d.msgs
+            + ' · ' + (toolCalls === undefined ? '\u2013' : String(toolCalls)) + ' ' + d.callsLabel))),
       h('div', { className: 'rl-head rl-head-tabs' },
         h('span', { className: 'rl-tabs' },
           h('button', {

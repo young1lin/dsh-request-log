@@ -11,6 +11,7 @@ import {
   formatPct,
   formatTime,
   formatTokPerSec,
+  formatToolDispatches,
   formatTokens,
 } from '../src/client/data.ts'
 
@@ -88,5 +89,16 @@ describe('formatTime / formatDateTime', () => {
   it('dashes when unknown', () => {
     expect(formatTime(undefined)).toBe(DASH)
     expect(formatDateTime(undefined)).toBe(DASH)
+  })
+})
+
+describe('formatToolDispatches', () => {
+  it('renders empty for undefined or empty input', () => {
+    expect(formatToolDispatches(undefined)).toBe('')
+    expect(formatToolDispatches([])).toBe('')
+  })
+  it('renders single calls bare and repeats with a multiplier', () => {
+    expect(formatToolDispatches([{ name: 'read', count: 1 }])).toBe('read')
+    expect(formatToolDispatches([{ name: 'read', count: 1 }, { name: 'pwsh', count: 2 }])).toBe('read · pwsh ×2')
   })
 })

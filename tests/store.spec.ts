@@ -199,4 +199,73 @@ describe('CallStore', () => {
     expect(entry.attempt).toBe(3)
     expect(entry.purpose).toBe('compaction')
   })
+
+  it('toIndexEntry counts native tool-call blocks as invocations', () => {
+    const entry = toIndexEntry(recordOf({
+      id: 'native',
+      response: {
+        blocks: [
+          { type: 'text', text: 'thinking' },
+          { type: 'tool-call', id: 'c1', name: 'lookup', arguments: '{"q":1}' },
+          { type: 'tool-call', id: 'c2', name: 'read', arguments: '{}' },
+          { type: 'tool-call', id: 'c3', name: 'lookup', arguments: '{}' },
+        ],
+        usage: { inputTokens: 1, outputTokens: 2 },
+        finish: { kind: 'tool-calls' },
+        chunkCount: 4,
+      },
+    }))
+    expect(entry.toolCalls).toBe(3)
+    expect(entry.calledTools).toEqual([
+      { name: 'lookup', count: 2 },
+      { name: 'read', count: 1 },
+    ])
+  })
+
+  it('counts a run_code program by its inner dispatch sites', () => {
+    const code = 'const a = await tools.read({})\nawait tools[\'grep\']({})\nfor (const x of [1, 2]) await tools.pwsh({})'
+    const entry = toIndexEntry(recordOf({
+      id: 'code',
+      request: {
+        messages: [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }],
+        tools: [{ name: 'run_code', description: '', parameters: {} }],
+      },
+      response: {
+        blocks: [{ type: 'tool-call', id: 'c9', name: 'run_code', arguments: JSON.stringify({ code, description: 'd' }) }],
+        usage: { inputTokens: 1, outputTokens: 2 },
+        finish: { kind: 'tool-calls' },
+        chunkCount: 2,
+      },
+    }))
+    // Static SITE count: the loop body's tools.pwsh site counts once,
+    // however many times it runs at runtime.
+    expect(entry.toolCalls).toBe(3)
+    expect(entry.calledTools).toEqual([
+      { name: 'read', count: 1 },
+      { name: 'grep', count: 1 },
+      { name: 'pwsh', count: 1 },
+    ])
+    expect(entry.toolNames).toEqual(['run_code'])
+  })
+
+  it('falls back to the transport call when the program is opaque', () => {
+    const entry = toIndexEntry(recordOf({
+      id: 'dyn',
+      response: {
+        blocks: [{ type: 'tool-call', id: 'c9', name: 'run_code', arguments: JSON.stringify({ code: 'await tools[k]({})' }) }],
+        usage: { inputTokens: 1, outputTokens: 2 },
+        finish: { kind: 'tool-calls' },
+        chunkCount: 2,
+      },
+    }))
+    expect(entry.toolCalls).toBe(1)
+    expect(entry.calledTools).toEqual([{ name: 'run_code', count: 1 }])
+  })
+
+  it('omits toolCalls for unsettled responses and zeroes text-only ones', () => {
+    expect(toIndexEntry(recordOf({ id: 'open', response: undefined })).toolCalls).toBeUndefined()
+    const text = toIndexEntry(recordOf({ id: 'text' }))
+    expect(text.toolCalls).toBe(0)
+    expect(text.calledTools).toBeUndefined()
+  })
 })

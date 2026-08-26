@@ -141,7 +141,17 @@ export interface CallIndexEntry {
   finishKind?: RecordedFinish['kind']
   finishMessage?: string
   messageCount: number
-  toolCount: number
+  /**
+   * Tool invocations this call's response made: every native tool-call block
+   * counts once, except a `run_code` block, which counts its program's inner
+   * `tools.x(...)` dispatch sites instead (a static site count — loops and
+   * dynamic dispatches are approximated by their sites). Undefined only when
+   * the response never settled (no blocks to count).
+   */
+  toolCalls?: number
+  /** The dispatch breakdown behind {@link toolCalls}: native tool names, or
+   * the inner tool names a run_code program calls, each with its count. */
+  calledTools?: ToolDispatch[]
   /** Names of the tool definitions the request carried (tooltip fodder). */
   toolNames?: string[]
   /** Sum of request system+message text length (chars), a cheap size proxy. */
@@ -162,6 +172,72 @@ export interface HealthResponse {
   ok: true
   plugin: 'dsh-request-log'
   version: string
+}
+
+/** One called tool (or one of a run_code program's inner tools) with its count. */
+export interface ToolDispatch {
+  name: string
+  count: number
+}
+
+/**
+ * Dispatch sites inside a run_code program body: `tools.name(...)` and quoted
+ * `tools['name'](...)` call sites. A static site count — a loop runs one site
+ * many times, a dynamic `tools[key](...)` read exposes no site — so it
+ * approximates the invocations without ever miscounting structure.
+ */
+const TOOL_DISPATCH_SITE = /\btools(?:\.([A-Za-z_$][\w$]*)|\[\s*(['"])([^'"\]]+)\2\s*\])\s*\(/g
+
+/** Read a run_code tool-call's program body, whatever shape `arguments` took. */
+function programCodeOf(block: RecordedBlock): string | undefined {
+  const raw = block.arguments
+  let args: unknown = raw
+  if (typeof raw === 'string') {
+    try {
+      args = JSON.parse(raw)
+    } catch {
+      return undefined
+    }
+  }
+  if (args !== null && typeof args === 'object' && typeof (args as { code?: unknown }).code === 'string') {
+    return (args as { code: string }).code
+  }
+  return undefined
+}
+
+/**
+ * Count the tool invocations a response's tool-call blocks stand for: native
+ * blocks count once each; a `run_code` block counts its program's inner
+ * dispatch sites, falling back to 1 (the transport call itself) when the
+ * program is opaque — no parseable code or no static sites.
+ */
+export function countToolCalls(blocks: RecordedBlock[]): { total: number, dispatches: ToolDispatch[] } {
+  const order: string[] = []
+  const counts = new Map<string, number>()
+  let total = 0
+  const bump = (name: string, by: number): void => {
+    const prev = counts.get(name)
+    if (prev === undefined) order.push(name)
+    counts.set(name, prev === undefined ? by : prev + by)
+    total += by
+  }
+  for (const block of blocks) {
+    if (block.type !== 'tool-call') continue
+    const name = typeof block.name === 'string' && block.name !== '' ? block.name : 'tool'
+    if (name === 'run_code') {
+      const code = programCodeOf(block)
+      if (code !== undefined) {
+        let sites = 0
+        for (const match of code.matchAll(TOOL_DISPATCH_SITE)) {
+          bump(match[1] ?? match[3] ?? 'tool', 1)
+          sites += 1
+        }
+        if (sites > 0) continue
+      }
+    }
+    bump(name, 1)
+  }
+  return { total, dispatches: order.map(name => ({ name, count: counts.get(name) ?? 0 })) }
 }
 
 /** Project an index entry out of a full record (host-side, exported for tests). */
@@ -194,7 +270,13 @@ export function toIndexEntry(record: CallRecord): CallIndexEntry {
     ...record.response === undefined ? {} : { finishKind: record.response.finish.kind },
     ...record.response?.finish.failure === undefined ? {} : { finishMessage: record.response.finish.failure.message },
     messageCount: record.request.messages.length,
-    toolCount: record.request.tools?.length ?? 0,
+    ...(record.response === undefined ? {} : (() => {
+      const { total, dispatches } = countToolCalls(record.response.blocks)
+      return {
+        toolCalls: total,
+        ...(dispatches.length === 0 ? {} : { calledTools: dispatches }),
+      }
+    })()),
     ...(record.request.tools === undefined ? {} : { toolNames: record.request.tools.map(tool => tool.name) }),
     requestChars,
     responseBlockKinds,

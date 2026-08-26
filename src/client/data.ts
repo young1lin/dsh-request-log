@@ -3,9 +3,15 @@
  * with light polling while the session is running.
  */
 
-import type { CallIndexResponse, CallRecord } from '../shared/types'
+import type { CallIndexResponse, CallRecord, ToolDispatch } from '../shared/types'
 
 const PREFIX = '/dsh-request-log'
+
+/** Render a dispatch breakdown for tooltips: `pwsh ×2 · read`; empty input renders ''. */
+export function formatToolDispatches(dispatches: ToolDispatch[] | undefined): string {
+  if (dispatches === undefined || dispatches.length === 0) return ''
+  return dispatches.map(({ name, count }) => count === 1 ? name : name + ' ×' + String(count)).join(' · ')
+}
 
 export class ApiError extends Error {
   constructor(readonly status: number, message: string) {

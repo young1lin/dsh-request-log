@@ -38,7 +38,9 @@ export interface DetailDict {
   finish: string
   size: string
   msgs: string
-  toolsLabel: string
+  callsLabel: string
+  /** Tooltip on the size row: what the tool-call count counts. */
+  callsHint: string
   request: string
   response: string
   neutral: string

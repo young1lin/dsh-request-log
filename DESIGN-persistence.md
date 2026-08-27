@@ -471,3 +471,85 @@ IGNORES v2 lines via the foreign-schema skip at L102 — degraded view, zero cor
 - src/host/capture.ts: NO changes (speaks CallRecord; conversion at the store boundary —
   CaptureStore.append signature intact).
 - src/host/api.ts: NO changes (endpoints identical; degradation rides record shape).
+
+---
+
+## 10. v3: tree objects
+
+Shipped from docs/superpowers/plans/2026-08-27-v3-tree-persistence.md. This section
+supersedes the envelope layout of §2.3; everything else — the object store (§3), compression
+(§4), crash ledger (§6.2) — carries over unchanged.
+
+### 10.1 What broke in v2
+
+Measured on a real 830-call store: 17.8 MB of v2 envelope lines indexed 5.14 MB (3,444
+objects) of unique blob content — a **3.5× index overhead** overall, 6.8× on the longest
+sessions. `refs[]` was **97.6 %** of envelope bytes (57 % on 6-call sessions, 99 % on
+135-call ones); the mean line was 26,271 B (max 53,701 B); `Σz` — what `maxFileBytes`
+counted — reached 262 MB against those 5.14 MB of real content. The v2 dedup removed
+redundancy from message *bodies* and reintroduced it in message *hashes*: every append
+re-listed every piece hash of the whole conversation, so envelope bytes grew as
+`calls × messages × ~85 B` — quadratic in session length.
+
+A second, independent flaw: `logicalBytesOfLine` summed `refs[].z` per envelope, counting
+a shared blob once per referencing record. On the largest real session that attributed
+62.82 MB to 5.44 MB of actual disk — **12.4×** — so `maxFileBytes: 128 MiB` began
+discarding history at roughly 10 MB of real occupancy.
+
+### 10.2 The v3 envelope
+
+    {"v":3,"id":"...","sessionId":"...","provider":"...","model":"...",
+     "requestHash":"...","attempt":1,"timing":{},"status":"ok","opts":{},
+     "tree":"<sha256>","resp":"<sha256>","zn":1234,"sum":{}}
+
+- `tree` — hash of a **tree object** naming this call's ordered request pieces (system, the
+  whole tools array, each message; canonical order `s`, `t`, `m…`). The response is NOT
+  a tree entry — it changes every call, so it rides `resp` and retries share one tree.
+- `resp` — the response body's blob hash; absent when the call never settled.
+- `zn` — compressed bytes of the objects THIS append created (new pieces, the tree node
+  when one was written, the response blob when new). A retry that materializes nothing bills
+  0. Exact by construction; this retires the 12.4× over-count above. `logicalBytesOfLine`
+  for a v3 line is simply `lineBytes + zn`.
+
+### 10.3 Tree objects
+
+A tree is an ordinary object in the store whose content is JSON in exactly this shape:
+
+    {"t":3,"p":"<parent tree sha256>","e":[{"k":"m","h":"<piece sha256>"}]}
+
+A **delta** (`p` present) adds its `e` entries on top of its parent; a **keyframe**
+(`p` absent) carries the complete ordered list. The writer emits a delta only when the new
+list STRICTLY EXTENDS the previous one for the same session and the chain depth is under
+`TREE_KEYFRAME_INTERVAL` (32); anything else — compaction rewriting history wholesale, a
+changed system prompt, a cold or evicted tree cache, a full chain — cuts a keyframe.
+Resolution walks parent pointers to the root and concatenates the nodes' entries root-first;
+the walk is bounded at `TREE_MAX_WALK` (64) and refuses repeated hashes, so corruption
+throws instead of looping or serving a partial list. A failed resolution degrades the whole
+request slot at the caller (`[request unavailable: tree <hash> could not be resolved]`),
+never a silently truncated conversation.
+
+Why `refs[]` had to go: an inline list cannot stay flat without moving state out of the
+line, and per-line independence — a trim that keeps the newest N lines must leave each of
+them resolvable alone — forbids putting the chain in the line. The immutable,
+content-addressed object store is exactly where shared structure belongs; concurrent writers
+converge instead of conflicting.
+
+### 10.4 GC
+
+The mark phase broadened from `"h":"<64hex>"` to any 64-hex string appearing in a line
+(over-marking only spares an object from GC; under-marking deletes live data), plus a
+transitive walk of every `"tree":"<hash>"` chain: each visited node contributes its own
+hash, its parent, and its entries to the reachable set. Failures in the tree-mark stage
+surface on `/health` via the sweep status. This shipped BEFORE the first v3 write — a
+sweep that cannot see through a tree would delete live pieces.
+
+### 10.5 Migration
+
+Readers accept v1, v2 and v3 lines forever. The lazy migrator converts within its per-cycle
+byte budget (newest files first): a v2 line already names its pieces, so conversion needs no
+blob reads — `refs` become tree entries and the `r` ref becomes `resp`; v1 lines bake
+their pieces first. Both run through one shared tree state per file, so a migrated file gets
+the same delta chain a freshly written one would rather than a keyframe per line.
+`format: 'v2'` is deliberately absent — v2 was never a release the config needed to pin;
+`format: 'v1'` remains the kill switch.
+

@@ -18,7 +18,6 @@ function entryOf(overrides: Partial<CallIndexEntry> & { id: string }): CallIndex
     status: 'ok',
     messageCount: 3,
     requestChars: 100,
-    responseBlockKinds: [],
     ...overrides,
   }
 }

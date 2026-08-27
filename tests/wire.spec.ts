@@ -508,9 +508,15 @@ describe('responses chaining', () => {
 })
 
 describe('protocol detection', () => {
+  it('defaults a plain openai route to ChatCompletion, not Responses', () => {
+    expect(detectProtocol({ ...record, provider: 'openai', model: 'gpt-4o' })).toBe('openai-completions')
+    expect(detectProtocol({ ...record, provider: 'openai-codex', model: 'gpt-5-codex' })).toBe('openai-responses')
+    expect(detectProtocol({ ...record, provider: 'anthropic', model: 'claude-opus-4' })).toBe('anthropic-messages')
+  })
+
   it('guesses from provider and model identities', () => {
     expect(detectProtocol({ ...record, provider: 'anthropic', model: 'claude-sonnet-5' })).toBe('anthropic-messages')
-    expect(detectProtocol({ ...record, provider: 'openai', model: 'gpt-5.2' })).toBe('openai-responses')
+    expect(detectProtocol({ ...record, provider: 'openai', model: 'gpt-5.2' })).toBe('openai-completions')
     expect(detectProtocol({ ...record, provider: 'openai-codex', model: 'gpt-5-codex' })).toBe('openai-responses')
     expect(detectProtocol({ ...record, provider: 'deepseek', model: 'deepseek-v4' })).toBe('openai-completions')
     expect(detectProtocol({ ...record, provider: 'openrouter', model: 'some-model' })).toBe('openai-completions')

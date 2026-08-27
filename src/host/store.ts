@@ -14,28 +14,31 @@
  * append, instead of fusing with it into permanently unparsable lines.
  * Each file is bounded in LOGICAL stored bytes (`maxFileBytes`): an append
  * that would cross the bound first trims the oldest records that make room.
- * Logical bytes = envelope line bytes + Σ refs[].z over kept envelopes,
- * counted once per referencing envelope (a documented upper bound when
- * blobs are shared). For pure-v1 files the measure degenerates to physical
- * bytes.
+ * Logical bytes = envelope line bytes + `zn` (v3: exactly the compressed
+ * bytes each append materialized; v2 lines keep the documented per-reference
+ * Σ refs[].z over-estimate until they migrate). For pure-v1 files the
+ * measure degenerates to physical bytes.
  *
- * V2 format (DESIGN-v2-persistence.md): each fresh line is a small
- * envelope `{"v":2,...}` carrying inline scalars plus `refs[]` — sha256
- * references into the global content-addressed object store under
- * `<dir>/objects/<2hex>/<sha256>.drl`. Blobs are uploaded INSIDE the same
+ * V3 format (DESIGN-persistence.md §10): each fresh line is a small envelope
+ * `{"v":3,...}` carrying inline scalars, ONE `tree` hash naming the whole
+ * ordered request piece list, the response body's hash (`resp`), and `zn`.
+ * Piece bodies and tree nodes live in the global content-addressed object
+ * store under `<dir>/objects/<2hex>/<sha256>.drl`; a tree is a keyframe or a
+ * delta chained by parent pointer (see ./tree.ts), so the line stays flat
+ * however long the session runs. Every object is uploaded INSIDE the same
  * serialized chain BEFORE the envelope line lands, so a persisted line
- * references only already-renamed objects. V1 lines stay first-class:
- * `entryOfLine` branches on a leading peek, and every trim/sweep rewrite
- * converts surviving lines to v2 (lazy migration riding the trims).
- * `format: 'v1'` freezes the legacy behavior byte-for-byte.
+ * references only already-renamed objects. V1 and V2 lines stay first-class
+ * readers forever: `entryOfLine` branches on a leading peek, and every
+ * trim/sweep rewrite converts surviving lines to v3 (lazy migration riding
+ * the trims). `format: 'v1'` freezes the legacy behavior byte-for-byte.
  *
  * Retention: files older than `retentionDays` are deleted on boot and on a
  * daily sweep; oversized ones trimmed to the newest records. The sweep also
  * runs the mark-sweep GC over the object store (reachable hashes extracted
- * from the live files it reads anyway; unreachable objects past a grace
- * floor reclaimed, tmp debris always) and migrates not-yet-v2 files
- * newest-first up to a per-cycle byte budget. All IO is fail-soft — a
- * store error never breaks a model call.
+ * from the live files it reads anyway, then expanded transitively through
+ * tree chains; unreachable objects past a grace floor reclaimed, tmp debris
+ * always) and migrates v1/v2 files newest-first up to a per-cycle byte
+ * budget. All IO is fail-soft — a store error never breaks a model call.
  *
  * @module dsh-request-log/host/store
  */
@@ -862,13 +865,13 @@ export class CallStore {
    */
   async listIndex(sessionId: string, limit: number, offset: number): Promise<CallIndexResponse> {
     const entries = await this.entriesOf(sessionId)
-    const newestFirst = entries.slice().reverse()
-    return {
-      calls: newestFirst.slice(offset, offset + limit),
-      total: entries.length,
-      offset,
-      limit,
-    }
+    const total = entries.length
+    // Newest-first paging without materializing a reversed copy of the whole
+    // session: the requested window is a slice off the tail, reversed.
+    const end = Math.max(total - offset, 0)
+    const start = Math.max(end - limit, 0)
+    const calls = entries.slice(start, end).reverse()
+    return { calls, total, offset, limit }
   }
 
   /** Fetch one full record by attempt id (parses only the matching line). */

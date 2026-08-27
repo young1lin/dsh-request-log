@@ -31,7 +31,6 @@ function entryOf(overrides: Partial<Entry>): Entry {
     status: 'ok',
     messageCount: 10,
     requestChars: 4_000,
-    responseBlockKinds: [],
     id: 'fixture-' + String(++fixtureSeq),
     ...overrides,
   }

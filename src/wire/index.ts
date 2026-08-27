@@ -38,9 +38,6 @@ export function detectProtocol(record: CallRecord): WireProtocol {
   if (provider.includes('codex') || provider.includes('responses') || model.includes('gpt-5-codex')) {
     return 'openai-responses'
   }
-  if (provider.includes('gpt') || provider === 'openai') {
-    return 'openai-responses'
-  }
   return 'openai-completions'
 }
 

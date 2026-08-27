@@ -24,7 +24,6 @@ function entryOf(overrides: Partial<Entry> & { id: string }): Entry {
     status: 'ok',
     messageCount: 1,
     requestChars: 10,
-    responseBlockKinds: [],
     ...overrides,
   }
 }

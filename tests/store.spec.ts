@@ -169,7 +169,6 @@ describe('CallStore', () => {
     expect(entry.messageCount).toBe(1)
     expect(entry.usage).toEqual({ inputTokens: 3, outputTokens: 4 })
     expect(entry.finishKind).toBe('stop')
-    expect(entry.responseBlockKinds).toEqual(['text'])
     expect(entry.durationMs).toBeUndefined()
   })
 

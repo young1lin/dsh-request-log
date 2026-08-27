@@ -139,6 +139,7 @@ export interface CallIndexEntry {
   status: CallStatus
   usage?: RecordedUsage
   finishKind?: RecordedFinish['kind']
+  /** Failure text of the finish chunk; no client reads it today. */
   finishMessage?: string
   messageCount: number
   /**
@@ -154,9 +155,9 @@ export interface CallIndexEntry {
   calledTools?: ToolDispatch[]
   /** Names of the tool definitions the request carried (tooltip fodder). */
   toolNames?: string[]
-  /** Sum of request system+message text length (chars), a cheap size proxy. */
+  /** Sum of request system+message text length (chars), a cheap size proxy.
+   * No client reads it today; kept as a documented size proxy. */
   requestChars: number
-  responseBlockKinds: string[]
 }
 
 /** Paged index response. */
@@ -248,8 +249,6 @@ export function toIndexEntry(record: CallRecord): CallIndexEntry {
       if (block.type === 'text' && typeof block.text === 'string') requestChars += block.text.length
     }
   }
-  const responseBlockKinds: string[] = []
-  for (const block of record.response?.blocks ?? []) responseBlockKinds.push(block.type)
   const timing = record.timing
   return {
     id: record.id,
@@ -277,7 +276,6 @@ export function toIndexEntry(record: CallRecord): CallIndexEntry {
     })()),
     ...(record.request.tools === undefined ? {} : { toolNames: record.request.tools.map(tool => tool.name) }),
     requestChars,
-    responseBlockKinds,
   }
 }
 // ---- v2 envelope vocabulary (deduplicating persistence) -----------------------
@@ -312,8 +310,6 @@ export interface EnvelopeOpts {
 export interface EnvelopeSum {
   messageCount: number
   requestChars: number
-  /** Response block kinds in order (may repeat); absent when no response settled. */
-  blockKinds?: string[]
   toolCalls?: number
   calledTools?: ToolDispatch[]
   toolNames?: string[]
@@ -391,11 +387,9 @@ export function envelopeSumOf(record: CallRecord): EnvelopeSum {
     messageCount: record.request.messages.length,
     requestChars,
     ...record.response === undefined ? {} : (() => {
-      const blockKinds = record.response.blocks.map(block => block.type)
       const { total, dispatches } = countToolCalls(record.response.blocks)
       const failure = record.response.finish.failure
       return {
-        blockKinds,
         toolCalls: total,
         ...(dispatches.length === 0 ? {} : { calledTools: dispatches }),
         ...record.response.usage === undefined ? {} : { usage: record.response.usage },
@@ -436,7 +430,6 @@ export function entryFromEnvelope(env: EnvelopeHead): CallIndexEntry {
     ...(sum.calledTools === undefined || sum.calledTools.length === 0 ? {} : { calledTools: sum.calledTools }),
     ...sum.toolNames === undefined ? {} : { toolNames: sum.toolNames },
     requestChars: sum.requestChars,
-    responseBlockKinds: sum.blockKinds ?? [],
   }
 }
 

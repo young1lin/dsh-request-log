@@ -95,6 +95,28 @@ describe('BlobStore', () => {
     expect(after).toBe(before) // untouched: content-addressed duplicates are no-ops
   })
 
+  it('does not recompress a piece already in the store', async () => {
+    const root = await tempDir()
+    const store = new BlobStore({ directory: root })
+    const z1 = await store.put(HASH, PIECE)
+    expect(store.compressions).toBe(1)
+    const z2 = await store.put(HASH, PIECE)
+    // The dedup hot path resends the whole history every call: a piece already
+    // on disk must cost a lookup, never a second deflate.
+    expect(store.compressions).toBe(1)
+    expect(z2).toBe(z1)
+  })
+
+  it('reports z for an existing object from its frame, matching a fresh compression', async () => {
+    const root = await tempDir()
+    const first = new BlobStore({ directory: root })
+    const z1 = await first.put(HASH, PIECE)
+    // A cold process (no in-memory knowledge) must derive the same z from disk.
+    const second = new BlobStore({ directory: root })
+    expect(await second.put(HASH, PIECE)).toBe(z1)
+    expect(second.compressions).toBe(0)
+  })
+
   it('rejects a put whose declared hash does not match its content', async () => {
     const store = new BlobStore({ directory: await tempDir() })
     await expect(store.put('f'.repeat(64), PIECE)).rejects.toThrow(/hash\/content mismatch/)

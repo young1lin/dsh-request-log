@@ -16,10 +16,22 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { mkdir, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
-import { deflateRawSync, inflateRawSync } from 'node:zlib'
+import { promisify } from 'node:util'
+import { deflateRaw as deflateRawCb, inflateRaw as inflateRawCb } from 'node:zlib'
+
+/**
+ * Compression runs off the event loop: the host process streams model
+ * responses and serves the web UI while these run, and a long session
+ * deflates hundreds of KB per settled call.
+ */
+const deflateRaw = promisify(deflateRawCb)
+const inflateRaw = promisify(inflateRawCb)
 
 /** Frame magic at the head of every `.drl` object file. */
 export const DRL_MAGIC = Buffer.from('DRL1', 'ascii')
+
+/** Fixed frame preamble: magic + one codec byte. The rest of the file IS the payload. */
+export const FRAME_HEADER_BYTES = DRL_MAGIC.length + 1
 
 /** Codec ids: payload framing only, no transport container. */
 export const CODEC_IDENTITY = 0
@@ -122,6 +134,8 @@ export interface GcResult { removedObjects: number; removedTemp: number }
 
 export class BlobStore {
   private readonly lru: ByteBudgetLru
+  /** Deflate calls actually performed (diagnostics: dedup effectiveness). */
+  private deflates = 0
   private readonly maxChunkBytes: number
   private readonly deflateLevel: number
   private readonly readyBuckets = new Set<string>()
@@ -164,28 +178,48 @@ export class BlobStore {
   }
 
   async has(hash: string): Promise<boolean> {
+    return (await this.payloadSizeOf(hash)) !== null
+  }
+
+  /**
+   * The stored payload length of an existing object, or null when it is
+   * absent (or too short to hold a frame at all - a truncated leftover is
+   * treated as absent so the next put rewrites it). The frame preamble is
+   * fixed-width and the payload is the whole rest of the file, so this is
+   * the exact `z` a fresh compression would report - WITHOUT compressing.
+   */
+  private async payloadSizeOf(hash: string): Promise<number | null> {
     try {
-      await stat(this.pathOf(hash))
-      return true
+      const { size } = await stat(this.pathOf(hash))
+      return size > FRAME_HEADER_BYTES ? size - FRAME_HEADER_BYTES : null
     } catch {
-      return false
+      return null
     }
   }
 
   /**
    * Materialize one immutable object for raw content. Returns the COMPRESSED
    * payload length (the envelope z), whether or not this call did the
-   * writing - duplicates of an existing hash are compressed to measure z but
-   * skip the disk write. Throws when the write genuinely failed AND the
-   * object is absent afterwards, so callers never persist an envelope
-   * referencing an unbaked hash.
+   * writing. Duplicates of an existing hash cost one stat: consecutive calls
+   * resend nearly the whole conversation, so compressing a piece already on
+   * disk just to measure z would spend the entire cost dedup exists to
+   * remove. Throws when the write genuinely failed AND the object is absent
+   * afterwards, so callers never persist an envelope referencing an unbaked
+   * hash.
    */
   async put(hash: string, raw: string | Buffer): Promise<number> {
     const buf = typeof raw === 'string' ? Buffer.from(raw, 'utf8') : raw
     if (hashOfContent(buf) !== hash) throw new Error('blob put rejected: hash/content mismatch')
+    const existing = await this.payloadSizeOf(hash)
+    if (existing !== null) return existing
     const codec = codecFor(buf.length, this.maxChunkBytes)
-    const payload = codec === CODEC_IDENTITY ? buf : deflateRawSync(buf, { level: this.deflateLevel })
-    if (await this.has(hash)) return payload.length
+    let payload: Buffer
+    if (codec === CODEC_IDENTITY) {
+      payload = buf
+    } else {
+      this.deflates += 1
+      payload = await deflateRaw(buf, { level: this.deflateLevel })
+    }
     const bucket = join(this.config.directory, hash.slice(0, 2))
     await this.ensureBucketDir(bucket)
     const temp = join(bucket, `tmp-${randomUUID()}`)
@@ -203,8 +237,9 @@ export class BlobStore {
       await rm(temp, { force: true }).catch(() => {})
     }
     // The caller must learn a bake failed BEFORE any envelope references it.
-    if (!(await this.has(hash))) throw new Error(`blob object write failed for ${hash}`)
-    return payload.length
+    const landed = await this.payloadSizeOf(hash)
+    if (landed === null) throw new Error(`blob object write failed for ${hash}`)
+    return landed
   }
 
   /**
@@ -220,10 +255,13 @@ export class BlobStore {
     const { codec, payload } = decodeFrame(frame)
     // Declared-size sanity gate applies to INFLATING only: identity payloads
     // are already materialized bytes bounded by the file itself.
-    const raw = codec === CODEC_IDENTITY ? Buffer.from(payload) : (() => {
+    let raw: Buffer
+    if (codec === CODEC_IDENTITY) {
+      raw = Buffer.from(payload)
+    } else {
       if (payload.length > this.maxChunkBytes) throw new Error(`oversized object payload for ${hash}`)
-      return inflateRawSync(payload)
-    })()
+      raw = await inflateRaw(payload)
+    }
     if (hashOfContent(raw) !== hash) throw new Error(`object content hash mismatch for ${hash}`)
     this.lru.put(hash, raw)
     return raw
@@ -232,6 +270,15 @@ export class BlobStore {
   /** In-memory occupancy probe (tests / diagnostics). */
   get cachedCount(): number {
     return this.lru.size
+  }
+
+  /**
+   * How many pieces this store actually compressed (tests / diagnostics).
+   * On the append path it should stay near the count of NEW pieces - a
+   * number climbing with total pieces means dedup stopped short-circuiting.
+   */
+  get compressions(): number {
+    return this.deflates
   }
 
   /**

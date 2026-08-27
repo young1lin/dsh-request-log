@@ -5,7 +5,7 @@
  */
 
 import { deflateRawSync } from 'node:zlib'
-import { mkdtemp, readdir, readFile, rm, stat, utimes, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readdir, readFile, rm, stat, utimes, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -150,8 +150,9 @@ describe('BlobStore', () => {
     await writeFile(objectPath, frame)
     await expect(store.get(HASH)).rejects.toThrow(/magic mismatch/)
 
-    // Restore requires an actual re-bake (CAS puts skip existing objects):
-    await rm(objectPath)
+    // A refused read drops the object, so the next put re-bakes it rather
+    // than short-circuiting on a file that is merely the right size.
+    expect(await store.has(HASH)).toBe(false)
     await store.put(HASH, PIECE)
     // Valid magic + VALID deflate stream but wrong content: the stream
     // inflates cleanly and content addressing catches the substitution.
@@ -160,15 +161,14 @@ describe('BlobStore', () => {
     await writeFile(objectPath, forged)
     await expect(store.get(HASH)).rejects.toThrow(/hash mismatch/)
     // A payload flipped INSIDE the deflate stream also never serves data:
-    await rm(objectPath)
+    expect(await store.has(HASH)).toBe(false)
     await store.put(HASH, PIECE)
     const flipped = Buffer.from(await readFile(objectPath))
     flipped[flipped.length - 1] ^= 0xff
     await writeFile(objectPath, flipped)
     await expect(store.get(HASH)).rejects.toThrow() // zlib error or hash mismatch, never data
 
-    // A genuinely corrupt store entry is removable so recovery can re-bake.
-    await rm(objectPath)
+    // Recovery needs no operator step: the failed read already reclaimed it.
     expect(await store.has(HASH)).toBe(false)
     const { z } = await store.put(HASH, PIECE)
     expect(z).toBeGreaterThan(0)
@@ -216,6 +216,8 @@ describe('BlobStore', () => {
     // A crash leftover and some junk in a bucket.
     const bucket = join(root, keptHash.slice(0, 2))
     await writeFile(join(bucket, 'tmp-crash-leftover'), 'junk')
+    const stale = new Date(Date.now() - DEFAULT_GC_GRACE_MS * 2)
+    await utimes(join(bucket, 'tmp-crash-leftover'), stale, stale)
 
     // Backdate ONLY the stale object past the grace floor.
     const old = new Date(Date.now() - DEFAULT_GC_GRACE_MS * 2)
@@ -224,7 +226,7 @@ describe('BlobStore', () => {
     const now = Date.now()
     const result = await store.gc(new Set([keptHash]), now)
     expect(result.removedObjects).toBe(1) // stale unreachable only
-    expect(result.removedTemp).toBe(1) // tmp debris regardless of reachability
+    expect(result.removedTemp).toBe(1) // crash debris, past the floor
     expect(await store.has(keptHash)).toBe(true) // referenced survives despite age
     expect(await store.has(freshHash)).toBe(true) // inside the grace floor
     expect(await store.has(staleHash)).toBe(false)
@@ -249,5 +251,88 @@ describe('BlobStore', () => {
     const store = new BlobStore({ directory: join(base, 'objects') })
     await store.put(HASH, PIECE)
     expect((await readdir(join(base, 'objects'))).length).toBeGreaterThan(0)
+  })
+  it('touches a deduplicated object back above the gc grace floor', async () => {
+    const root = await tempDir()
+    const store = new BlobStore({ directory: root })
+    await store.put(HASH, PIECE)
+    const path = join(root, HASH.slice(0, 2), HASH + '.drl')
+
+    // A hot object's mtime is its CREATION time — dedup hits never rewrite it.
+    // A fresh one must not be touched at all: that would be a wasted syscall
+    // on the append path's hottest branch.
+    const fresh = (await stat(path)).mtimeMs
+    expect((await store.put(HASH, PIECE)).created).toBe(false)
+    expect((await stat(path)).mtimeMs).toBe(fresh)
+
+    // Past the touch floor, the hit must lift it back over the grace line:
+    // the envelope referencing it has not landed yet, so a sweep whose
+    // reachable set predates this append would otherwise delete it.
+    const old = new Date(Date.now() - DEFAULT_GC_GRACE_MS * 2)
+    await utimes(path, old, old)
+    expect((await store.put(HASH, PIECE)).created).toBe(false)
+    expect(await store.gc(new Set<string>(), Date.now())).toEqual({ removedObjects: 0, removedTemp: 0 })
+    expect(await store.has(HASH)).toBe(true)
+  })
+
+  it('spares a staging file young enough to belong to a put still in flight', async () => {
+    const root = await tempDir()
+    const store = new BlobStore({ directory: root })
+    await store.put(HASH, PIECE)
+    const bucket = join(root, HASH.slice(0, 2))
+    const inFlight = join(bucket, 'tmp-in-flight')
+    await writeFile(inFlight, 'staged bytes')
+
+    // Deleting it would make the owning put's rename fail and lose the bake.
+    expect((await store.gc(new Set([HASH]), Date.now())).removedTemp).toBe(0)
+    expect(await readFile(inFlight, 'utf8')).toBe('staged bytes')
+  })
+
+  it('drops a corrupt object so the next put can re-bake it', async () => {
+    const root = await tempDir()
+    const store = new BlobStore({ directory: root })
+    await store.put(HASH, PIECE)
+    const path = join(root, HASH.slice(0, 2), HASH + '.drl')
+
+    // Size-preserving damage: put() short-circuits on the stat alone, so
+    // without a self-heal the slot degrades forever with the content in hand.
+    const frame = await readFile(path)
+    const damaged = Buffer.from(frame)
+    damaged[damaged.length - 1] ^= 0xff
+    await writeFile(path, damaged)
+
+    await expect(store.get(HASH)).rejects.toThrow()
+    expect(await store.has(HASH)).toBe(false)
+    expect((await store.put(HASH, PIECE)).created).toBe(true)
+    expect((await store.get(HASH)).toString('utf8')).toBe(PIECE)
+  })
+
+  it('refuses to inflate past the chunk ceiling without materializing the output', async () => {
+    const root = await tempDir()
+    const maxChunkBytes = 1024
+    const store = new BlobStore({ directory: root, maxChunkBytes })
+
+    // Compressed size is no bound on inflated size: 64 KiB of zeros frames
+    // into well under the ceiling and would expand unchecked before the hash
+    // check ever runs.
+    const bomb = Buffer.alloc(64 * 1024, 0)
+    const bombHash = hashOfContent(bomb)
+    const payload = deflateRawSync(bomb)
+    expect(payload.length).toBeLessThan(maxChunkBytes)
+    const bucket = join(root, bombHash.slice(0, 2))
+    await mkdir(bucket, { recursive: true })
+    await writeFile(join(bucket, bombHash + '.drl'), encodeFrame(CODEC_DEFLATE_RAW, payload))
+
+    await expect(store.get(bombHash)).rejects.toThrow(/larger than/i)
+    // A ceiling rejection is a policy refusal, not proof the bytes are wrong:
+    // lowering maxChunkBytes must never delete objects baked under a higher one.
+    expect(await store.has(bombHash)).toBe(true)
+
+    // An object exactly AT the ceiling is legal and must still round-trip.
+    const edge = Buffer.alloc(maxChunkBytes, 7)
+    const edgeHash = hashOfContent(edge)
+    expect(codecFor(edge.length, maxChunkBytes)).toBe(CODEC_DEFLATE_RAW)
+    await store.put(edgeHash, edge)
+    expect((await store.get(edgeHash)).equals(edge)).toBe(true)
   })
 })

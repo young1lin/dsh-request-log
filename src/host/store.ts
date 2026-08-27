@@ -36,9 +36,11 @@
  * daily sweep; oversized ones trimmed to the newest records. The sweep also
  * runs the mark-sweep GC over the object store (reachable hashes extracted
  * from the live files it reads anyway, then expanded transitively through
- * tree chains; unreachable objects past a grace floor reclaimed, tmp debris
- * always) and migrates v1/v2 files newest-first up to a per-cycle byte
- * budget. All IO is fail-soft — a store error never breaks a model call.
+ * tree chains; unreachable objects and staging debris past a grace floor
+ * reclaimed) and migrates v1/v2 files newest-first up to a per-cycle byte
+ * budget, deprioritizing files that failed to convert so one stubborn file
+ * cannot hold the budget. All IO is fail-soft — a store error never breaks a
+ * model call.
  *
  * @module dsh-request-log/host/store
  */
@@ -48,7 +50,7 @@ import { join } from 'node:path'
 import type { CallEnvelope, CallEnvelopeV3, CallIndexEntry, CallIndexResponse, CallRecord, RecordedMessage, RecordedRequest, RecordedResponse } from '../shared/types'
 import { RECORD_SCHEMA, RECORD_SCHEMA_V2, RECORD_SCHEMA_V3, entryFromEnvelope, envelopeSumOf, toIndexEntry } from '../shared/types'
 import { BlobStore, hashOfContent } from './blob'
-import { type TreeEntry, type TreeState, chooseTreeNode, decodeTree, encodeTree, resolveTree } from './tree'
+import { type TreeEntry, type TreeState, chooseTreeNode, decodeTree, encodeTree, isEntryHash, resolveTree } from './tree'
 
 export interface StoreConfig {
   /** Root directory holding the per-session JSONL files. */
@@ -311,6 +313,8 @@ export class CallStore {
   private readonly blobs: BlobStore
   private mkdirPromise: Promise<void> | undefined
   private sweepStatus: SweepStatus | undefined
+  /** Consecutive failed migration attempts per session; drives the retry order. */
+  private readonly migrationFailures = new Map<string, number>()
   /** Error sink of the in-flight sweep cycle (absent outside a sweep). */
   private sweepErrorSink: ((stage: string, error: unknown) => void) | undefined
 
@@ -548,9 +552,17 @@ export class CallStore {
       try { env = JSON.parse(line) as CallEnvelope } catch { return line }
       if (!Array.isArray(env.refs)) return line
       entries = []
-      for (const ref of env.refs) {
-        if (ref.k === 'r') { resp = ref.h; continue }
-        entries.push({ k: ref.k, h: ref.h })
+      for (const ref of env.refs as unknown[]) {
+        // Untrusted: the writer never emits a malformed ref, but a damaged
+        // line reaching the tree encoder would be refused there and take the
+        // whole conversion down. Pass this line through v2 instead — it stays
+        // readable, and the next pass retries it.
+        if (ref === null || typeof ref !== 'object') return line
+        const { k, h } = ref as { k?: unknown; h?: unknown }
+        if (!isEntryHash(h)) return line
+        if (k === 'r') { resp = h; continue }
+        if (k !== 's' && k !== 't' && k !== 'm') return line
+        entries.push({ k, h })
       }
       const { v, refs, ...rest } = env as unknown as Record<string, unknown>
       void v; void refs
@@ -1031,7 +1043,7 @@ export class CallStore {
    * Trims ride the per-file append chain, so a concurrent append can never
    * be lost to the rewrite window. The v2 object store rides the same pass:
    * reachable hashes are marked from the files read here anyway, then the GC
-   * sweeps unreachable objects past a grace floor plus tmp debris, and the
+   * sweeps unreachable objects and staging debris past a grace floor, and the
    * migrator converts not-yet-v2 files newest-first until the per-cycle byte
    * budget is spent. Returns the disposal counts; the live cycle state is
    * published as {@link CallStore.lastSweepStatus} (for /health), where every
@@ -1060,7 +1072,12 @@ export class CallStore {
       try {
         names = await readdir(this.config.directory)
       } catch (error) {
-        swallowed('scan directory', error)
+        // The directory is created by the first append, so a fresh install's
+        // BOOT sweep legitimately finds nothing: that is an empty store, not a
+        // failure, and publishing it would hang a false error on /health until
+        // the next daily cycle. Anything else is real and belongs there.
+        if ((error as NodeJS.ErrnoException | null)?.code !== 'ENOENT') swallowed('scan directory', error)
+        status.phase = 'done'
         return { deletedFiles: 0, trimmedFiles: 0, migratedFiles: 0 }
       }
       const cutoff = now - this.config.retentionDays * DAY_MS
@@ -1125,8 +1142,17 @@ export class CallStore {
         status.phase = 'migration'
         // Newest first: a fresh session has the most retention life ahead of it,
         // so converting it buys the most stored-byte-days - and the oldest files
-        // may not survive to the next cycle anyway.
-        migrationCandidates.sort((a, b) => b.mtimeMs - a.mtimeMs)
+        // may not survive to the next cycle anyway. But a file that FAILED to
+        // convert still costs its full size against the budget (it was read,
+        // and not charging it would let a directory of failures re-read
+        // unboundedly every cycle), so a stubborn file at the head of the order
+        // would take the whole budget forever and starve every other one.
+        // Sorting failures last keeps it retrying without letting it monopolize.
+        for (const key of this.migrationFailures.keys()) {
+          if (!migrationCandidates.some(candidate => candidate.sessionId === key)) this.migrationFailures.delete(key)
+        }
+        const failures = (sessionId: string): number => this.migrationFailures.get(sessionId) ?? 0
+        migrationCandidates.sort((a, b) => failures(a.sessionId) - failures(b.sessionId) || b.mtimeMs - a.mtimeMs)
         const budget = this.config.migrationBudgetBytes ?? DEFAULT_MIGRATION_BUDGET_BYTES
         let spent = 0
         for (const candidate of migrationCandidates) {
@@ -1138,15 +1164,28 @@ export class CallStore {
             wanted = await this.fileHasLegacyLines(candidate.path)
           } catch (error) {
             swallowed(`scan ${candidate.sessionId}`, error)
-            wanted = false
+            this.migrationFailures.set(candidate.sessionId, failures(candidate.sessionId) + 1)
+            continue
           }
-          if (!wanted) continue
+          if (!wanted) {
+            this.migrationFailures.delete(candidate.sessionId)
+            continue
+          }
           status.migrationCandidates += 1
+          let converted = false
           try {
-            if (await this.migrateFile(candidate.sessionId, candidate.path)) status.migratedFiles += 1
+            converted = await this.migrateFile(candidate.sessionId, candidate.path)
           } catch (error) {
             // A stubborn conversion retries on the next daily cycle.
             swallowed(`migrate ${candidate.sessionId}`, error)
+          }
+          // Still wanted but nothing changed counts as a failure too: the
+          // legacy lines it holds are ones this build cannot convert at all.
+          if (converted) {
+            status.migratedFiles += 1
+            this.migrationFailures.delete(candidate.sessionId)
+          } else {
+            this.migrationFailures.set(candidate.sessionId, failures(candidate.sessionId) + 1)
           }
           spent += candidate.size
         }
@@ -1192,14 +1231,13 @@ export class CallStore {
     }
   }
 
-  /** Does any complete line still hold a v1 record or a v2 envelope? */
+  /**
+   * Does any complete line still hold a v1 record or a v2 envelope? A read
+   * failure PROPAGATES: the caller publishes it as the sweep's error, which is
+   * the only way a file that can never convert becomes visible on /health.
+   */
   private async fileHasLegacyLines(path: string): Promise<boolean> {
-    let text: string
-    try {
-      text = await readFile(path, 'utf8')
-    } catch {
-      return false
-    }
+    const text = await readFile(path, 'utf8')
     for (const line of completeLines(text)) {
       if (line.startsWith('{"schema":') || isV2Line(line)) return true
     }

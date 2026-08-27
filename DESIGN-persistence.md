@@ -553,3 +553,50 @@ the same delta chain a freshly written one would rather than a keyframe per line
 `format: 'v2'` is deliberately absent — v2 was never a release the config needed to pin;
 `format: 'v1'` remains the kill switch.
 
+### 10.6 Post-review hardening
+
+An independent review of the v3 landing found seven defects, all fixed together. Grouped by
+what they threaten:
+
+**Silent data loss.** A deduplicating `put` writes nothing, so an object keeps its CREATION
+mtime however often it is re-referenced — while the GC's reachable set is fixed BEFORE the
+append's envelope line lands. An object that only the pending line will reference, and whose
+last previous referrer expired in this same sweep, was deleted out from under it. A hit past
+half the grace floor now touches the mtime back over the line; the stat the put already
+performs is what decides, so the hot path stays at one syscall (measured: ~0.8 ms per append
+worst case, every piece stale). Predates v3 — the pre-dedup `put` short-circuited on `has()`
+just as early. Staging files were likewise reaped with zero grace, which could delete a
+`tmp-*` belonging to a put in flight and fail that bake; they now share the object floor.
+
+**Permanent slot degradation.** `encodeTree` concatenates strings for its canonical key
+order, so a malformed entry stringified to the literal text `undefined` — unparsable bytes,
+content-addressed, immutable, taking their whole record with them. The encoder now validates
+at the only door in, and the v2→v3 migration validates `refs` before building entries and
+passes a damaged line through as v2 rather than converting it. Separately, `put`
+short-circuits on the stat alone, so an object corrupted in place at the same byte length was
+never re-baked: a failed read now DELETES the object, and the next put restores it from the
+caller's own copy. A ceiling rejection is explicitly not that proof — lowering
+`maxChunkBytes` must never delete objects baked under a higher one.
+
+**Unbounded work.** `inflateRaw` ran without `maxOutputLength`, and compressed length bounds
+nothing: 256 MB of zeros frames into 260 KB, well under the ceiling, and expanded fully
+before the hash check could reject it (measured RSS +521 MB → +33.6 MB after). Every
+deflate-coded object is raw-smaller than `maxChunkBytes` by construction, so that is the
+ceiling handed to the inflater.
+
+**Observability.** The store directory is created by the first append, so a fresh install's
+BOOT sweep hit ENOENT and published a false error on `/health` for 24 hours; an empty store
+now reports a clean cycle. The migration scan swallowed its own read failures, making the
+sweep's error branch dead code and hiding a file that can never convert.
+
+**Fairness.** A file that fails to convert is still charged its full size against the
+per-cycle budget — correctly, since it was read, and not charging it would let a directory of
+failures re-read unboundedly every cycle. But newest-first ordering then handed a stubborn
+file at the head of the queue the entire budget, forever. Candidates now sort by consecutive
+failure count first, so a failing file keeps retrying at the back of the line instead of
+starving every other one.
+
+One reported finding was not a defect: `migrationBudgetBytes` lives on the internal
+`StoreConfig`, not on the plugin's `Config` schema, and is not exported from the package
+entry — no user-reachable path sets it.
+

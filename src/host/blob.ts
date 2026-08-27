@@ -8,13 +8,15 @@
  * temp file INSIDE the target bucket dir then rename - same volume, atomic.
  * A small byte-budgeted LRU keeps hot blobs inflated in memory; GC is
  * mark-sweep over the reachable-hash set extracted from live session files,
- * with an mtime grace floor so appends racing a sweep never lose data.
+ * with an mtime grace floor so appends racing a sweep never lose data - a
+ * deduplicated re-reference touches that mtime back over the floor, since it
+ * writes nothing that would refresh it on its own.
  *
  * @module dsh-request-log/host/blob
  */
 
 import { createHash, randomUUID } from 'node:crypto'
-import { mkdir, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
+import { mkdir, readdir, readFile, rename, rm, stat, utimes, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
 import { deflateRaw as deflateRawCb, inflateRaw as inflateRawCb } from 'node:zlib'
@@ -44,6 +46,12 @@ export const DEFAULT_BLOB_CACHE_BYTES = 16 * 1024 * 1024
 export const DEFAULT_DEFLATE_LEVEL = 6
 /** Unreachable-but-newer-than-this objects survive a GC pass. */
 export const DEFAULT_GC_GRACE_MS = 60 * 60 * 1000
+/**
+ * A dedup hit re-touches an object whose mtime is older than this. Half the
+ * grace floor: old enough that the hot path never touches, recent enough that
+ * a touched object stays clear of the floor until the next hit.
+ */
+export const DEFAULT_TOUCH_AFTER_MS = DEFAULT_GC_GRACE_MS / 2
 
 export interface BlobStoreConfig {
   /** The OBJECTS ROOT directory (the caller owns its placement). */
@@ -51,7 +59,15 @@ export interface BlobStoreConfig {
   cacheBytes?: number
   maxChunkBytes?: number
   deflateLevel?: number
+  touchAfterMs?: number
 }
+
+/**
+ * This store refused to materialize an object. Distinct from corruption: the
+ * stored bytes may be perfectly valid under the config that baked them, so
+ * the self-heal must not treat it as proof to delete.
+ */
+class ObjectCeilingError extends Error {}
 
 /** Full lowercase hex sha256 over exact content - the blob identity. */
 export function hashOfContent(content: string | Buffer): string {
@@ -146,6 +162,7 @@ export class BlobStore {
   private deflates = 0
   private readonly maxChunkBytes: number
   private readonly deflateLevel: number
+  private readonly touchAfterMs: number
   private readonly readyBuckets = new Set<string>()
   private mkdirPromise: Promise<void> | undefined
 
@@ -153,6 +170,7 @@ export class BlobStore {
     this.lru = new ByteBudgetLru(config.cacheBytes ?? DEFAULT_BLOB_CACHE_BYTES)
     this.maxChunkBytes = config.maxChunkBytes ?? DEFAULT_MAX_CHUNK_BYTES
     this.deflateLevel = config.deflateLevel ?? DEFAULT_DEFLATE_LEVEL
+    this.touchAfterMs = config.touchAfterMs ?? DEFAULT_TOUCH_AFTER_MS
   }
 
   /** The bucket dir holds the hash - the first two hex chars fan objects out. */
@@ -186,23 +204,38 @@ export class BlobStore {
   }
 
   async has(hash: string): Promise<boolean> {
-    return (await this.payloadSizeOf(hash)) !== null
+    return (await this.infoOf(hash)) !== null
   }
 
   /**
-   * The stored payload length of an existing object, or null when it is
-   * absent (or too short to hold a frame at all - a truncated leftover is
-   * treated as absent so the next put rewrites it). The frame preamble is
-   * fixed-width and the payload is the whole rest of the file, so this is
-   * the exact `z` a fresh compression would report - WITHOUT compressing.
+   * The stored payload length and mtime of an existing object, or null when
+   * it is absent (or too short to hold a frame at all - a truncated leftover
+   * is treated as absent so the next put rewrites it). The frame preamble is
+   * fixed-width and the payload is the whole rest of the file, so `z` here is
+   * the exact value a fresh compression would report - WITHOUT compressing.
    */
-  private async payloadSizeOf(hash: string): Promise<number | null> {
+  private async infoOf(hash: string): Promise<{ z: number; mtimeMs: number } | null> {
     try {
-      const { size } = await stat(this.pathOf(hash))
-      return size > FRAME_HEADER_BYTES ? size - FRAME_HEADER_BYTES : null
+      const { size, mtimeMs } = await stat(this.pathOf(hash))
+      return size > FRAME_HEADER_BYTES ? { z: size - FRAME_HEADER_BYTES, mtimeMs } : null
     } catch {
       return null
     }
+  }
+
+  /**
+   * A dedup hit writes nothing, so an object keeps its CREATION mtime however
+   * often it is re-referenced. GC deletes unreachable objects past the grace
+   * floor, and a sweep fixes its reachable set BEFORE this append's envelope
+   * line lands: an object that only the pending line will reference would be
+   * swept out from under it. Lift the mtime back over the floor - but only
+   * when the stat this put already performed says it is needed, so the
+   * hottest branch of the append path stays at one syscall.
+   */
+  private async touchIfStale(hash: string, mtimeMs: number): Promise<void> {
+    if (Date.now() - mtimeMs <= this.touchAfterMs) return
+    const now = new Date()
+    await utimes(this.pathOf(hash), now, now).catch(() => {})
   }
 
   /**
@@ -217,8 +250,11 @@ export class BlobStore {
   async put(hash: string, raw: string | Buffer): Promise<PutResult> {
     const buf = typeof raw === 'string' ? Buffer.from(raw, 'utf8') : raw
     if (hashOfContent(buf) !== hash) throw new Error('blob put rejected: hash/content mismatch')
-    const existing = await this.payloadSizeOf(hash)
-    if (existing !== null) return { z: existing, created: false }
+    const existing = await this.infoOf(hash)
+    if (existing !== null) {
+      await this.touchIfStale(hash, existing.mtimeMs)
+      return { z: existing.z, created: false }
+    }
     const codec = codecFor(buf.length, this.maxChunkBytes)
     let payload: Buffer
     if (codec === CODEC_IDENTITY) {
@@ -244,9 +280,9 @@ export class BlobStore {
       await rm(temp, { force: true }).catch(() => {})
     }
     // The caller must learn a bake failed BEFORE any envelope references it.
-    const landed = await this.payloadSizeOf(hash)
+    const landed = await this.infoOf(hash)
     if (landed === null) throw new Error(`blob object write failed for ${hash}`)
-    return { z: landed, created: true }
+    return { z: landed.z, created: true }
   }
 
   /**
@@ -254,22 +290,47 @@ export class BlobStore {
    * serve from the LRU next time. Any corruption (magic, codec, hash
    * mismatch, oversized declared payload) throws - wrong data is impossible;
    * missing data degrades at the CALLER (fail-soft slots), never here.
+   *
+   * Corruption also DELETES the object: put() short-circuits on a stat, so a
+   * damaged file the right length would otherwise freeze every future append
+   * into re-referencing a record that can never be read again.
    */
   async get(hash: string): Promise<Buffer> {
     const cached = this.lru.get(hash)
     if (cached !== undefined) return cached
     const frame = await readFile(this.pathOf(hash))
-    const { codec, payload } = decodeFrame(frame)
-    // Declared-size sanity gate applies to INFLATING only: identity payloads
-    // are already materialized bytes bounded by the file itself.
     let raw: Buffer
-    if (codec === CODEC_IDENTITY) {
-      raw = Buffer.from(payload)
-    } else {
-      if (payload.length > this.maxChunkBytes) throw new Error(`oversized object payload for ${hash}`)
-      raw = await inflateRaw(payload)
+    try {
+      const { codec, payload } = decodeFrame(frame)
+      // Declared-size sanity gate applies to INFLATING only: identity payloads
+      // are already materialized bytes bounded by the file itself.
+      if (codec === CODEC_IDENTITY) {
+        raw = Buffer.from(payload)
+      } else {
+        // Compressed length bounds nothing - a corrupt or crafted payload
+        // expands without limit, and the hash check only runs afterwards, so
+        // the ceiling has to be handed to the inflater itself. Every
+        // deflate-coded object was raw-smaller than it by construction.
+        if (payload.length > this.maxChunkBytes) {
+          throw new ObjectCeilingError(`oversized object payload for ${hash}`)
+        }
+        raw = await inflateRaw(payload, { maxOutputLength: this.maxChunkBytes }).catch((error: unknown) => {
+          const code = (error as NodeJS.ErrnoException | null)?.code
+          if (code !== 'ERR_BUFFER_TOO_LARGE') throw error
+          throw new ObjectCeilingError(`${(error as Error).message} (object ${hash})`)
+        })
+      }
+      if (hashOfContent(raw) !== hash) throw new Error(`object content hash mismatch for ${hash}`)
+    } catch (error) {
+      // A ceiling rejection is this store's policy, not proof the bytes are
+      // wrong: lowering maxChunkBytes must never delete objects baked under a
+      // higher one. Everything else here IS proof - drop it so the next put
+      // re-bakes the content from the caller's own copy.
+      if (!(error instanceof ObjectCeilingError)) {
+        await rm(this.pathOf(hash), { force: true }).catch(() => {})
+      }
+      throw error
     }
-    if (hashOfContent(raw) !== hash) throw new Error(`object content hash mismatch for ${hash}`)
     this.lru.put(hash, raw)
     return raw
   }
@@ -289,10 +350,25 @@ export class BlobStore {
   }
 
   /**
+   * Is this path older than the grace floor? Unreadable or vanished counts as
+   * NOT stale: GC then only ever risks sparing a file, never deleting a live
+   * one. Fail-soft, retried next cycle.
+   */
+  private async pastGraceFloor(path: string, now: number, graceMs: number): Promise<boolean> {
+    try {
+      return now - (await stat(path)).mtimeMs > graceMs
+    } catch {
+      return false
+    }
+  }
+
+  /**
    * Mark-sweep GC: delete every .drl object NOT in reachable whose mtime
-   * predates the grace floor (fresh objects may belong to an append that
-   * has not yet written its envelope line), plus any leftover tmp-* debris
-   * regardless. One unreadable entry never aborts the walk.
+   * predates the grace floor (fresh objects may belong to an append that has
+   * not yet written its envelope line), plus leftover tmp-* debris under the
+   * same floor - a staging file is renamed into place within one put, so a
+   * young one belongs to a put in flight and deleting it fails that bake.
+   * One unreadable entry never aborts the walk.
    */
   async gc(reachable: ReadonlySet<string>, now: number, graceMs: number = DEFAULT_GC_GRACE_MS): Promise<GcResult> {
     const result = { removedObjects: 0, removedTemp: 0 }
@@ -301,6 +377,13 @@ export class BlobStore {
       rootEntries = await readdir(this.config.directory)
     } catch {
       return result
+    }
+    const reapTemp = async (full: string): Promise<void> => {
+      if (!(await this.pastGraceFloor(full, now, graceMs))) return
+      await rm(full, { force: true }).then(
+        () => { result.removedTemp += 1 },
+        () => {},
+      )
     }
     const sweepBucket = async (dir: string): Promise<void> => {
       let names: string[]
@@ -312,26 +395,17 @@ export class BlobStore {
       for (const name of names) {
         const full = join(dir, name)
         if (name.startsWith('tmp-')) {
-          await rm(full, { force: true }).then(
-            () => { result.removedTemp += 1 },
-            () => {},
-          )
+          await reapTemp(full)
           continue
         }
         if (!name.endsWith('.drl')) continue
         const hash = name.slice(0, -'.drl'.length)
         if (reachable.has(hash)) continue
-        try {
-          const info = await stat(full)
-          if (now - info.mtimeMs > graceMs) {
-            await rm(full, { force: true }).then(
-              () => { result.removedObjects += 1 },
-              () => {},
-            )
-          }
-        } catch {
-          // Vanished mid-walk or unreadable: fail-soft, maybe next cycle.
-        }
+        if (!(await this.pastGraceFloor(full, now, graceMs))) continue
+        await rm(full, { force: true }).then(
+          () => { result.removedObjects += 1 },
+          () => {},
+        )
       }
     }
     const buckets = [] as Promise<void>[]
@@ -342,12 +416,7 @@ export class BlobStore {
         continue
       }
       // Crash debris can also sit directly in the objects root.
-      if (name.startsWith('tmp-')) {
-        await rm(full, { force: true }).then(
-          () => { result.removedTemp += 1 },
-          () => {},
-        )
-      }
+      if (name.startsWith('tmp-')) await reapTemp(full)
     }
     await Promise.all(buckets)
     return result

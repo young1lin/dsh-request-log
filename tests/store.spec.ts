@@ -1148,4 +1148,85 @@ describe('sweep status observability', () => {
     // Fail-soft data preservation: the legacy line survives untouched.
     expect((await readFile(join(directory, 'legacy.jsonl'), 'utf8')).startsWith('{"schema":')).toBe(true)
   })
+  it('reports a clean sweep on a store that has never been written', async () => {
+    // The directory is created lazily by the first append, so a fresh install's
+    // BOOT sweep runs before it exists. Publishing that as a sweep error hangs
+    // a false failure on /health until the next daily cycle, 24 hours later.
+    const directory = join(await tempDir(), 'never-written')
+    const store = new CallStore({ directory, retentionDays: 14, maxCallsPerSession: 100, maxFileBytes: 8 * 1024 * 1024 })
+
+    await store.sweep()
+
+    expect(store.lastSweepStatus?.error).toBeUndefined()
+    expect(store.lastSweepStatus?.phase).toBe('done')
+    expect(store.lastSweepStatus?.filesSeen).toBe(0)
+  })
+
+  it('passes a v2 line with a malformed ref through instead of baking an invalid tree', async () => {
+    const directory = await tempDir()
+    const store = new CallStore({ directory, retentionDays: 14, maxCallsPerSession: 100, maxFileBytes: 8 * 1024 * 1024 })
+    await store.append(recordOf({ id: 'good' }))
+    const path = join(directory, 'sess-1.jsonl')
+    // A v2 envelope whose refs lost their hashes (external damage — the writer
+    // never emits this). Converting it blindly writes `{"k":"m","h":undefined}`
+    // into the immutable object store: unparsable, unreachable, permanent.
+    const damaged = '{"v":2,"id":"bad","sessionId":"sess-1","provider":"p","model":"m","requestHash":"h",'
+      + '"attempt":1,"timing":{"startedAt":2000},"status":"ok","refs":[{"k":"m"}]}'
+    await writeFile(path, (await readFile(path, 'utf8')) + damaged + '\n', 'utf8')
+
+    await store.sweep()
+
+    const kept = (await readFile(path, 'utf8')).trim().split('\n')
+    expect(kept.find(line => line.includes('"id":"bad"'))).toBe(damaged)
+    // Nothing unparsable reached the object store.
+    for (const bucket of await readdir(join(directory, 'objects'))) {
+      if (!/^[0-9a-f]{2}$/.test(bucket)) continue
+      for (const file of await readdir(join(directory, 'objects', bucket))) {
+        const raw = await readFile(join(directory, 'objects', bucket, file))
+        const { payload } = decodeFrame(raw)
+        const text = inflateRawSync(payload).toString('utf8')
+        if (text.startsWith('{"t":')) expect(() => JSON.parse(text)).not.toThrow()
+      }
+    }
+  })
+
+  it('surfaces a migration scan it could not read instead of silently skipping it', async () => {
+    const directory = await tempDir()
+    const store = new CallStore({ directory, retentionDays: 14, maxCallsPerSession: 100, maxFileBytes: 8 * 1024 * 1024 })
+    await store.append(recordOf())
+    // A directory wearing a session file's name: stat succeeds, so it reaches
+    // the migration phase, and every read of it fails. Swallowing that inside
+    // the scan makes the sweep's own error branch dead code and leaves /health
+    // blind to a file that can never convert.
+    await mkdir(join(directory, 'wedged.jsonl'), { recursive: true })
+
+    await store.sweep()
+
+    expect(store.lastSweepStatus?.error).toMatch(/^scan wedged/)
+  })
+
+  it('stops a file that never converts from monopolizing the migration budget', async () => {
+    const directory = await tempDir()
+    const store = new CallStore({
+      directory, retentionDays: 14, maxCallsPerSession: 100, maxFileBytes: 8 * 1024 * 1024,
+      migrationBudgetBytes: 1,
+    })
+    // A line from a schema this build does not understand counts as legacy
+    // (it opens `{"schema":`) but converts to nothing — so it is "wanted"
+    // forever. Newest-first ordering hands it the whole budget every cycle.
+    const stubborn = join(directory, 'stuck.jsonl')
+    const convertible = join(directory, 'plain.jsonl')
+    await mkdir(directory, { recursive: true })
+    await writeFile(convertible, JSON.stringify(recordOf({ id: 'v1', sessionId: 'plain' })) + '\n', 'utf8')
+    await writeFile(stubborn, JSON.stringify({ ...recordOf({ id: 'x', sessionId: 'stuck' }), schema: 99 }) + '\n', 'utf8')
+    const older = new Date(Date.now() - 60_000)
+    await utimes(convertible, older, older)
+
+    await store.sweep()
+    expect((await readFile(stubborn, 'utf8')).startsWith('{"schema":99')).toBe(true) // never converts
+    await store.sweep()
+
+    // Second cycle: the file that failed last time yields its turn.
+    expect((await readFile(convertible, 'utf8')).startsWith('{"v":3')).toBe(true)
+  })
 })

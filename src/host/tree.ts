@@ -59,12 +59,30 @@ export type TreeChoice =
   | { kind: 'reuse' }
   | { kind: 'node'; node: TreeNode; depth: number }
 
-/** Canonical JSON: fixed key order so identical trees hash identically. */
+/** Whether an untrusted value is a legal tree entry hash. */
+export function isEntryHash(value: unknown): value is string {
+  return typeof value === 'string' && SHA256_HEX.test(value)
+}
+
+/**
+ * Canonical JSON: fixed key order so identical trees hash identically.
+ *
+ * The fixed order is why this concatenates strings rather than calling
+ * JSON.stringify on the node — which also means a malformed field would
+ * splice the literal text `undefined` into the output. Objects are immutable
+ * and content-addressed, so such a node would be unparsable FOREVER, taking
+ * its whole record down with it. Validate here, at the only door in.
+ */
 export function encodeTree(node: TreeNode): string {
+  if (node.p !== undefined && !isEntryHash(node.p)) throw new Error('tree parent hash malformed')
   const parts: string[] = ['{"t":' + String(TREE_SCHEMA)]
   if (node.p !== undefined) parts.push(',"p":' + JSON.stringify(node.p))
   parts.push(',"e":[')
-  parts.push(node.e.map(item => '{"k":' + JSON.stringify(item.k) + ',"h":' + JSON.stringify(item.h) + '}').join(','))
+  parts.push(node.e.map(item => {
+    if (item.k !== 's' && item.k !== 't' && item.k !== 'm') throw new Error('unknown tree entry kind')
+    if (!isEntryHash(item.h)) throw new Error('tree entry hash malformed')
+    return '{"k":' + JSON.stringify(item.k) + ',"h":' + JSON.stringify(item.h) + '}'
+  }).join(','))
   parts.push(']}')
   return parts.join('')
 }
@@ -80,11 +98,11 @@ export function decodeTree(json: string): TreeNode {
     if (item === null || typeof item !== 'object') throw new Error('tree entry is not an object')
     const { k, h } = item as { k?: unknown; h?: unknown }
     if (k !== 's' && k !== 't' && k !== 'm') throw new Error('unknown tree entry kind')
-    if (typeof h !== 'string' || !SHA256_HEX.test(h)) throw new Error('tree entry hash malformed')
+    if (!isEntryHash(h)) throw new Error('tree entry hash malformed')
     return { k, h }
   })
   if (raw.p === undefined) return { t: TREE_SCHEMA, e: entries }
-  if (typeof raw.p !== 'string' || !SHA256_HEX.test(raw.p)) throw new Error('tree parent hash malformed')
+  if (!isEntryHash(raw.p)) throw new Error('tree parent hash malformed')
   return { t: TREE_SCHEMA, p: raw.p, e: entries }
 }
 

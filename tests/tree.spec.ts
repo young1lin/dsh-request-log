@@ -172,4 +172,16 @@ describe('resolveTree', () => {
     }
     await expect(resolveTree(hash, readerOf(objects))).rejects.toThrow(/walk/i)
   })
+  it('refuses to encode a malformed entry instead of emitting invalid JSON', () => {
+    // encodeTree concatenates strings for a canonical key order, so an entry
+    // carrying a non-string hash would stringify to the literal `undefined`
+    // and land in the immutable object store as unparsable bytes — one bad
+    // slot upgraded into a record that can never be read back.
+    const bad: TreeNode = { t: TREE_SCHEMA, e: [{ k: 'm' } as unknown as TreeEntry] }
+    expect(() => encodeTree(bad)).toThrow(/entry/i)
+    expect(() => encodeTree({ t: TREE_SCHEMA, e: [entry('m', 'ok')], p: 'not-a-hash' })).toThrow(/parent/i)
+    // Anything it does encode must round-trip through the validating decoder.
+    const good: TreeNode = { t: TREE_SCHEMA, p: hashOf('parent'), e: [entry('s', 'sys'), entry('m', 'm0')] }
+    expect(decodeTree(encodeTree(good))).toEqual(good)
+  })
 })

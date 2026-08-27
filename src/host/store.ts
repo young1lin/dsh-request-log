@@ -42,7 +42,7 @@
 
 import { appendFile, mkdir, open, readdir, readFile, rename, rm, stat, truncate, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
-import type { CallEnvelope, CallEnvelopeV3, CallIndexEntry, CallIndexResponse, CallRecord, EnvelopeRef, RecordedMessage, RecordedRequest, RecordedResponse } from '../shared/types'
+import type { CallEnvelope, CallEnvelopeV3, CallIndexEntry, CallIndexResponse, CallRecord, RecordedMessage, RecordedRequest, RecordedResponse } from '../shared/types'
 import { RECORD_SCHEMA, RECORD_SCHEMA_V2, RECORD_SCHEMA_V3, entryFromEnvelope, envelopeSumOf, toIndexEntry } from '../shared/types'
 import { BlobStore, hashOfContent } from './blob'
 import { type TreeEntry, type TreeState, chooseTreeNode, decodeTree, encodeTree, resolveTree } from './tree'
@@ -125,12 +125,6 @@ interface LogicalMarker {
   mtimeMs: number
   size: number
   bytes: number
-}
-
-/** One structural dedup piece hashed into the object store (v2 migrator path). */
-interface LegacyPiece {
-  kind: EnvelopeRef['k']
-  json: string
 }
 
 /** One structural dedup piece hashed into the object store. */
@@ -295,47 +289,6 @@ function logicalBytesOfLine(line: string): number {
   }
 }
 
-/**
- * Split a record into dedup pieces: the system prompt string, EACH message
- * canonicalized whole (id/sourceKind included), the ENTIRE tools array, and
- * the ENTIRE response body. Refs emit in s/t/m.../r order per the design.
- */
-function splitPieces(record: CallRecord): LegacyPiece[] {
-  const pieces: LegacyPiece[] = []
-  if (record.request.system !== undefined) pieces.push({ kind: 's', json: JSON.stringify(record.request.system) })
-  if (record.request.tools !== undefined) pieces.push({ kind: 't', json: JSON.stringify(record.request.tools) })
-  for (const message of record.request.messages) pieces.push({ kind: 'm', json: JSON.stringify(message) })
-  if (record.response !== undefined) pieces.push({ kind: 'r', json: JSON.stringify(record.response) })
-  return pieces
-}
-
-/** Build the v2 envelope skeleton (key order fixed: id rides right after v). */
-function buildEnvelope(record: CallRecord, pieces: LegacyPiece[]): CallEnvelope {
-  const refs: EnvelopeRef[] = pieces.map(piece => ({ k: piece.kind, h: hashOfContent(piece.json), z: 0 }))
-  const request = record.request
-  const opts = {
-    ...(request.temperature === undefined ? {} : { temperature: request.temperature }),
-    ...(request.maxTokens === undefined ? {} : { maxTokens: request.maxTokens }),
-    ...(request.stop === undefined ? {} : { stop: request.stop }),
-  }
-  return {
-    v: RECORD_SCHEMA_V2,
-    id: record.id,
-    sessionId: record.sessionId,
-    ...record.purpose === undefined ? {} : { purpose: record.purpose },
-    provider: record.provider,
-    model: record.model,
-    ...record.reasoningEffort === undefined ? {} : { reasoningEffort: record.reasoningEffort },
-    requestHash: record.requestHash,
-    attempt: record.attempt,
-    timing: record.timing,
-    status: record.status,
-    ...(Object.keys(opts).length === 0 ? {} : { opts }),
-    refs,
-    sum: envelopeSumOf(record),
-  }
-}
-
 export class CallStore {
   /** Bounded index cache: insertion-order eviction is enough (poll locality). */
   private readonly indexCache = new Map<string, IndexCacheEntry>()
@@ -483,13 +436,6 @@ export class CallStore {
     this.logicalCache.set(sessionId, { mtimeMs: info.mtimeMs, size: info.size, bytes })
   }
 
-  /** Upload every referenced piece before the envelope line may land. */
-  private async sealEnvelope(env: CallEnvelope, pieces: LegacyPiece[]): Promise<void> {
-    for (let i = 0; i < env.refs.length; i += 1) {
-      env.refs[i].z = (await this.blobs.put(env.refs[i].h, pieces[i].json)).z
-    }
-  }
-
   /**
    * Bake one record's objects and build its v3 envelope, inside the caller's
    * serialized chain. Every referenced object is renamed into place before
@@ -571,27 +517,123 @@ export class CallStore {
   }
 
   /**
-   * One line in current-format form: existing envelopes pass through,
-   * legacy records convert (their blobs bake idempotently), foreign or
-   * unparsable lines pass through untouched, and conversion failures keep
-   * the original v1 line rather than dropping data (fail-soft).
+   * One line in v3 form, given the tree state the previous converted line
+   * left behind. Existing v3 lines pass through (state advances so later
+   * lines can delta onto them); v2 lines reuse their already-baked pieces;
+   * v1 lines bake theirs. Foreign, unparsable, or unconvertible lines pass
+   * through untouched rather than being dropped.
    */
-  private async ensureV2Line(line: string): Promise<string> {
-    if (!this.v2Enabled || isV2Line(line)) return line
-    const record = legacyRecordOf(line)
-    if (record === undefined) return line
-    const pieces = splitPieces(record)
-    const env = buildEnvelope(record, pieces)
-    try {
-      await this.sealEnvelope(env, pieces)
-    } catch (error) {
-      // Fail-soft is the data-safety contract (the v1 line survives), but not
-      // silent: an in-flight sweep publishes the bake failure so /health can
-      // explain a file that never converts.
-      this.sweepErrorSink?.('blob bake', error)
+  private async ensureV3Line(line: string, state: { previous: TreeState | undefined }): Promise<string> {
+    if (!this.v2Enabled) return line
+    let entries: TreeEntry[] = []
+    let resp: string | undefined
+    let zn = 0
+    let head: Record<string, unknown> | null = null
+
+    if (isV3Line(line)) {
+      try {
+        const env = JSON.parse(line) as CallEnvelopeV3
+        const resolved = await resolveTree(env.tree, hash => this.blobs.get(hash))
+        state.previous = { hash: env.tree, entries: resolved, depth: 0 }
+      } catch {
+        // Unresolvable: the next line starts a keyframe.
+        state.previous = undefined
+      }
       return line
     }
-    return JSON.stringify(env)
+
+    if (isV2Line(line)) {
+      let env: CallEnvelope
+      try { env = JSON.parse(line) as CallEnvelope } catch { return line }
+      if (!Array.isArray(env.refs)) return line
+      entries = []
+      for (const ref of env.refs) {
+        if (ref.k === 'r') { resp = ref.h; continue }
+        entries.push({ k: ref.k, h: ref.h })
+      }
+      const { v, refs, ...rest } = env as unknown as Record<string, unknown>
+      void v; void refs
+      head = rest
+    } else {
+      const record = legacyRecordOf(line)
+      if (record === undefined) return line
+      entries = []
+      for (const piece of requestPieces(record)) {
+        const hash = hashOfContent(piece.json)
+        try {
+          const put = await this.blobs.put(hash, piece.json)
+          if (put.created) zn += put.z
+        } catch (error) {
+          // Fail-soft is the data-safety contract (the original line
+          // survives), but not silent: an in-flight sweep publishes the bake
+          // failure so /health can explain a file that never converts.
+          this.sweepErrorSink?.('blob bake', error)
+          return line
+        }
+        entries.push({ k: piece.kind, h: hash })
+      }
+      if (record.response !== undefined) {
+        const json = JSON.stringify(record.response)
+        resp = hashOfContent(json)
+        try {
+          const put = await this.blobs.put(resp, json)
+          if (put.created) zn += put.z
+        } catch (error) {
+          this.sweepErrorSink?.('blob bake', error)
+          return line
+        }
+      }
+      const request = record.request
+      const opts = {
+        ...(request.temperature === undefined ? {} : { temperature: request.temperature }),
+        ...(request.maxTokens === undefined ? {} : { maxTokens: request.maxTokens }),
+        ...(request.stop === undefined ? {} : { stop: request.stop }),
+      }
+      head = {
+        id: record.id,
+        sessionId: record.sessionId,
+        ...record.purpose === undefined ? {} : { purpose: record.purpose },
+        provider: record.provider,
+        model: record.model,
+        ...record.reasoningEffort === undefined ? {} : { reasoningEffort: record.reasoningEffort },
+        requestHash: record.requestHash,
+        attempt: record.attempt,
+        timing: record.timing,
+        status: record.status,
+        ...(Object.keys(opts).length === 0 ? {} : { opts }),
+        sum: envelopeSumOf(record),
+      }
+    }
+
+    const choice = chooseTreeNode(entries, state.previous)
+    let treeHash: string
+    let depth: number
+    if (choice.kind === 'reuse') {
+      treeHash = (state.previous as TreeState).hash
+      depth = (state.previous as TreeState).depth
+    } else {
+      const json = encodeTree(choice.node)
+      treeHash = hashOfContent(json)
+      try {
+        const put = await this.blobs.put(treeHash, json)
+        if (put.created) zn += put.z
+      } catch (error) {
+        this.sweepErrorSink?.('blob bake', error)
+        return line
+      }
+      depth = choice.depth
+    }
+    state.previous = { hash: treeHash, entries, depth }
+
+    const { sum, ...scalars } = head as { sum: unknown } & Record<string, unknown>
+    return JSON.stringify({
+      v: RECORD_SCHEMA_V3,
+      ...scalars,
+      tree: treeHash,
+      ...(resp === undefined ? {} : { resp }),
+      zn,
+      sum,
+    })
   }
 
   /**
@@ -602,8 +644,9 @@ export class CallStore {
   private async commitRewrite(sessionId: string, path: string, keptLines: string[]): Promise<number> {
     let keptLogical = 0
     const converted: string[] = []
+    const state: { previous: TreeState | undefined } = { previous: undefined }
     for (const line of keptLines) {
-      const upgraded = await this.ensureV2Line(line)
+      const upgraded = await this.ensureV3Line(line, state)
       converted.push(upgraded)
       keptLogical += logicalBytesOfLine(upgraded)
     }
@@ -1148,7 +1191,7 @@ export class CallStore {
     }
   }
 
-  /** Cheap predicate for the migrator: does any complete line still hold a v1 record? */
+  /** Does any complete line still hold a v1 record or a v2 envelope? */
   private async fileHasLegacyLines(path: string): Promise<boolean> {
     let text: string
     try {
@@ -1157,13 +1200,13 @@ export class CallStore {
       return false
     }
     for (const line of completeLines(text)) {
-      if (line.startsWith('{"schema":')) return true
+      if (line.startsWith('{"schema":') || isV2Line(line)) return true
     }
     return false
   }
 
   /**
-   * Convert every parsable v1 line of one file to a v2 envelope and rewrite
+   * Convert every parsable v1/v2 line of one file to a v3 envelope and rewrite
    * atomically (temp + rename commit point — a crash mid-conversion leaves
    * the original intact and the pass restarts deterministically). Idempotent:
    * nothing left to convert leaves the file untouched. Resolves to whether
@@ -1179,13 +1222,16 @@ export class CallStore {
       }
       const lines = completeLines(text)
       const converted: string[] = []
+      const state: { previous: TreeState | undefined } = { previous: undefined }
       let changed = false
       for (const line of lines) {
-        if (isV2Line(line) || legacyRecordOf(line) === undefined) {
-          converted.push(line)
+        if (isV3Line(line) || (!isV2Line(line) && legacyRecordOf(line) === undefined)) {
+          // Passing v3 lines through ensureV3Line is what advances the chain
+          // state so later lines can delta onto them.
+          converted.push(await this.ensureV3Line(line, state))
           continue
         }
-        const upgraded = await this.ensureV2Line(line)
+        const upgraded = await this.ensureV3Line(line, state)
         changed = changed || upgraded !== line
         converted.push(upgraded)
       }

@@ -6,12 +6,12 @@
 import { mkdir, mkdtemp, readFile, readdir, rm, stat, utimes, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { deflateRawSync } from 'node:zlib'
+import { deflateRawSync, inflateRawSync } from 'node:zlib'
 import { afterEach, describe, expect, it } from 'vitest'
 import { assignSteps, CallStore, fileNameOf } from '../src/host/store.ts'
-import { BlobStore, CODEC_DEFLATE_RAW, encodeFrame, hashOfContent } from '../src/host/blob.ts'
-import { TREE_SCHEMA, encodeTree } from '../src/host/tree.ts'
-import { RECORD_SCHEMA, RECORD_SCHEMA_V2, RECORD_SCHEMA_V3, toIndexEntry } from '../src/shared/types'
+import { BlobStore, CODEC_DEFLATE_RAW, decodeFrame, encodeFrame, hashOfContent } from '../src/host/blob.ts'
+import { TREE_SCHEMA, encodeTree, resolveTree } from '../src/host/tree.ts'
+import { RECORD_SCHEMA, RECORD_SCHEMA_V3, toIndexEntry } from '../src/shared/types'
 import type { CallRecord } from '../src/shared/types'
 
 const dirs: string[] = []
@@ -771,7 +771,7 @@ describe('CallStore v2 persistence', () => {
     const migrated = await readFile(join(directory, 'sess-1.jsonl'), 'utf8')
     const lines = migrated.split('\n').filter(line => line.length > 0)
     expect(lines).toHaveLength(2)
-    for (const line of lines) expect(JSON.parse(line).v).toBe(RECORD_SCHEMA_V2)
+    for (const line of lines) expect(JSON.parse(line).v).toBe(RECORD_SCHEMA_V3)
     // Round-trip through blobs preserves both records exactly.
     expect(await store.get('sess-1', 'rich-1')).toEqual(originalA)
     expect(await store.get('sess-1', 'plain-2')).toEqual(originalB)
@@ -781,6 +781,62 @@ describe('CallStore v2 persistence', () => {
     // Idempotent: the second cycle leaves the file byte-stable.
     await store.sweep()
     expect(await readFile(join(directory, 'sess-1.jsonl'), 'utf8')).toBe(migrated)
+  })
+
+  it('converts a v2 file to v3 without reading a single blob body', async () => {
+    const directory = await tempDir()
+    const store = new CallStore({ directory, retentionDays: 14, maxCallsPerSession: 100, maxFileBytes: 8 * 1024 * 1024 })
+    const original = richRecord()
+    await store.append(original)
+    // Rewrite the line back into v2 shape to stand in for a file written by
+    // the previous release.
+    const v3 = JSON.parse((await readFile(join(directory, 'sess-1.jsonl'), 'utf8')).trim()) as Record<string, unknown>
+    const entries = await resolveTree(v3.tree as string, async hash => {
+      const bucket = (hash as string).slice(0, 2)
+      return readFile(join(directory, 'objects', bucket, hash + '.drl'))
+        .then(frame => inflateRawSync(decodeFrame(frame).payload))
+    })
+    const refs = [
+      ...entries.map(item => ({ k: item.k, h: item.h, z: 1 })),
+      ...(v3.resp === undefined ? [] : [{ k: 'r', h: v3.resp as string, z: 1 }]),
+    ]
+    delete v3.tree; delete v3.resp; delete v3.zn
+    await writeFile(join(directory, 'sess-1.jsonl'), JSON.stringify({ ...v3, v: 2, refs }) + '\n')
+
+    await store.sweep()
+
+    const migrated = (await readFile(join(directory, 'sess-1.jsonl'), 'utf8')).trim()
+    expect(JSON.parse(migrated).v).toBe(RECORD_SCHEMA_V3)
+    expect(await store.get('sess-1', original.id)).toEqual(original)
+  })
+
+  it('compacts a migrated file with deltas, not a keyframe per line', async () => {
+    const directory = await tempDir()
+    await mkdir(directory, { recursive: true })
+    const messages: CallRecord['request']['messages'] = []
+    const lines: string[] = []
+    for (let turn = 1; turn <= 20; turn += 1) {
+      messages.push({ role: 'user', content: [{ type: 'text', text: 'ask ' + String(turn) }] })
+      lines.push(JSON.stringify(recordOf({
+        id: 'c-' + String(turn),
+        requestHash: 'h' + String(turn),
+        request: { messages: [...messages] },
+      })))
+    }
+    await writeFile(join(directory, 'sess-1.jsonl'), lines.join('\n') + '\n')
+    const store = new CallStore({ directory, retentionDays: 14, maxCallsPerSession: 100, maxFileBytes: 64 * 1024 * 1024 })
+
+    await store.sweep()
+
+    const converted = (await readFile(join(directory, 'sess-1.jsonl'), 'utf8')).split('\n').filter(l => l.length > 0)
+    expect(converted).toHaveLength(20)
+    for (const line of converted) expect(JSON.parse(line).v).toBe(RECORD_SCHEMA_V3)
+    // A keyframe per line would make every tree object as large as its
+    // history; deltas keep all but the first tiny.
+    const trees = converted.map(line => (JSON.parse(line) as { tree: string }).tree)
+    expect(new Set(trees).size).toBe(20)
+    expect(await store.get('sess-1', 'c-20')).toBeDefined()
+    expect((await store.get('sess-1', 'c-20'))?.request.messages).toHaveLength(20)
   })
 
   it('migrates every legacy file that fits the cycle budget, not just one', async () => {
@@ -797,7 +853,7 @@ describe('CallStore v2 persistence', () => {
     // legacy sessions would be deleted before it was ever converted.
     for (const id of ['sess-a', 'sess-b', 'sess-c']) {
       const text = await readFile(join(directory, id + '.jsonl'), 'utf8')
-      expect(JSON.parse(text.trim()).v).toBe(RECORD_SCHEMA_V2)
+      expect(JSON.parse(text.trim()).v).toBe(RECORD_SCHEMA_V3)
     }
   })
 
@@ -818,7 +874,7 @@ describe('CallStore v2 persistence', () => {
 
     // The newest file has the most retention life left, so converting it buys
     // the most stored-byte-days; the oldest may not survive to the next cycle.
-    expect(JSON.parse((await readFile(join(directory, 'new.jsonl'), 'utf8')).trim()).v).toBe(RECORD_SCHEMA_V2)
+    expect(JSON.parse((await readFile(join(directory, 'new.jsonl'), 'utf8')).trim()).v).toBe(RECORD_SCHEMA_V3)
     expect((await readFile(join(directory, 'old.jsonl'), 'utf8')).startsWith('{"schema":')).toBe(true)
   })
 
@@ -869,7 +925,7 @@ describe('sweep status observability', () => {
     })
     expect(store.lastSweepStatus?.error).toBeUndefined()
     expect(store.lastSweepStatus?.durationMs).toBeGreaterThanOrEqual(0)
-    expect((await readFile(join(directory, 'legacy.jsonl'), 'utf8')).trim().startsWith('{"v":2')).toBe(true)
+    expect((await readFile(join(directory, 'legacy.jsonl'), 'utf8')).trim().startsWith('{"v":3')).toBe(true)
 
     // Idempotent re-sweep: no candidates left, no phantom migrations counted.
     await store.sweep()

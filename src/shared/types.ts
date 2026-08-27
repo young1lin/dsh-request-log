@@ -322,9 +322,12 @@ export interface EnvelopeSum {
   finishMessage?: string
 }
 
-/** One persisted provider-call attempt in v2 form: scalars inline, bodies by hash. */
-export interface CallEnvelope {
-  v: typeof RECORD_SCHEMA_V2
+/**
+ * The scalar head every envelope format carries: everything an index row
+ * needs, with no reference to how the bodies are stored. v2 adds `refs`,
+ * v3 adds `tree`/`resp`/`zn`.
+ */
+export interface EnvelopeHead {
   id: string
   sessionId: string
   purpose?: 'compaction' | 'session-title'
@@ -336,8 +339,35 @@ export interface CallEnvelope {
   timing: RecordedTiming
   status: CallStatus
   opts?: EnvelopeOpts
-  refs: EnvelopeRef[]
   sum: EnvelopeSum
+}
+
+/** One v2 envelope line: the scalar head plus inline blob references. */
+export interface CallEnvelope extends EnvelopeHead {
+  v: typeof RECORD_SCHEMA_V2
+  refs: EnvelopeRef[]
+}
+
+/** Wire schema version of a v3 envelope line (`{"v":3,...}`). */
+export const RECORD_SCHEMA_V3 = 3
+
+/**
+ * One v3 envelope line: the scalar head plus a single tree hash naming the
+ * request's piece list, the response body's hash, and the bytes this append
+ * materialized in the object store.
+ */
+export interface CallEnvelopeV3 extends EnvelopeHead {
+  v: typeof RECORD_SCHEMA_V3
+  /** Hash of the tree object holding this call's ordered request pieces. */
+  tree: string
+  /** Hash of the response body blob; absent when the call never settled. */
+  resp?: string
+  /**
+   * Compressed bytes of objects THIS append created. Not what the record
+   * would cost unshared: a piece already on disk bills nothing, because it
+   * added nothing to disk.
+   */
+  zn: number
 }
 
 /** Fail-soft placeholder substituted for one unreadable blob slot in a detail read. */
@@ -382,7 +412,7 @@ export function envelopeSumOf(record: CallRecord): EnvelopeSum {
  * scalars and the precomputed sum, identical field-for-field to what
  * {@link toIndexEntry} yields for the equivalent v1 record.
  */
-export function entryFromEnvelope(env: CallEnvelope): CallIndexEntry {
+export function entryFromEnvelope(env: EnvelopeHead): CallIndexEntry {
   const timing = env.timing
   const sum = env.sum
   return {

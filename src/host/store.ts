@@ -42,10 +42,10 @@
 
 import { appendFile, mkdir, open, readdir, readFile, rename, rm, stat, truncate, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
-import type { CallEnvelope, CallIndexEntry, CallIndexResponse, CallRecord, EnvelopeRef, RecordedMessage, RecordedRequest, RecordedResponse } from '../shared/types'
-import { RECORD_SCHEMA, RECORD_SCHEMA_V2, entryFromEnvelope, envelopeSumOf, toIndexEntry } from '../shared/types'
+import type { CallEnvelope, CallEnvelopeV3, CallIndexEntry, CallIndexResponse, CallRecord, EnvelopeRef, RecordedMessage, RecordedRequest, RecordedResponse } from '../shared/types'
+import { RECORD_SCHEMA, RECORD_SCHEMA_V2, RECORD_SCHEMA_V3, entryFromEnvelope, envelopeSumOf, toIndexEntry } from '../shared/types'
 import { BlobStore, hashOfContent } from './blob'
-import { decodeTree } from './tree'
+import { type TreeEntry, type TreeState, chooseTreeNode, decodeTree, encodeTree, resolveTree } from './tree'
 
 export interface StoreConfig {
   /** Root directory holding the per-session JSONL files. */
@@ -127,10 +127,30 @@ interface LogicalMarker {
   bytes: number
 }
 
-/** One structural dedup piece hashed into the object store. */
-interface Piece {
+/** One structural dedup piece hashed into the object store (v2 migrator path). */
+interface LegacyPiece {
   kind: EnvelopeRef['k']
   json: string
+}
+
+/** One structural dedup piece hashed into the object store. */
+interface Piece {
+  kind: TreeEntry['k']
+  json: string
+}
+
+/**
+ * The request's dedup pieces in canonical tree order: the system prompt,
+ * the ENTIRE tools array, then EACH message canonicalized whole. The
+ * response is not a tree entry - it changes every call and rides the
+ * envelope's `resp` hash instead, so retries share one tree.
+ */
+function requestPieces(record: CallRecord): Piece[] {
+  const pieces: Piece[] = []
+  if (record.request.system !== undefined) pieces.push({ kind: 's', json: JSON.stringify(record.request.system) })
+  if (record.request.tools !== undefined) pieces.push({ kind: 't', json: JSON.stringify(record.request.tools) })
+  for (const message of record.request.messages) pieces.push({ kind: 'm', json: JSON.stringify(message) })
+  return pieces
 }
 
 /** Coarse sweep phases, published live while a cycle is in flight. */
@@ -210,6 +230,11 @@ function isV2Line(line: string): boolean {
   return line.startsWith('{"v":2')
 }
 
+/** Whether a raw line is a v3 envelope (leading peek, mirrors the writer). */
+function isV3Line(line: string): boolean {
+  return line.startsWith('{"v":3')
+}
+
 /**
  * Per-line index projection: a v2 envelope projects PURELY from the line
  * (zero blob IO — the precomputed sum mirrors toIndexEntry); a v1 record
@@ -221,6 +246,11 @@ function entryOfLine(line: string): CallIndexEntry | undefined {
   try {
     const value: unknown = JSON.parse(line)
     if (value === null || typeof value !== 'object') return undefined
+    if ((value as { v?: unknown }).v === RECORD_SCHEMA_V3) {
+      const env = value as unknown as CallEnvelopeV3
+      if (typeof env.id !== 'string' || env.sum === null || env.sum === undefined || typeof env.tree !== 'string') return undefined
+      return entryFromEnvelope(env)
+    }
     if ((value as { v?: unknown }).v === RECORD_SCHEMA_V2) {
       const env = value as unknown as CallEnvelope
       if (typeof env.id !== 'string' || env.sum === null || env.sum === undefined || !Array.isArray(env.refs)) return undefined
@@ -240,6 +270,16 @@ function entryOfLine(line: string): CallIndexEntry | undefined {
  */
 function logicalBytesOfLine(line: string): number {
   const physical = Buffer.byteLength(line, 'utf8')
+  if (isV3Line(line)) {
+    try {
+      const env = JSON.parse(line) as { zn?: unknown }
+      // zn is what this append MATERIALIZED: exact, and never double-counted
+      // across records that share a blob.
+      return physical + (typeof env.zn === 'number' && env.zn >= 0 ? env.zn : 0)
+    } catch {
+      return physical
+    }
+  }
   if (!isV2Line(line)) return physical
   try {
     const env = JSON.parse(line) as { refs?: { z?: unknown }[] }
@@ -260,8 +300,8 @@ function logicalBytesOfLine(line: string): number {
  * canonicalized whole (id/sourceKind included), the ENTIRE tools array, and
  * the ENTIRE response body. Refs emit in s/t/m.../r order per the design.
  */
-function splitPieces(record: CallRecord): Piece[] {
-  const pieces: Piece[] = []
+function splitPieces(record: CallRecord): LegacyPiece[] {
+  const pieces: LegacyPiece[] = []
   if (record.request.system !== undefined) pieces.push({ kind: 's', json: JSON.stringify(record.request.system) })
   if (record.request.tools !== undefined) pieces.push({ kind: 't', json: JSON.stringify(record.request.tools) })
   for (const message of record.request.messages) pieces.push({ kind: 'm', json: JSON.stringify(message) })
@@ -270,7 +310,7 @@ function splitPieces(record: CallRecord): Piece[] {
 }
 
 /** Build the v2 envelope skeleton (key order fixed: id rides right after v). */
-function buildEnvelope(record: CallRecord, pieces: Piece[]): CallEnvelope {
+function buildEnvelope(record: CallRecord, pieces: LegacyPiece[]): CallEnvelope {
   const refs: EnvelopeRef[] = pieces.map(piece => ({ k: piece.kind, h: hashOfContent(piece.json), z: 0 }))
   const request = record.request
   const opts = {
@@ -310,6 +350,8 @@ export class CallStore {
   private readonly appends = new Map<string, AppendState>()
   /** Logical attributed bytes per session, validated against its (mtime, size). */
   private readonly logicalCache = new Map<string, LogicalMarker>()
+  /** The tree each session last wrote, so the next append can delta onto it. */
+  private readonly treeStates = new Map<string, TreeState>()
   private readonly blobs: BlobStore
   private mkdirPromise: Promise<void> | undefined
   private sweepStatus: SweepStatus | undefined
@@ -381,6 +423,9 @@ export class CallStore {
   private invalidateCaches(sessionId: string): void {
     this.indexCache.delete(sessionId)
     this.logicalCache.delete(sessionId)
+    // A rewritten or deleted file may have been the only thing keeping the
+    // parent chain reachable: start the next append from a keyframe.
+    this.treeStates.delete(sessionId)
   }
 
   /**
@@ -439,9 +484,89 @@ export class CallStore {
   }
 
   /** Upload every referenced piece before the envelope line may land. */
-  private async sealEnvelope(env: CallEnvelope, pieces: Piece[]): Promise<void> {
+  private async sealEnvelope(env: CallEnvelope, pieces: LegacyPiece[]): Promise<void> {
     for (let i = 0; i < env.refs.length; i += 1) {
       env.refs[i].z = (await this.blobs.put(env.refs[i].h, pieces[i].json)).z
+    }
+  }
+
+  /**
+   * Bake one record's objects and build its v3 envelope, inside the caller's
+   * serialized chain. Every referenced object is renamed into place before
+   * this returns, so the envelope line never names an unbaked hash.
+   */
+  private async sealV3(record: CallRecord): Promise<CallEnvelopeV3> {
+    const pieces = requestPieces(record)
+    const entries: TreeEntry[] = []
+    let zn = 0
+    for (const piece of pieces) {
+      const hash = hashOfContent(piece.json)
+      const put = await this.blobs.put(hash, piece.json)
+      if (put.created) zn += put.z
+      entries.push({ k: piece.kind, h: hash })
+    }
+
+    const previous = this.treeStates.get(record.sessionId)
+    const choice = chooseTreeNode(entries, previous)
+    let treeHash: string
+    let depth: number
+    if (choice.kind === 'reuse') {
+      treeHash = (previous as TreeState).hash
+      depth = (previous as TreeState).depth
+    } else {
+      const json = encodeTree(choice.node)
+      treeHash = hashOfContent(json)
+      const put = await this.blobs.put(treeHash, json)
+      if (put.created) zn += put.z
+      depth = choice.depth
+    }
+
+    let resp: string | undefined
+    if (record.response !== undefined) {
+      const json = JSON.stringify(record.response)
+      resp = hashOfContent(json)
+      const put = await this.blobs.put(resp, json)
+      if (put.created) zn += put.z
+    }
+
+    // Only remembered once every object landed; a failed bake leaves the
+    // previous state in place and the next append deltas onto it.
+    this.rememberTree(record.sessionId, { hash: treeHash, entries, depth })
+
+    const request = record.request
+    const opts = {
+      ...(request.temperature === undefined ? {} : { temperature: request.temperature }),
+      ...(request.maxTokens === undefined ? {} : { maxTokens: request.maxTokens }),
+      ...(request.stop === undefined ? {} : { stop: request.stop }),
+    }
+    return {
+      v: RECORD_SCHEMA_V3,
+      id: record.id,
+      sessionId: record.sessionId,
+      ...record.purpose === undefined ? {} : { purpose: record.purpose },
+      provider: record.provider,
+      model: record.model,
+      ...record.reasoningEffort === undefined ? {} : { reasoningEffort: record.reasoningEffort },
+      requestHash: record.requestHash,
+      attempt: record.attempt,
+      timing: record.timing,
+      status: record.status,
+      ...(Object.keys(opts).length === 0 ? {} : { opts }),
+      tree: treeHash,
+      ...(resp === undefined ? {} : { resp }),
+      zn,
+      sum: envelopeSumOf(record),
+    }
+  }
+
+  /** Remember one session's tree, evicting the least recent past the bound. */
+  private rememberTree(sessionId: string, state: TreeState): void {
+    this.treeStates.delete(sessionId)
+    this.treeStates.set(sessionId, state)
+    while (this.treeStates.size > 64) {
+      const oldest = this.treeStates.keys().next().value
+      if (oldest === undefined) break
+      this.treeStates.delete(oldest)
     }
   }
 
@@ -549,22 +674,20 @@ export class CallStore {
   append(record: CallRecord): Promise<void> {
     const sessionId = record.sessionId
     const path = this.pathOf(sessionId)
-    // Piece hashing runs outside the chain (pure CPU); materialization rides it.
-    const pieces = this.v2Enabled ? splitPieces(record) : []
-    const env = this.v2Enabled ? buildEnvelope(record, pieces) : null
     return this.enqueue(sessionId, async () => {
       await this.ensureDirectory()
       const state = this.appendStateOf(sessionId)
+      // Sealing runs INSIDE the chain: it needs the previous tree state,
+      // which only the chain's serialized ownership makes safe to read.
       let line: string
       let incomingLogical: number
-      if (env === null) {
+      if (this.v2Enabled) {
+        const env = await this.sealV3(record)
+        line = JSON.stringify(env) + '\n'
+        incomingLogical = CallStore.lineBytes(line) + env.zn
+      } else {
         line = JSON.stringify(record) + '\n'
         incomingLogical = CallStore.lineBytes(line)
-      } else {
-        await this.sealEnvelope(env, pieces)
-        line = JSON.stringify(env) + '\n'
-        incomingLogical = CallStore.lineBytes(line)
-        for (const ref of env.refs) incomingLogical += ref.z
       }
       try {
         if (state.poisoned) await this.repairTail(path, sessionId)
@@ -722,6 +845,11 @@ export class CallStore {
       let value: unknown
       try { value = JSON.parse(line) } catch { continue }
       if (value === null || typeof value !== 'object') continue
+      if ((value as { v?: unknown }).v === RECORD_SCHEMA_V3) {
+        const env = value as unknown as CallEnvelopeV3
+        if (env.id !== callId || env.sum == null || typeof env.tree !== 'string') continue
+        return await this.reassembleV3(env)
+      }
       if ((value as { v?: unknown }).v === RECORD_SCHEMA_V2) {
         const env = value as unknown as CallEnvelope
         if (env.id !== callId || env.sum == null || !Array.isArray(env.refs)) continue
@@ -732,6 +860,67 @@ export class CallStore {
       if ((record as { schema?: unknown }).schema === RECORD_SCHEMA && record.id === callId) return record
     }
     return undefined
+  }
+
+  /** Splice a v3 envelope's tree and response back into a v1-shaped record. */
+  private async reassembleV3(env: CallEnvelopeV3): Promise<CallRecord> {
+    const request = {} as RecordedRequest
+    request.messages = []
+    let entries: TreeEntry[] | null = null
+    try {
+      entries = await resolveTree(env.tree, hash => this.blobs.get(hash))
+    } catch {
+      entries = null
+    }
+    if (entries === null) {
+      // A partial list would be wrong data. State the gap instead — every
+      // scalar the envelope still knows survives in the record.
+      request.messages = [{
+        role: 'user',
+        content: [{ type: 'text', text: `[request unavailable: tree ${env.tree} could not be resolved]` }],
+      }]
+    } else {
+      const inflight = new Map<string, Promise<unknown>>()
+      const slotFor = (hash: string): Promise<unknown> => {
+        let pending = inflight.get(hash)
+        if (pending === undefined) {
+          pending = this.slotValue(hash)
+          inflight.set(hash, pending)
+        }
+        return pending
+      }
+      const slots = await Promise.all(entries.map(async item => ({ kind: item.k, value: await slotFor(item.h) })))
+      const messages: unknown[] = []
+      for (const slot of slots) {
+        if (slot.kind === 's') request.system = slot.value as string
+        else if (slot.kind === 't') request.tools = slot.value as RecordedRequest['tools']
+        else messages.push(slot.value)
+      }
+      request.messages = messages as RecordedMessage[]
+    }
+    const opts = env.opts ?? {}
+    if (opts.temperature !== undefined) request.temperature = opts.temperature
+    if (opts.maxTokens !== undefined) request.maxTokens = opts.maxTokens
+    if (opts.stop !== undefined) request.stop = opts.stop
+    const record = {
+      schema: RECORD_SCHEMA,
+      id: env.id,
+      sessionId: env.sessionId,
+      ...(env.purpose === undefined ? {} : { purpose: env.purpose }),
+      provider: env.provider,
+      model: env.model,
+      ...(env.reasoningEffort === undefined ? {} : { reasoningEffort: env.reasoningEffort }),
+      requestHash: env.requestHash,
+      attempt: env.attempt,
+      timing: env.timing,
+      status: env.status,
+      request,
+    } as CallRecord
+    if (env.resp !== undefined) {
+      const value = await this.slotValue(env.resp)
+      record.response = value as RecordedResponse
+    }
+    return record
   }
 
   /** One referenced blob's parsed value, or a fail-soft placeholder for the slot. */

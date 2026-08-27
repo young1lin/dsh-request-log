@@ -11,7 +11,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { assignSteps, CallStore, fileNameOf } from '../src/host/store.ts'
 import { BlobStore, CODEC_DEFLATE_RAW, encodeFrame, hashOfContent } from '../src/host/blob.ts'
 import { TREE_SCHEMA, encodeTree } from '../src/host/tree.ts'
-import { RECORD_SCHEMA, RECORD_SCHEMA_V2, toIndexEntry } from '../src/shared/types'
+import { RECORD_SCHEMA, RECORD_SCHEMA_V2, RECORD_SCHEMA_V3, toIndexEntry } from '../src/shared/types'
 import type { CallRecord } from '../src/shared/types'
 
 const dirs: string[] = []
@@ -60,6 +60,95 @@ describe('CallStore', () => {
     expect(fetched?.id).toBe('b')
     expect(fetched?.request.messages[0].content).toEqual([{ type: 'text', text: 'hi' }])
     expect(await store.get('sess-1', 'missing')).toBeUndefined()
+  })
+
+  it('writes v3 envelopes that round-trip the whole record', async () => {
+    const directory = await tempDir()
+    const store = new CallStore({ directory, retentionDays: 14, maxCallsPerSession: 100, maxFileBytes: 8 * 1024 * 1024 })
+    const original = richRecord()
+    await store.append(original)
+
+    const line = (await readFile(join(directory, 'sess-1.jsonl'), 'utf8')).trim()
+    const env = JSON.parse(line) as { v: number; tree?: string; refs?: unknown; zn?: number }
+    expect(env.v).toBe(RECORD_SCHEMA_V3)
+    expect(typeof env.tree).toBe('string')
+    expect(env.refs).toBeUndefined() // the piece list moved into the tree
+    expect(env.zn).toBeGreaterThan(0)
+    expect(await store.get('sess-1', original.id)).toEqual(original)
+  })
+
+  it('keeps the envelope line flat as the conversation grows', async () => {
+    const directory = await tempDir()
+    const store = new CallStore({ directory, retentionDays: 14, maxCallsPerSession: 500, maxFileBytes: 64 * 1024 * 1024 })
+    const messages: CallRecord['request']['messages'] = []
+    for (let turn = 1; turn <= 40; turn += 1) {
+      messages.push({ role: 'user', content: [{ type: 'text', text: 'ask ' + String(turn) }] })
+      messages.push({ role: 'assistant', content: [{ type: 'text', text: 'answer ' + String(turn) }] })
+      await store.append(recordOf({
+        id: 'c-' + String(turn),
+        requestHash: 'h' + String(turn),
+        request: { system: 'sys', messages: [...messages] },
+      }))
+    }
+    const lines = (await readFile(join(directory, 'sess-1.jsonl'), 'utf8')).split('\n').filter(l => l.length > 0)
+    expect(lines).toHaveLength(40)
+    // v2 re-listed every hash, so line 40 was ~40x line 1. A tree hash is one
+    // hash whatever the history length, so the line must stay flat.
+    expect(Buffer.byteLength(lines[39])).toBeLessThan(Buffer.byteLength(lines[0]) * 2)
+    // The last call still resolves its full 80-message history.
+    const last = await store.get('sess-1', 'c-40')
+    expect(last?.request.messages).toHaveLength(80)
+    expect(last?.request.messages[0].content[0].text).toBe('ask 1')
+    expect(last?.request.system).toBe('sys')
+  })
+
+  it('round-trips a compaction that replaced the message list', async () => {
+    const directory = await tempDir()
+    const store = new CallStore({ directory, retentionDays: 14, maxCallsPerSession: 100, maxFileBytes: 8 * 1024 * 1024 })
+    const grown: CallRecord['request']['messages'] = [
+      { role: 'user', content: [{ type: 'text', text: 'one' }] },
+      { role: 'assistant', content: [{ type: 'text', text: 'two' }] },
+      { role: 'user', content: [{ type: 'text', text: 'three' }] },
+    ]
+    await store.append(recordOf({ id: 'grown', request: { messages: grown } }))
+    // Compaction rewrites history wholesale: a delta cannot express it, so
+    // the writer must cut a keyframe and the read must still be exact.
+    const compacted: CallRecord['request']['messages'] = [
+      { role: 'user', content: [{ type: 'text', text: 'summary so far' }] },
+    ]
+    await store.append(recordOf({ id: 'compacted', requestHash: 'h2', purpose: 'compaction', request: { messages: compacted } }))
+
+    expect((await store.get('sess-1', 'compacted'))?.request.messages).toEqual(compacted)
+    expect((await store.get('sess-1', 'grown'))?.request.messages).toEqual(grown)
+  })
+
+  it('bills a retry nothing: an identical request materializes no new object', async () => {
+    const directory = await tempDir()
+    const store = new CallStore({ directory, retentionDays: 14, maxCallsPerSession: 100, maxFileBytes: 8 * 1024 * 1024 })
+    const first = recordOf({ id: 'try-1', attempt: 1 })
+    await store.append(first)
+    await store.append({ ...first, id: 'try-2', attempt: 2 })
+    const lines = (await readFile(join(directory, 'sess-1.jsonl'), 'utf8')).split('\n').filter(l => l.length > 0)
+    const envs = lines.map(line => JSON.parse(line) as { tree: string; zn: number })
+    expect(envs[0].zn).toBeGreaterThan(0)
+    // Same pieces, same tree, nothing new on disk.
+    expect(envs[1].tree).toBe(envs[0].tree)
+    expect(envs[1].zn).toBe(0)
+  })
+
+  it('degrades one unresolvable tree without losing the record metadata', async () => {
+    const directory = await tempDir()
+    const store = new CallStore({ directory, retentionDays: 14, maxCallsPerSession: 100, maxFileBytes: 8 * 1024 * 1024 })
+    await store.append(recordOf({ id: 'orphan' }))
+    const env = JSON.parse((await readFile(join(directory, 'sess-1.jsonl'), 'utf8')).trim()) as { tree: string }
+    await rm(join(directory, 'objects', env.tree.slice(0, 2), env.tree + '.drl'))
+
+    const record = await store.get('sess-1', 'orphan')
+    expect(record?.id).toBe('orphan')
+    expect(record?.provider).toBe('p')
+    expect(record?.status).toBe('ok')
+    // The gap is stated, never implied by an empty conversation.
+    expect(JSON.stringify(record?.request.messages)).toContain('unavailable')
   })
 
   it('pages the index newest-first with totals', async () => {
@@ -369,11 +458,16 @@ describe('CallStore', () => {
     const logical = text.split('\n').reduce((total, line) => {
       if (line.length === 0) return total
       let attributed = Buffer.byteLength(line, 'utf8')
-      if (line.startsWith('{"v":2')) {
+      if (line.startsWith('{"v":3')) {
+        attributed += (JSON.parse(line) as { zn: number }).zn
+      } else if (line.startsWith('{"v":2')) {
         for (const ref of JSON.parse(line).refs as { z: number }[]) attributed += ref.z
       }
       return total + attributed
     }, 0)
+    // v3 bills materialized bytes (zn), not per-reference sizes: this run
+    // settles at 866 logical for the two surviving lines (line bytes + Σ zn),
+    // and 900 is the smallest round bound above it.
     expect(logical).toBeLessThanOrEqual(900)
   })
 })
@@ -399,7 +493,9 @@ async function logicalBytesOfSessionFile(path: string): Promise<number> {
   for (const line of text.split('\n')) {
     if (line.length === 0) continue
     let attributed = Buffer.byteLength(line, 'utf8')
-    if (line.startsWith('{"v":2')) {
+    if (line.startsWith('{"v":3')) {
+      attributed += (JSON.parse(line) as { zn: number }).zn
+    } else if (line.startsWith('{"v":2')) {
       for (const ref of JSON.parse(line).refs as { z: number }[]) attributed += ref.z
     }
     total += attributed
@@ -516,8 +612,8 @@ describe('CallStore v2 persistence', () => {
     const store = new CallStore({ directory, retentionDays: 14, maxCallsPerSession: 100, maxFileBytes: 8 * 1024 * 1024 })
     await store.append(richRecord())
     const text = await readFile(join(directory, 'sess-1.jsonl'), 'utf8')
-    const env = JSON.parse(text.trim()) as { refs: { k: string; h: string }[] }
-    const responseRef = env.refs.find(ref => ref.k === 'r')
+    const env = JSON.parse(text.trim()) as { resp?: string }
+    const responseRef = env.resp === undefined ? undefined : { h: env.resp }
     if (responseRef === undefined) throw new Error('missing response ref')
     const objectPath = join(directory, 'objects', responseRef.h.slice(0, 2), responseRef.h + '.drl')
     await rm(objectPath)
@@ -615,7 +711,7 @@ describe('CallStore v2 persistence', () => {
     await store.sweep()
     await store.sweep()
     const after = await readFile(path, 'utf8')
-    expect(after.split('\n').filter(line => line.startsWith('{"v":2'))).toEqual([])
+    expect(after.split('\n').filter(line => line.startsWith('{"v":2') || line.startsWith('{"v":3'))).toEqual([])
     expect(await readdir(directory)).toEqual(['frozen.jsonl'])
     // Legacy read paths serve the frozen session unchanged.
     expect((await store.listIndex('frozen', 50, 0)).total).toBe(2)

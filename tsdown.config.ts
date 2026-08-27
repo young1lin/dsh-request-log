@@ -168,6 +168,7 @@ export default defineConfig([
     target: 'es2023',
     fixedExtension: false,
     dts: true,
+    minify: true,
     // Symmetric with the client bundle: stack traces resolve past the minifier.
     sourcemap: true,
     clean: true,
@@ -185,6 +186,7 @@ export default defineConfig([
     // Emits lib/client.d.ts so TypeScript consumers of the ./client
     // subpath get types (the runtime consumer is the module loader).
     dts: { sourcemap: false },
+    minify: true,
     sourcemap: true,
     clean: false,
     deps: {

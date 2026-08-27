@@ -534,14 +534,12 @@ export class CallStore {
     let head: Record<string, unknown> | null = null
 
     if (isV3Line(line)) {
-      try {
-        const env = JSON.parse(line) as CallEnvelopeV3
-        const resolved = await resolveTree(env.tree, hash => this.blobs.get(hash))
-        state.previous = { hash: env.tree, entries: resolved, depth: 0 }
-      } catch {
-        // Unresolvable: the next line starts a keyframe.
-        state.previous = undefined
-      }
+      // A v3 line passes through untouched, and its chain depth is not
+      // recorded anywhere the line can tell us: claiming depth 0 would let a
+      // later conversion delta onto an already-full chain and push the walk
+      // past TREE_MAX_WALK, making that record unreadable. Reset instead —
+      // the next line needing conversion cuts its own keyframe.
+      state.previous = undefined
       return line
     }
 

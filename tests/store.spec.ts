@@ -1008,6 +1008,34 @@ describe('CallStore v3 compatibility edges', () => {
     expect(store.lastSweepStatus?.phase).toBe('done')
   })
 
+  it('never chains a converted line onto a v3 line whose depth it cannot know', async () => {
+    // A file where legacy lines FOLLOW v3 ones (format flipped back to auto,
+    // or an earlier pass whose bakes failed for a stretch). The v3 line the
+    // conversion lands behind may already sit at the keyframe interval, so
+    // deltaing onto it would push the resolve walk past TREE_MAX_WALK and
+    // make that one record unreadable with every object still on disk.
+    const directory = await tempDir()
+    const store = new CallStore({ directory, retentionDays: 14, maxCallsPerSession: 10_000, maxFileBytes: 512 * 1024 * 1024 })
+    const growing = (n: number): CallRecord => recordOf({
+      id: `id-${n}`,
+      timing: { startedAt: 1_000 + n },
+      request: { messages: Array.from({ length: n }, (_, i) => ({ role: 'user', content: [{ type: 'text', text: `m${i}` }] })) },
+    })
+    // TREE_KEYFRAME_INTERVAL is 32, so the 33rd append sits at depth 32.
+    for (let n = 1; n <= 33; n += 1) await store.append(growing(n))
+    const path = join(directory, 'sess-1.jsonl')
+    let legacy = ''
+    for (let n = 34; n <= 73; n += 1) legacy += JSON.stringify(growing(n)) + '\n'
+    await writeFile(path, (await readFile(path, 'utf8')) + legacy, 'utf8')
+
+    await store.sweep()
+
+    for (let n = 1; n <= 73; n += 1) {
+      const record = await store.get('sess-1', `id-${n}`)
+      expect(record?.request.messages, `id-${n}`).toHaveLength(n)
+    }
+  })
+
   it('reports a failed tree bake or response bake and keeps the original line', async () => {
     const seed = async (): Promise<string> => {
       const directory = await tempDir()

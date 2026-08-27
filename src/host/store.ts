@@ -291,7 +291,14 @@ function buildEnvelope(record: CallRecord, pieces: Piece[]): CallEnvelope {
 export class CallStore {
   /** Bounded index cache: insertion-order eviction is enough (poll locality). */
   private readonly indexCache = new Map<string, IndexCacheEntry>()
-  /** Per-session write serialization: keyed by session id. */
+  /**
+   * Per-session write serialization: keyed by session id. PROCESS-LOCAL: two
+   * host processes sharing one directory (two `dsh web` instances on one
+   * DSH_HOME) get no cross-process locking — a trim's read-modify-write in
+   * one can interleave with an append in the other and lose records, and
+   * both stage rewrites through the same fixed `<file>.jsonl.tmp` name. One
+   * dsh-request-log writer per data directory is a deployment invariant.
+   */
   private readonly appends = new Map<string, AppendState>()
   /** Logical attributed bytes per session, validated against its (mtime, size). */
   private readonly logicalCache = new Map<string, LogicalMarker>()

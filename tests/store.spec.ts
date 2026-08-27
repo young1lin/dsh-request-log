@@ -904,6 +904,165 @@ describe('CallStore v2 persistence', () => {
   })
 })
 
+describe('CallStore v3 compatibility edges', () => {
+  /** Fabricate a genuine v2 line (previous-release shape) out of a v3 append. */
+  async function rewriteAsV2(directory: string, ids: string[]): Promise<void> {
+    const path = join(directory, 'sess-1.jsonl')
+    const text = await readFile(path, 'utf8')
+    const out: string[] = []
+    const byId = new Map(text.split('\n').filter(l => l.length > 0).map(l => [String((JSON.parse(l) as { id: string }).id), l]))
+    for (const id of ids) {
+      const v3 = JSON.parse(byId.get(id) as string) as Record<string, unknown>
+      const entries = await resolveTree(v3.tree as string, async hash => {
+        const bucket = (hash as string).slice(0, 2)
+        return readFile(join(directory, 'objects', bucket, hash + '.drl'))
+          .then(frame => inflateRawSync(decodeFrame(frame).payload))
+      })
+      const refs = [
+        ...entries.map(item => ({ k: item.k, h: item.h, z: 1 })),
+        ...(v3.resp === undefined ? [] : [{ k: 'r', h: v3.resp as string, z: 1 }]),
+      ]
+      delete v3.tree; delete v3.resp; delete v3.zn
+      out.push(JSON.stringify({ ...v3, v: 2, refs }))
+    }
+    await writeFile(path, out.join('\n') + '\n')
+  }
+
+  it('serves v1, v2 and v3 lines side by side through every read arm', async () => {
+    const directory = await tempDir()
+    await mkdir(directory, { recursive: true })
+    const store = new CallStore({ directory, retentionDays: 14, maxCallsPerSession: 100, maxFileBytes: 8 * 1024 * 1024 })
+    const legacy = recordOf({ id: 'old-1', sessionId: 'sess-1', requestHash: 'h0' })
+    const rich = richRecord()
+    await store.append(rich)
+    await rewriteAsV2(directory, ['rich-1'])
+    await writeFile(join(directory, 'sess-1.jsonl'), JSON.stringify(legacy) + '\n' + (await readFile(join(directory, 'sess-1.jsonl'), 'utf8')), 'utf8')
+    // A fresh v3 append lands after both (its accounting walks the v1/v2 lines).
+    await store.append(recordOf({ id: 'new-3', requestHash: 'h3' }))
+
+    const page = await store.listIndex('sess-1', 50, 0)
+    expect(page.calls.map(call => call.id)).toEqual(['new-3', 'rich-1', 'old-1'])
+    expect((await store.get('sess-1', 'old-1'))?.id).toBe('old-1')
+    expect(await store.get('sess-1', 'rich-1')).toEqual(rich)
+    expect((await store.get('sess-1', 'new-3'))?.id).toBe('new-3')
+  })
+
+  it('migrates a mixed file with v3, foreign, empty, identical and v2 lines', async () => {
+    const directory = await tempDir()
+    await mkdir(directory, { recursive: true })
+    const store = new CallStore({ directory, retentionDays: 14, maxCallsPerSession: 100, maxFileBytes: 8 * 1024 * 1024 })
+    const rich = richRecord()
+    await store.append(rich) // a genuine v3 keyframe first
+    const v3Line = (await readFile(join(directory, 'sess-1.jsonl'), 'utf8')).trim()
+    const twin = recordOf({ id: 'twin-1', requestHash: 'h2' })
+    const twinRetry = recordOf({ id: 'twin-2', requestHash: 'h2' })
+    await writeFile(join(directory, 'sess-1.jsonl'), [
+      v3Line,
+      'not json',
+      '',
+      JSON.stringify(twin),
+      JSON.stringify(twinRetry),
+    ].join('\n') + '\n')
+
+    await store.sweep()
+
+    const migrated = await readFile(join(directory, 'sess-1.jsonl'), 'utf8')
+    const lines = migrated.split('\n')
+    expect(lines[1]).toBe('not json') // foreign lines pass through untouched
+    const parsed = lines.filter(l => l.length > 0 && l !== 'not json').map(l => JSON.parse(l) as { v: number })
+    for (const p of parsed) expect(p.v).toBe(RECORD_SCHEMA_V3)
+    // The identical retry reuses the twin's tree instead of writing a new one.
+    const [a, b] = lines
+      .filter(l => l.startsWith('{"v":3'))
+      .map(l => JSON.parse(l) as { id: string; tree: string })
+      .filter(env => env.id.startsWith('twin'))
+    expect(a.id).toBe('twin-1'); expect(b.id).toBe('twin-2')
+    expect(b.tree).toBe(a.tree)
+    expect(await store.get('sess-1', 'twin-1')).toEqual(twin)
+    expect(await store.get('sess-1', 'twin-2')).toEqual(twinRetry)
+    expect(await store.get('sess-1', 'rich-1')).toEqual(rich)
+  })
+
+  it('resets the chain when a migrated v3 line cannot resolve its tree', async () => {
+    const directory = await tempDir()
+    const store = new CallStore({ directory, retentionDays: 14, maxCallsPerSession: 100, maxFileBytes: 8 * 1024 * 1024 })
+    await store.append(recordOf({ id: 'gone', requestHash: 'h1' }))
+    const rich = richRecord() // different shape: its tree is a fresh keyframe
+    await store.append(rich)
+    const lines = (await readFile(join(directory, 'sess-1.jsonl'), 'utf8')).split('\n').filter(l => l.length > 0)
+    const deadTree = (JSON.parse(lines[0]) as { tree: string }).tree
+    await rm(join(directory, 'objects', deadTree.slice(0, 2), deadTree + '.drl'))
+    await rewriteAsV2(directory, ['rich-1'])
+    await writeFile(join(directory, 'sess-1.jsonl'), lines[0] + '\n' + (await readFile(join(directory, 'sess-1.jsonl'), 'utf8')), 'utf8')
+
+    await store.sweep()
+
+    // The dead v3 line passes through unresolvable (chain state resets); the
+    // v2 line after it converts on its own intact keyframe.
+    const after = (await readFile(join(directory, 'sess-1.jsonl'), 'utf8')).split('\n').filter(l => l.length > 0)
+    expect(after).toHaveLength(2)
+    expect((JSON.parse(after[1]) as { v: number }).v).toBe(RECORD_SCHEMA_V3)
+    expect(await store.get('sess-1', 'rich-1')).toEqual(rich)
+    const degraded = await store.get('sess-1', 'gone')
+    expect(JSON.stringify(degraded?.request.messages)).toContain('unavailable')
+    expect(store.lastSweepStatus?.phase).toBe('done')
+  })
+
+  it('reports a failed tree bake or response bake and keeps the original line', async () => {
+    const seed = async (): Promise<string> => {
+      const directory = await tempDir()
+      await mkdir(directory, { recursive: true })
+      await writeFile(join(directory, 'legacy.jsonl'), JSON.stringify(recordOf({ id: 'l-1', sessionId: 'legacy' })) + '\n')
+      return directory
+    }
+    const deny = (directory: string, when: (raw: string) => boolean): CallStore => {
+      const blobs = new BlobStore({ directory: join(directory, 'objects') })
+      const real = blobs.put.bind(blobs)
+      blobs.put = async (hash: string, raw: string | Buffer) => {
+        if (typeof raw === 'string' && when(raw)) throw new Error('EACCES: bake denied')
+        return real(hash, raw)
+      }
+      return new CallStore({ directory, retentionDays: 14, maxCallsPerSession: 100, maxFileBytes: 8 * 1024 * 1024 }, blobs)
+    }
+
+    const treeDir = await seed()
+    const treeDenied = deny(treeDir, raw => raw.startsWith('{"t":3'))
+    await treeDenied.sweep()
+    expect(treeDenied.lastSweepStatus?.error).toContain('EACCES')
+    expect((await readFile(join(treeDir, 'legacy.jsonl'), 'utf8')).startsWith('{"schema":')).toBe(true)
+
+    const responseDir = await seed()
+    const responseDenied = deny(responseDir, raw => raw.includes('"chunkCount"'))
+    await responseDenied.sweep()
+    expect(responseDenied.lastSweepStatus?.error).toContain('EACCES')
+    expect((await readFile(join(responseDir, 'legacy.jsonl'), 'utf8')).startsWith('{"schema":')).toBe(true)
+  })
+
+  it('evicts the least-recent tree state past 64 sessions', async () => {
+    const directory = await tempDir()
+    const store = new CallStore({ directory, retentionDays: 14, maxCallsPerSession: 100, maxFileBytes: 8 * 1024 * 1024 })
+    for (let i = 0; i < 66; i += 1) {
+      await store.append(recordOf({ id: 'c-' + String(i), sessionId: 'sess-' + String(i), requestHash: 'h' + String(i) }))
+    }
+    // The bound never loses data: the first and last sessions both read back.
+    expect((await store.get('sess-0', 'c-0'))?.id).toBe('c-0')
+    expect((await store.get('sess-65', 'c-65'))?.id).toBe('c-65')
+    expect((await readdir(directory)).filter(name => name.endsWith('.jsonl'))).toHaveLength(66)
+  })
+
+  it('trims under the byte cap in v1 mode without converting anything', async () => {
+    const directory = await tempDir()
+    const store = new CallStore({ directory, retentionDays: 14, maxCallsPerSession: 100, maxFileBytes: 1000, format: 'v1' })
+    for (let i = 0; i < 6; i += 1) {
+      await store.append(recordOf({ id: 'r' + String(i), requestHash: 'h' + String(i) }))
+    }
+    const lines = (await readFile(join(directory, 'sess-1.jsonl'), 'utf8')).split('\n').filter(l => l.length > 0)
+    expect(lines.length).toBeLessThan(6) // the cap bit
+    for (const line of lines) expect(line.startsWith('{"schema":1')).toBe(true)
+    expect(await readdir(directory)).toEqual(['sess-1.jsonl']) // no object store in frozen mode
+  })
+})
+
 describe('sweep status observability', () => {
   it('publishes a completed cycle with migration counts for /health', async () => {
     const directory = await tempDir()

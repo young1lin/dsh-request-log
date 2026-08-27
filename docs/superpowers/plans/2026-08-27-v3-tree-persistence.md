@@ -1,6 +1,6 @@
 # v3 Tree Persistence Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** Stop the v2 `refs[]` array from re-listing the whole conversation on every append — move the piece list into content-addressed *tree objects* chained by parent pointer with periodic keyframes, so an envelope line stays ~200 bytes no matter how long the session runs.
 
@@ -153,7 +153,7 @@ Pass 2 is why the GC change must ship **before or with** the first v3 write, nev
 - Consumes: nothing from earlier tasks.
 - Produces: `BlobStore.put(hash: string, raw: string | Buffer): Promise<PutResult>` where `interface PutResult { z: number; created: boolean }`. `z` is the compressed payload length exactly as before; `created` is `true` only when this call wrote the object.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Add to `tests/blob.spec.ts`, inside the existing `describe('BlobStore', ...)` block, immediately before the test named `'rejects a put whose declared hash does not match its content'`:
 
@@ -170,7 +170,7 @@ Add to `tests/blob.spec.ts`, inside the existing `describe('BlobStore', ...)` bl
   })
 ```
 
-- [ ] **Step 2: Run the test and watch it fail**
+- [x] **Step 2: Run the test and watch it fail**
 
 Run: `npx vitest run tests/blob.spec.ts`
 
@@ -178,7 +178,7 @@ Expected: FAIL on `expect(first.created).toBe(true)` with `expected undefined to
 
 Other tests in the file will also fail (they compare the return to a number). That is expected; Step 3 fixes them.
 
-- [ ] **Step 3: Change `put` to return `PutResult`**
+- [x] **Step 3: Change `put` to return `PutResult`**
 
 In `src/host/blob.ts`, add the exported interface directly above `export class BlobStore`:
 
@@ -214,7 +214,7 @@ and the tail of the method:
 
 Update the doc comment's first sentence to: `Materialize one immutable object for raw content. Reports the COMPRESSED payload length and whether this call did the writing.`
 
-- [ ] **Step 4: Update the existing callers and specs**
+- [x] **Step 4: Update the existing callers and specs**
 
 In `src/host/store.ts`, `sealEnvelope` becomes:
 
@@ -238,13 +238,13 @@ In `tests/blob.spec.ts`, every existing `await store.put(...)` used as a number 
 
 Mechanically: `const z = await store.put(a, b)` becomes `const { z } = await store.put(a, b)`; a bare `await store.put(a, b)` with no binding needs no change.
 
-- [ ] **Step 5: Run the full suite**
+- [x] **Step 5: Run the full suite**
 
 Run: `npx vitest run && npx tsc --noEmit && npx oxlint`
 
 Expected: all tests pass, typecheck clean, lint silent.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src/host/blob.ts src/host/store.ts tests/blob.spec.ts
@@ -279,7 +279,7 @@ Pure vocabulary and algorithms, no filesystem. Fully unit-tested before anything
   - `chooseTreeNode(entries: TreeEntry[], previous: TreeState | undefined): TreeChoice`
   - `resolveTree(hash: string, read: (hash: string) => Promise<Buffer>): Promise<TreeEntry[]>`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Create `tests/tree.spec.ts`:
 
@@ -460,13 +460,13 @@ describe('resolveTree', () => {
 })
 ```
 
-- [ ] **Step 2: Run the tests and watch them fail**
+- [x] **Step 2: Run the tests and watch them fail**
 
 Run: `npx vitest run tests/tree.spec.ts`
 
 Expected: the whole file fails to load — `Failed to load url ../src/host/tree.ts`. That is the correct first failure.
 
-- [ ] **Step 3: Implement `src/host/tree.ts`**
+- [x] **Step 3: Implement `src/host/tree.ts`**
 
 ```ts
 /**
@@ -615,7 +615,7 @@ export async function resolveTree(
 }
 ```
 
-- [ ] **Step 4: Run the tests and watch them pass**
+- [x] **Step 4: Run the tests and watch them pass**
 
 Run: `npx vitest run tests/tree.spec.ts && npx tsc --noEmit && npx oxlint`
 
@@ -623,7 +623,7 @@ Expected: all tree specs pass, typecheck clean, lint silent.
 
 If the cycle test fails with a walk-bound message instead of a cycle message, that is still acceptable — the assertion accepts either. If it hangs, the `seen` guard is wrong; fix it before moving on.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/host/tree.ts tests/tree.spec.ts
@@ -653,7 +653,7 @@ Must land **before** any v3 line is written, or a sweep would delete live trees.
 - Consumes: `decodeTree` from `src/host/tree.ts` (Task 2).
 - Produces: `CallStore.sweep` marks transitively. No new public API.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Add to `tests/store.spec.ts`, immediately before the test named `'migrates a legacy file losslessly and idempotently'`:
 
@@ -709,13 +709,13 @@ import { TREE_SCHEMA, encodeTree } from '../src/host/tree.ts'
 
 (`CODEC_DEFLATE_RAW`, `encodeFrame` and `hashOfContent` are already imported in that file — only add `TREE_SCHEMA` and `encodeTree`.)
 
-- [ ] **Step 2: Run the test and watch it fail**
+- [x] **Step 2: Run the test and watch it fail**
 
 Run: `npx vitest run tests/store.spec.ts -t "marks tree chains"`
 
 Expected: FAIL — the first `expect(...).toBe(true)` gets `false`, because `REACHABLE_HASH` only matches `"h":"<hash>"` and the line contains `"tree":"<hash>"`, so the sweep deletes everything.
 
-- [ ] **Step 3: Broaden the mark, then expand tree chains**
+- [x] **Step 3: Broaden the mark, then expand tree chains**
 
 In `src/host/store.ts`, replace the `REACHABLE_HASH` constant:
 
@@ -792,13 +792,13 @@ And add this private method to `CallStore`:
   }
 ```
 
-- [ ] **Step 4: Run the tests and watch them pass**
+- [x] **Step 4: Run the tests and watch them pass**
 
 Run: `npx vitest run && npx tsc --noEmit && npx oxlint`
 
 Expected: all pass. The existing test `'sweep GC removes unreachable stale objects, spares referenced and fresh ones'` must still pass — the broadened regex marks strictly more, and that test asserts a genuinely unreferenced object is removed, which stays true because its hash appears in no line.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/host/store.ts tests/store.spec.ts
@@ -840,7 +840,7 @@ The core task. Writing without reading would leave the store producing data it c
 
 That is deliberate and it is what fixes the 12.4x over-count: a piece already on disk costs this session nothing more, so it bills nothing. A retry that re-sends an identical request materializes nothing and bills `zn: 0`. Summed across a file, `line bytes + Σ zn` tracks the session's real contribution to disk.
 
-- [ ] **Step 1: Add the v3 types**
+- [x] **Step 1: Add the v3 types**
 
 In `src/shared/types.ts`, find `export interface CallEnvelope {`. Directly **above** it, insert the shared head and change `CallEnvelope` to extend it. Replace the whole `CallEnvelope` interface declaration line and its scalar fields with:
 
@@ -910,7 +910,7 @@ Finally widen the projection — change its signature only, the body is unchange
 export function entryFromEnvelope(env: EnvelopeHead): CallIndexEntry {
 ```
 
-- [ ] **Step 2: Write the failing tests**
+- [x] **Step 2: Write the failing tests**
 
 Add to `tests/store.spec.ts`, inside the top-level `describe('CallStore', ...)` block, after the test named `'appends and reads back records losslessly'`:
 
@@ -1007,13 +1007,13 @@ Add to `tests/store.spec.ts`, inside the top-level `describe('CallStore', ...)` 
 
 Add `RECORD_SCHEMA_V3` to the existing `../src/shared/types` import in that file, and `rm` to the existing `node:fs/promises` import.
 
-- [ ] **Step 3: Run the tests and watch them fail**
+- [x] **Step 3: Run the tests and watch them fail**
 
 Run: `npx vitest run tests/store.spec.ts -t "v3 envelopes"`
 
 Expected: FAIL with `expected 2 to be 3` — append still writes v2.
 
-- [ ] **Step 4: Implement the v3 write path**
+- [x] **Step 4: Implement the v3 write path**
 
 In `src/host/store.ts`:
 
@@ -1194,7 +1194,7 @@ Rewrite `append` to use it. Replace the whole method body with:
 
 Note the hashing now happens **inside** the chain (it needs the previous tree state, which only the chain owns). That is a deliberate change from v2's comment about hashing outside the chain — update that comment.
 
-- [ ] **Step 5: Implement the v3 read path**
+- [x] **Step 5: Implement the v3 read path**
 
 Add the line predicate next to `isV2Line`:
 
@@ -1310,7 +1310,7 @@ Add the reassembly:
   }
 ```
 
-- [ ] **Step 6: Update the existing v2-shaped assertions**
+- [x] **Step 6: Update the existing v2-shaped assertions**
 
 Run `grep -n '{"v":2' tests/store.spec.ts` and fix the byte-accounting helpers so they understand v3. Both sites (around lines 371 and 401) compute attributed bytes inline; each needs a v3 branch added **before** its v2 branch:
 
@@ -1332,13 +1332,13 @@ The migration tests around lines 636, 662 and 683 assert `RECORD_SCHEMA_V2` and 
 
 The byte-cap test asserting `expect(logical).toBeLessThanOrEqual(900)` may now hold at a different number, because v3 bills materialized bytes rather than per-reference sizes. Run it, read the actual value, and set the bound to the smallest round number above it — then add a comment saying what the number means.
 
-- [ ] **Step 7: Run everything**
+- [x] **Step 7: Run everything**
 
 Run: `npx vitest run && npx tsc --noEmit && npx oxlint && npm run build`
 
 Expected: all green, nothing skipped. The migrator still writes v2; only `append` writes v3.
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add src/shared/types.ts src/host/store.ts tests/store.spec.ts
@@ -1382,7 +1382,7 @@ Both run over the file **in order** through one shared `TreeState`, so a migrate
 
 `zn` on a migrated line is whatever `put()` reported as created during that conversion. For a v2 file that is usually just the tree node, because the pieces are already on disk. That is correct: migrating adds only the tree.
 
-- [ ] **Step 1: Point the migration tests at v3 and add the v2→v3 test**
+- [x] **Step 1: Point the migration tests at v3 and add the v2→v3 test**
 
 Change the three `RECORD_SCHEMA_V2` expectations around lines 636, 662 and 683 of `tests/store.spec.ts` to `RECORD_SCHEMA_V3`. Then add, after them:
 
@@ -1446,13 +1446,13 @@ Change the three `RECORD_SCHEMA_V2` expectations around lines 636, 662 and 683 o
 
 Add `resolveTree` to the `../src/host/tree.ts` import and `decodeFrame` to the `../src/host/blob.ts` import; add `inflateRawSync` to the `node:zlib` import.
 
-- [ ] **Step 2: Run and watch them fail**
+- [x] **Step 2: Run and watch them fail**
 
 Run: `npx vitest run tests/store.spec.ts -t "v3"`
 
 Expected: the migration specs fail with `expected 2 to be 3` — the migrator still emits v2.
 
-- [ ] **Step 3: Convert the migrator**
+- [x] **Step 3: Convert the migrator**
 
 Replace `ensureV2Line` with a stateful converter. It takes and mutates the running tree state so a whole file shares one chain.
 
@@ -1623,13 +1623,13 @@ In `migrateFile`, the `changed` detection must also treat a v2 line as convertib
 
 (Passing v3 lines through `ensureV3Line` is what advances the chain state.)
 
-- [ ] **Step 4: Run everything**
+- [x] **Step 4: Run everything**
 
 Run: `npx vitest run && npx tsc --noEmit && npx oxlint && npm run build`
 
 Expected: all green, no skipped tests.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/host/store.ts tests/store.spec.ts
@@ -1661,7 +1661,7 @@ The small findings from the review, plus the docs that now describe a format tha
 - Consumes: everything above.
 - Produces: `CallIndexEntry` no longer has `responseBlockKinds`; `EnvelopeSum` no longer has `blockKinds`.
 
-- [ ] **Step 1: Remove the dead index field**
+- [x] **Step 1: Remove the dead index field**
 
 `responseBlockKinds` is a required field on every index row, written into every envelope's `sum`, shipped on every 3-second poll — and read by nothing. `grep -rn "responseBlockKinds\|blockKinds" src/` returns only its own definition and construction.
 
@@ -1678,7 +1678,7 @@ Leave `requestChars` and `finishMessage` alone: both are cheap scalars, `request
 
 Run `npx tsc --noEmit` — it will name every remaining site.
 
-- [ ] **Step 2: Slice the index page from the tail**
+- [x] **Step 2: Slice the index page from the tail**
 
 `listIndex` copies and reverses the entire entry array (up to `maxCallsPerSession`) on every request, three seconds apart, to serve at most `limit` rows. Replace it:
 
@@ -1697,7 +1697,7 @@ Run `npx tsc --noEmit` — it will name every remaining site.
 
 The existing paging tests must pass unchanged — if any fails, the arithmetic is wrong, not the test.
 
-- [ ] **Step 3: Fix the protocol default for plain OpenAI routes**
+- [x] **Step 3: Fix the protocol default for plain OpenAI routes**
 
 In `src/wire/index.ts`, `detectProtocol` sends `provider === 'openai'` to `openai-responses`. A plain OpenAI route usually speaks ChatCompletion, so the first view is the wrong one. Change:
 
@@ -1722,7 +1722,7 @@ Add to `tests/wire.spec.ts`, in whichever describe block covers `detectProtocol`
 
 Write this test **first** and watch the first assertion fail with `expected 'openai-responses' to be 'openai-completions'`.
 
-- [ ] **Step 4: Update the documentation**
+- [x] **Step 4: Update the documentation**
 
 In `README.md`, replace the whole **Storage** bullet under "How it works" with a v3 description covering: one JSONL line per settled attempt; each line a v3 envelope carrying one tree hash, the response hash, and the bytes that append materialized; trees living in the content-addressed object store as keyframe-plus-delta chains; the line staying flat however long the session runs; v1 and v2 files staying readable forever and migrating lazily within a per-cycle byte budget; the daily transitive GC; and `format: 'v1'` as the kill switch.
 
@@ -1736,13 +1736,13 @@ Delete the sentence added earlier about budgeting 3-4x for cluster overhead only
 
 Rename `DESIGN-v2-persistence.md` to `DESIGN-persistence.md` (`git mv`), and add a `## v3: tree objects` section at its end explaining the change and why `refs[]` had to go. Update the README's reference to the old filename if one exists (`grep -rn "DESIGN-v2-persistence" .` excluding `node_modules`).
 
-- [ ] **Step 5: Run the full verification**
+- [x] **Step 5: Run the full verification**
 
 Run: `npx vitest run && npx tsc --noEmit && npx oxlint && npm run build && npm pack --dry-run`
 
 Expected: all green.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add -A

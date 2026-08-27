@@ -66,7 +66,7 @@ describe('frames and hashing', () => {
 describe('BlobStore', () => {
   it('puts and gets objects with compressed sizes reported as z', async () => {
     const store = new BlobStore({ directory: await tempDir() })
-    const z = await store.put(HASH, PIECE)
+    const { z } = await store.put(HASH, PIECE)
     expect(z).toBeGreaterThan(0)
     expect(z).toBeLessThan(PIECE.length) // compressible text dedups hard
     expect(await store.has(HASH)).toBe(true)
@@ -87,9 +87,9 @@ describe('BlobStore', () => {
   it('skips the disk write for an existing hash but still measures z', async () => {
     const root = await tempDir()
     const store = new BlobStore({ directory: root })
-    const z1 = await store.put(HASH, PIECE)
+    const { z: z1 } = await store.put(HASH, PIECE)
     const before = (await stat(join(root, HASH.slice(0, 2), HASH + '.drl'))).mtimeMs
-    const z2 = await store.put(HASH, PIECE)
+    const { z: z2 } = await store.put(HASH, PIECE)
     expect(z2).toBe(z1)
     const after = (await stat(join(root, HASH.slice(0, 2), HASH + '.drl'))).mtimeMs
     expect(after).toBe(before) // untouched: content-addressed duplicates are no-ops
@@ -98,9 +98,9 @@ describe('BlobStore', () => {
   it('does not recompress a piece already in the store', async () => {
     const root = await tempDir()
     const store = new BlobStore({ directory: root })
-    const z1 = await store.put(HASH, PIECE)
+    const { z: z1 } = await store.put(HASH, PIECE)
     expect(store.compressions).toBe(1)
-    const z2 = await store.put(HASH, PIECE)
+    const { z: z2 } = await store.put(HASH, PIECE)
     // The dedup hot path resends the whole history every call: a piece already
     // on disk must cost a lookup, never a second deflate.
     expect(store.compressions).toBe(1)
@@ -110,11 +110,22 @@ describe('BlobStore', () => {
   it('reports z for an existing object from its frame, matching a fresh compression', async () => {
     const root = await tempDir()
     const first = new BlobStore({ directory: root })
-    const z1 = await first.put(HASH, PIECE)
+    const { z: z1 } = await first.put(HASH, PIECE)
     // A cold process (no in-memory knowledge) must derive the same z from disk.
     const second = new BlobStore({ directory: root })
-    expect(await second.put(HASH, PIECE)).toBe(z1)
+    expect((await second.put(HASH, PIECE)).z).toBe(z1)
     expect(second.compressions).toBe(0)
+  })
+
+  it('reports whether the put created the object or found it already baked', async () => {
+    const store = new BlobStore({ directory: await tempDir() })
+    const first = await store.put(HASH, PIECE)
+    expect(first.created).toBe(true)
+    expect(first.z).toBeGreaterThan(0)
+    // The append path needs this to bill only the bytes it actually added.
+    const second = await store.put(HASH, PIECE)
+    expect(second.created).toBe(false)
+    expect(second.z).toBe(first.z)
   })
 
   it('rejects a put whose declared hash does not match its content', async () => {
@@ -159,7 +170,7 @@ describe('BlobStore', () => {
     // A genuinely corrupt store entry is removable so recovery can re-bake.
     await rm(objectPath)
     expect(await store.has(HASH)).toBe(false)
-    const z = await store.put(HASH, PIECE)
+    const { z } = await store.put(HASH, PIECE)
     expect(z).toBeGreaterThan(0)
     expect((await store.get(HASH)).toString('utf8')).toBe(PIECE)
   })
@@ -167,7 +178,7 @@ describe('BlobStore', () => {
   it('stores oversized pieces uncompressed behind the identity codec', async () => {
     const root = await tempDir()
     const store = new BlobStore({ directory: root, maxChunkBytes: 8 })
-    const z = await store.put(HASH, PIECE)
+    const { z } = await store.put(HASH, PIECE)
     expect(z).toBe(Buffer.byteLength(PIECE)) // no compression attempted
     const raw = await store.get(HASH)
     expect(raw.toString('utf8')).toBe(PIECE)

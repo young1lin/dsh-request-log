@@ -132,6 +132,14 @@ class ByteBudgetLru {
 
 export interface GcResult { removedObjects: number; removedTemp: number }
 
+/** What one {@link BlobStore.put} did: the payload size, and whether it wrote. */
+export interface PutResult {
+  /** Compressed payload length — the envelope's byte accounting unit. */
+  z: number
+  /** True only when THIS call materialized the object. */
+  created: boolean
+}
+
 export class BlobStore {
   private readonly lru: ByteBudgetLru
   /** Deflate calls actually performed (diagnostics: dedup effectiveness). */
@@ -198,20 +206,19 @@ export class BlobStore {
   }
 
   /**
-   * Materialize one immutable object for raw content. Returns the COMPRESSED
-   * payload length (the envelope z), whether or not this call did the
-   * writing. Duplicates of an existing hash cost one stat: consecutive calls
-   * resend nearly the whole conversation, so compressing a piece already on
-   * disk just to measure z would spend the entire cost dedup exists to
-   * remove. Throws when the write genuinely failed AND the object is absent
-   * afterwards, so callers never persist an envelope referencing an unbaked
-   * hash.
+   * Materialize one immutable object for raw content. Reports the COMPRESSED
+   * payload length and whether this call did the writing. Duplicates of an
+   * existing hash cost one stat: consecutive calls resend nearly the whole
+   * conversation, so compressing a piece already on disk just to measure z
+   * would spend the entire cost dedup exists to remove. Throws when the write
+   * genuinely failed AND the object is absent afterwards, so callers never
+   * persist an envelope referencing an unbaked hash.
    */
-  async put(hash: string, raw: string | Buffer): Promise<number> {
+  async put(hash: string, raw: string | Buffer): Promise<PutResult> {
     const buf = typeof raw === 'string' ? Buffer.from(raw, 'utf8') : raw
     if (hashOfContent(buf) !== hash) throw new Error('blob put rejected: hash/content mismatch')
     const existing = await this.payloadSizeOf(hash)
-    if (existing !== null) return existing
+    if (existing !== null) return { z: existing, created: false }
     const codec = codecFor(buf.length, this.maxChunkBytes)
     let payload: Buffer
     if (codec === CODEC_IDENTITY) {
@@ -239,7 +246,7 @@ export class BlobStore {
     // The caller must learn a bake failed BEFORE any envelope references it.
     const landed = await this.payloadSizeOf(hash)
     if (landed === null) throw new Error(`blob object write failed for ${hash}`)
-    return landed
+    return { z: landed, created: true }
   }
 
   /**

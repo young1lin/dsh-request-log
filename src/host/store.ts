@@ -433,7 +433,7 @@ export class CallStore {
   /** Upload every referenced piece before the envelope line may land. */
   private async sealEnvelope(env: CallEnvelope, pieces: Piece[]): Promise<void> {
     for (let i = 0; i < env.refs.length; i += 1) {
-      env.refs[i].z = await this.blobs.put(env.refs[i].h, pieces[i].json)
+      env.refs[i].z = (await this.blobs.put(env.refs[i].h, pieces[i].json)).z
     }
   }
 

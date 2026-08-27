@@ -45,6 +45,7 @@ import { join } from 'node:path'
 import type { CallEnvelope, CallIndexEntry, CallIndexResponse, CallRecord, EnvelopeRef, RecordedMessage, RecordedRequest, RecordedResponse } from '../shared/types'
 import { RECORD_SCHEMA, RECORD_SCHEMA_V2, entryFromEnvelope, envelopeSumOf, toIndexEntry } from '../shared/types'
 import { BlobStore, hashOfContent } from './blob'
+import { decodeTree } from './tree'
 
 export interface StoreConfig {
   /** Root directory holding the per-session JSONL files. */
@@ -79,8 +80,15 @@ export const DEFAULT_MIGRATION_BUDGET_BYTES = 64 * 1024 * 1024
 /** Win32 reserved device names: the OS ignores the extension, so "NUL.jsonl" would target the device. */
 const RESERVED_DEVICE_NAME = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\.|$)/i
 
-/** Reachable-hash extractor for the object-store GC (envelope refs carry 64 hex chars). */
-const REACHABLE_HASH = /"h":"([0-9a-f]{64})"/g
+/**
+ * Any sha256 appearing in a line: v2 `refs[].h`, a v3 `tree` or `resp`.
+ * Over-marking only spares an object from GC; under-marking deletes live
+ * data, so this is deliberately broad.
+ */
+const REACHABLE_HASH = /[0-9a-f]{64}/g
+
+/** Tree hashes specifically: only these get walked for transitive marks. */
+const REACHABLE_TREE = /"tree":"([0-9a-f]{64})"/g
 
 /** Sanitize a session id into one safe path segment (ids are uuid-like already). */
 export function fileNameOf(sessionId: string): string {
@@ -824,6 +832,7 @@ export class CallStore {
       }
       const cutoff = now - this.config.retentionDays * DAY_MS
       const reachable = new Set<string>()
+      const treeRoots = new Set<string>()
       const migrationCandidates: { sessionId: string; path: string; mtimeMs: number; size: number }[] = []
       for (const name of names) {
         if (!name.endsWith('.jsonl')) continue
@@ -844,7 +853,8 @@ export class CallStore {
           const text = await readFile(path, 'utf8')
           // The GC mark phase rides reads this sweep performs anyway.
           if (this.v2Enabled) {
-            for (const match of text.matchAll(REACHABLE_HASH)) reachable.add(match[1])
+            for (const match of text.matchAll(REACHABLE_HASH)) reachable.add(match[0])
+            for (const match of text.matchAll(REACHABLE_TREE)) treeRoots.add(match[1])
           }
           const lines = text.split('\n')
           while (lines.length > 0 && lines[lines.length - 1].length === 0) lines.pop()
@@ -866,6 +876,11 @@ export class CallStore {
       }
       if (this.v2Enabled) {
         status.phase = 'gc'
+        try {
+          await this.markTreeChains(treeRoots, reachable)
+        } catch (error) {
+          swallowed('tree mark', error)
+        }
         try {
           const gc = await this.blobs.gc(reachable, now)
           status.removedObjects = gc.removedObjects
@@ -916,6 +931,31 @@ export class CallStore {
       status.running = false
       status.finishedAt = Date.now()
       status.durationMs = status.finishedAt - status.startedAt
+    }
+  }
+
+  /**
+   * Walk every tree chain rooted in `roots`, adding each node's own hash,
+   * its parent, and its entries to `reachable`. A node that cannot be read
+   * or parsed stops that branch: GC then only risks sparing objects, never
+   * deleting live ones.
+   */
+  private async markTreeChains(roots: ReadonlySet<string>, reachable: Set<string>): Promise<void> {
+    const pending = [...roots]
+    const visited = new Set<string>()
+    while (pending.length > 0) {
+      const hash = pending.pop() as string
+      if (visited.has(hash)) continue
+      visited.add(hash)
+      reachable.add(hash)
+      let node
+      try {
+        node = decodeTree((await this.blobs.get(hash)).toString('utf8'))
+      } catch {
+        continue // Unreadable or not a tree: nothing more to mark down here.
+      }
+      for (const item of node.e) reachable.add(item.h)
+      if (node.p !== undefined) pending.push(node.p)
     }
   }
 

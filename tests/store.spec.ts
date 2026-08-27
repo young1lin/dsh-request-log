@@ -10,6 +10,7 @@ import { deflateRawSync } from 'node:zlib'
 import { afterEach, describe, expect, it } from 'vitest'
 import { assignSteps, CallStore, fileNameOf } from '../src/host/store.ts'
 import { BlobStore, CODEC_DEFLATE_RAW, encodeFrame, hashOfContent } from '../src/host/blob.ts'
+import { TREE_SCHEMA, encodeTree } from '../src/host/tree.ts'
 import { RECORD_SCHEMA, RECORD_SCHEMA_V2, toIndexEntry } from '../src/shared/types'
 import type { CallRecord } from '../src/shared/types'
 
@@ -619,6 +620,47 @@ describe('CallStore v2 persistence', () => {
     // Legacy read paths serve the frozen session unchanged.
     expect((await store.listIndex('frozen', 50, 0)).total).toBe(2)
     expect((await store.get('frozen', 'new-1'))?.id).toBe('new-1')
+  })
+
+  it('marks tree chains transitively so a swept store keeps live pieces', async () => {
+    const directory = await tempDir()
+    const objects = join(directory, 'objects')
+    await mkdir(directory, { recursive: true })
+
+    // Bake one piece, one keyframe naming it, one delta naming a second piece.
+    const bakeRaw = async (content: string): Promise<string> => {
+      const hash = hashOfContent(content)
+      await mkdir(join(objects, hash.slice(0, 2)), { recursive: true })
+      await writeFile(
+        join(objects, hash.slice(0, 2), hash + '.drl'),
+        encodeFrame(CODEC_DEFLATE_RAW, deflateRawSync(Buffer.from(content, 'utf8'), { level: 6 })),
+      )
+      return hash
+    }
+    const older = await bakeRaw(JSON.stringify({ role: 'user', content: [] }))
+    const newer = await bakeRaw(JSON.stringify({ role: 'assistant', content: [] }))
+    const rootHash = await bakeRaw(encodeTree({ t: TREE_SCHEMA, e: [{ k: 'm', h: older }] }))
+    const leafHash = await bakeRaw(encodeTree({ t: TREE_SCHEMA, p: rootHash, e: [{ k: 'm', h: newer }] }))
+
+    // Only the LEAF appears in the line. Everything behind it is reachable
+    // solely through the tree chain.
+    await writeFile(
+      join(directory, 'sess-1.jsonl'),
+      JSON.stringify({ v: 3, id: 'c-1', tree: leafHash }) + '\n',
+    )
+    // Age every object past the GC grace floor so nothing is spared by mtime.
+    const stale = new Date(Date.now() - 3 * 60 * 60 * 1000)
+    for (const hash of [older, newer, rootHash, leafHash]) {
+      await utimes(join(objects, hash.slice(0, 2), hash + '.drl'), stale, stale)
+    }
+
+    const store = new CallStore({ directory, retentionDays: 14, maxCallsPerSession: 100, maxFileBytes: 8 * 1024 * 1024 })
+    await store.sweep()
+
+    for (const hash of [older, newer, rootHash, leafHash]) {
+      expect(await stat(join(objects, hash.slice(0, 2), hash + '.drl')).then(() => true, () => false))
+        .toBe(true)
+    }
   })
 
   it('migrates a legacy file losslessly and idempotently', async () => {

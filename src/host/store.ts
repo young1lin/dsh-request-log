@@ -33,9 +33,9 @@
  * daily sweep; oversized ones trimmed to the newest records. The sweep also
  * runs the mark-sweep GC over the object store (reachable hashes extracted
  * from the live files it reads anyway; unreachable objects past a grace
- * floor reclaimed, tmp debris always) and migrates the ONE oldest
- * not-yet-v2 file per cycle. All IO is fail-soft — a store error never
- * breaks a model call.
+ * floor reclaimed, tmp debris always) and migrates not-yet-v2 files
+ * newest-first up to a per-cycle byte budget. All IO is fail-soft — a
+ * store error never breaks a model call.
  *
  * @module dsh-request-log/host/store
  */
@@ -61,9 +61,20 @@ export interface StoreConfig {
    * byte-for-byte (kill switch). Default 'auto'.
    */
   format?: 'v1' | 'auto'
+  /**
+   * Source bytes of legacy JSONL the lazy migrator may convert per sweep
+   * cycle. The work is bounded so a sweep never stalls the process, but the
+   * budget must outpace retention: a one-file-per-cycle migrator lets a
+   * backlog expire unconverted, so the dedup win would only ever apply to
+   * sessions written after the upgrade.
+   */
+  migrationBudgetBytes?: number
 }
 
 const DAY_MS = 24 * 60 * 60 * 1000
+
+/** Default per-cycle migration budget: a ~700 MB backlog converts in under a fortnight. */
+export const DEFAULT_MIGRATION_BUDGET_BYTES = 64 * 1024 * 1024
 
 /** Win32 reserved device names: the OS ignores the extension, so "NUL.jsonl" would target the device. */
 const RESERVED_DEVICE_NAME = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\.|$)/i
@@ -727,8 +738,8 @@ export class CallStore {
    * be lost to the rewrite window. The v2 object store rides the same pass:
    * reachable hashes are marked from the files read here anyway, then the GC
    * sweeps unreachable objects past a grace floor plus tmp debris, and the
-   * bounded migrator converts the ONE oldest not-all-v2 file. Returns the
-   * disposal counts (for the health log).
+   * migrator converts not-yet-v2 files newest-first until the per-cycle byte
+   * budget is spent. Returns the disposal counts (for the health log).
    */
   async sweep(now: number = Date.now()): Promise<{ deletedFiles: number; trimmedFiles: number }> {
     let deletedFiles = 0
@@ -741,14 +752,14 @@ export class CallStore {
     }
     const cutoff = now - this.config.retentionDays * DAY_MS
     const reachable = new Set<string>()
-    const migrationCandidates: { sessionId: string; path: string; mtimeMs: number }[] = []
+    const migrationCandidates: { sessionId: string; path: string; mtimeMs: number; size: number }[] = []
     for (const name of names) {
       if (!name.endsWith('.jsonl')) continue
       const path = join(this.config.directory, name)
       const sessionId = name.replace(/\.jsonl$/, '')
       try {
         const info = await stat(path)
-        if (this.v2Enabled) migrationCandidates.push({ sessionId, path, mtimeMs: info.mtimeMs })
+        if (this.v2Enabled) migrationCandidates.push({ sessionId, path, mtimeMs: info.mtimeMs, size: info.size })
         if (info.mtimeMs < cutoff) {
           await rm(path)
           this.invalidateCaches(sessionId)
@@ -785,8 +796,16 @@ export class CallStore {
       } catch {
         // GC is best-effort; missed objects get reclaimed next cycle.
       }
-      migrationCandidates.sort((a, b) => a.mtimeMs - b.mtimeMs)
+      // Newest first: a fresh session has the most retention life ahead of it,
+      // so converting it buys the most stored-byte-days - and the oldest files
+      // may not survive to the next cycle anyway.
+      migrationCandidates.sort((a, b) => b.mtimeMs - a.mtimeMs)
+      const budget = this.config.migrationBudgetBytes ?? DEFAULT_MIGRATION_BUDGET_BYTES
+      let spent = 0
       for (const candidate of migrationCandidates) {
+        // Checked BEFORE the conversion, so one file always makes progress
+        // however large it is; the budget bounds the cycle, never starves it.
+        if (spent >= budget) break
         let wanted = false
         try { wanted = await this.fileHasLegacyLines(candidate.path) } catch { wanted = false }
         if (!wanted) continue
@@ -795,7 +814,7 @@ export class CallStore {
         } catch {
           // A stubborn conversion retries on the next daily cycle.
         }
-        break // Budget: one migrated file per cycle.
+        spent += candidate.size
       }
     }
     return { deletedFiles, trimmedFiles }

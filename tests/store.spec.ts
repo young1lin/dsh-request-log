@@ -621,7 +621,7 @@ describe('CallStore v2 persistence', () => {
     expect((await store.get('frozen', 'new-1'))?.id).toBe('new-1')
   })
 
-  it('migrates the oldest legacy file per sweep cycle, losslessly, idempotently', async () => {
+  it('migrates a legacy file losslessly and idempotently', async () => {
     const directory = await tempDir()
     const originalA = richRecord()
     const originalB = recordOf({ id: 'plain-2', sessionId: 'sess-1' })
@@ -643,6 +643,45 @@ describe('CallStore v2 persistence', () => {
     // Idempotent: the second cycle leaves the file byte-stable.
     await store.sweep()
     expect(await readFile(join(directory, 'sess-1.jsonl'), 'utf8')).toBe(migrated)
+  })
+
+  it('migrates every legacy file that fits the cycle budget, not just one', async () => {
+    const directory = await tempDir()
+    await mkdir(directory, { recursive: true })
+    for (const id of ['sess-a', 'sess-b', 'sess-c']) {
+      await writeFile(join(directory, id + '.jsonl'), JSON.stringify(recordOf({ id: id + '-1', sessionId: id })) + '\n')
+    }
+    const store = new CallStore({ directory, retentionDays: 14, maxCallsPerSession: 100, maxFileBytes: 8 * 1024 * 1024 })
+
+    await store.sweep()
+
+    // A one-file-per-day budget never catches up with retention: a backlog of
+    // legacy sessions would be deleted before it was ever converted.
+    for (const id of ['sess-a', 'sess-b', 'sess-c']) {
+      const text = await readFile(join(directory, id + '.jsonl'), 'utf8')
+      expect(JSON.parse(text.trim()).v).toBe(RECORD_SCHEMA_V2)
+    }
+  })
+
+  it('stops at the cycle byte budget and spends it on the newest legacy file first', async () => {
+    const directory = await tempDir()
+    await mkdir(directory, { recursive: true })
+    await writeFile(join(directory, 'old.jsonl'), JSON.stringify(recordOf({ id: 'o-1', sessionId: 'old' })) + '\n')
+    await writeFile(join(directory, 'new.jsonl'), JSON.stringify(recordOf({ id: 'n-1', sessionId: 'new' })) + '\n')
+    const now = Date.now()
+    await utimes(join(directory, 'old.jsonl'), new Date(now - 10 * 86_400_000), new Date(now - 10 * 86_400_000))
+    await utimes(join(directory, 'new.jsonl'), new Date(now - 86_400_000), new Date(now - 86_400_000))
+    const store = new CallStore({
+      directory, retentionDays: 14, maxCallsPerSession: 100, maxFileBytes: 8 * 1024 * 1024,
+      migrationBudgetBytes: 1,
+    })
+
+    await store.sweep(now)
+
+    // The newest file has the most retention life left, so converting it buys
+    // the most stored-byte-days; the oldest may not survive to the next cycle.
+    expect(JSON.parse((await readFile(join(directory, 'new.jsonl'), 'utf8')).trim()).v).toBe(RECORD_SCHEMA_V2)
+    expect((await readFile(join(directory, 'old.jsonl'), 'utf8')).startsWith('{"schema":')).toBe(true)
   })
 
   it('repairs torn tails around v2 envelopes (FlakyStore pattern)', async () => {

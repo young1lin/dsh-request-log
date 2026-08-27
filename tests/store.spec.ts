@@ -9,7 +9,7 @@ import { join } from 'node:path'
 import { deflateRawSync } from 'node:zlib'
 import { afterEach, describe, expect, it } from 'vitest'
 import { assignSteps, CallStore, fileNameOf } from '../src/host/store.ts'
-import { CODEC_DEFLATE_RAW, encodeFrame, hashOfContent } from '../src/host/blob.ts'
+import { BlobStore, CODEC_DEFLATE_RAW, encodeFrame, hashOfContent } from '../src/host/blob.ts'
 import { RECORD_SCHEMA, RECORD_SCHEMA_V2, toIndexEntry } from '../src/shared/types'
 import type { CallRecord } from '../src/shared/types'
 
@@ -708,5 +708,64 @@ describe('CallStore v2 persistence', () => {
     expect(page.calls.map(call => call.id)).toEqual(['next', 'good'])
     const text = await readFile(join(directory, 'sess-1.jsonl'), 'utf8')
     expect(text.split('\n').every(line => line.length === 0 || line.endsWith('}'))).toBe(true)
+  })
+})
+
+describe('sweep status observability', () => {
+  it('publishes a completed cycle with migration counts for /health', async () => {
+    const directory = await tempDir()
+    await mkdir(directory, { recursive: true })
+    await writeFile(join(directory, 'legacy.jsonl'), JSON.stringify(recordOf({ id: 'l-1', sessionId: 'legacy' })) + '\n')
+    const store = new CallStore({ directory, retentionDays: 14, maxCallsPerSession: 100, maxFileBytes: 8 * 1024 * 1024 })
+
+    await store.sweep()
+
+    expect(store.lastSweepStatus).toMatchObject({
+      running: false,
+      phase: 'done',
+      filesSeen: 1,
+      deletedFiles: 0,
+      trimmedFiles: 0,
+      migrationCandidates: 1,
+      migratedFiles: 1,
+    })
+    expect(store.lastSweepStatus?.error).toBeUndefined()
+    expect(store.lastSweepStatus?.durationMs).toBeGreaterThanOrEqual(0)
+    expect((await readFile(join(directory, 'legacy.jsonl'), 'utf8')).trim().startsWith('{"v":2')).toBe(true)
+
+    // Idempotent re-sweep: no candidates left, no phantom migrations counted.
+    await store.sweep()
+    expect(store.lastSweepStatus).toMatchObject({ migrationCandidates: 0, migratedFiles: 0 })
+  })
+
+  it('counts retention deletions and keeps the cycle green', async () => {
+    const directory = await tempDir()
+    await mkdir(directory, { recursive: true })
+    await writeFile(join(directory, 'stale.jsonl'), JSON.stringify(recordOf({ id: 's-1', sessionId: 'stale' })) + '\n')
+    const now = Date.now()
+    await utimes(join(directory, 'stale.jsonl'), new Date(now - 20 * 86_400_000), new Date(now - 20 * 86_400_000))
+    const store = new CallStore({ directory, retentionDays: 14, maxCallsPerSession: 100, maxFileBytes: 8 * 1024 * 1024 })
+
+    await store.sweep(now)
+
+    expect(store.lastSweepStatus).toMatchObject({ phase: 'done', filesSeen: 1, deletedFiles: 1 })
+  })
+
+  it('reports a failed blob bake instead of a silent v1 no-op', async () => {
+    // The exact live-incident shape: every fail-soft catch swallowed the bake
+    // error, the file stayed v1, and nothing anywhere said why.
+    const directory = await tempDir()
+    await mkdir(directory, { recursive: true })
+    await writeFile(join(directory, 'legacy.jsonl'), JSON.stringify(recordOf({ id: 'l-1', sessionId: 'legacy' })) + '\n')
+    const blobs = new BlobStore({ directory: join(directory, 'objects') })
+    blobs.put = async () => { throw new Error('EACCES: bake denied') }
+    const store = new CallStore({ directory, retentionDays: 14, maxCallsPerSession: 100, maxFileBytes: 8 * 1024 * 1024 }, blobs)
+
+    await store.sweep()
+
+    expect(store.lastSweepStatus).toMatchObject({ phase: 'done', migrationCandidates: 1, migratedFiles: 0 })
+    expect(store.lastSweepStatus?.error).toContain('EACCES')
+    // Fail-soft data preservation: the legacy line survives untouched.
+    expect((await readFile(join(directory, 'legacy.jsonl'), 'utf8')).startsWith('{"schema":')).toBe(true)
   })
 })

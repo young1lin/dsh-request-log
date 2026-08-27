@@ -78,6 +78,22 @@ export function resolveStoreConfig(config: Config | undefined): StoreConfig {
 
 const SWEEP_INTERVAL_MS = 24 * 60 * 60 * 1000
 
+/**
+ * Wire the boot sweep and its daily re-run: fires one cycle immediately and
+ * returns the callback the interval rides. A whole-cycle rejection must never
+ * break a model call — but it logs a warn and lands in /health's sweep status
+ * instead of vanishing into a no-op catch.
+ */
+export function scheduleSweep(store: CallStore, logger: { warn: (...args: unknown[]) => void }): () => void {
+  const sweep = (): void => {
+    store.sweep().catch(error => {
+      logger.warn('dsh-request-log: sweep failed: %o', error)
+    })
+  }
+  sweep()
+  return sweep
+}
+
 export function apply(ctx: Context, config: Config = {}): void {
   const store = new CallStore(resolveStoreConfig(config))
 
@@ -97,11 +113,11 @@ export function apply(ctx: Context, config: Config = {}): void {
     )
   })
 
-  // Boot sweep + daily sweep. Fire-and-forget: sweep failures are contained
-  // inside the store and never surface as plugin errors. The timer is
-  // unref'd so a headless/CLI composition can still exit naturally.
-  const sweep = (): void => { store.sweep().catch(() => {}) }
-  sweep()
+  // Boot sweep + daily sweep. Fire-and-forget: stage failures are contained
+  // inside the store and published via /health's sweep status, and a
+  // whole-cycle rejection warns through the logger. The timer is unref'd so
+  // a headless/CLI composition can still exit naturally.
+  const sweep = scheduleSweep(store, ctx.logger)
   ctx.effect(() => {
     const timer = setInterval(sweep, SWEEP_INTERVAL_MS)
     timer.unref?.()

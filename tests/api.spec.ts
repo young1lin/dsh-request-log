@@ -169,6 +169,27 @@ describe('read API', () => {
     dispose()
   })
 
+  it('reports the sweep status on health once a cycle has run', async () => {
+    const store = await seededStore()
+    await store.sweep()
+    const { handler, dispose } = await makeHandler(store)
+
+    const health = await handle(handler, 'GET', '/dsh-request-log/health')
+    expect(health.status).toBe(200)
+    const body = health.body as { ok: boolean; sweep: Record<string, unknown> }
+    expect(body).toMatchObject({ ok: true, sweep: { running: false, phase: 'done', filesSeen: 1 } })
+    expect(body.sweep).not.toHaveProperty('error')
+    dispose()
+  })
+
+  it('omits the sweep field before the first cycle — the never-ran signal', async () => {
+    const { handler, dispose } = await makeHandler(await seededStore())
+    const health = await handle(handler, 'GET', '/dsh-request-log/health')
+    expect(health.status).toBe(200)
+    expect(health.body).not.toHaveProperty('sweep')
+    dispose()
+  })
+
   it('404s unknown paths and calls; 405s POST; 400s malformed percent sequences', async () => {
     const { handler, dispose } = await makeHandler(await seededStore())
     expect((await handle(handler, 'GET', '/dsh-request-log/sessions/sess-1/calls/nope')).status).toBe(404)

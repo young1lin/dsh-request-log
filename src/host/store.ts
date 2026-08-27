@@ -125,6 +125,40 @@ interface Piece {
   json: string
 }
 
+/** Coarse sweep phases, published live while a cycle is in flight. */
+export type SweepPhase = 'retention' | 'gc' | 'migration' | 'done'
+
+/**
+ * The latest sweep cycle's observable outcome, published for /health. While
+ * `running` is true the numbers are partial progress — a flag stuck past
+ * minutes means a hung cycle; `error` carries the most recent failure a
+ * fail-soft stage swallowed, so a no-op cycle explains itself instead of
+ * looking like "nothing to do".
+ */
+export interface SweepStatus {
+  /** Cycle start (epoch ms). */
+  startedAt: number
+  /** True while the cycle is in flight. */
+  running: boolean
+  /** Current (or final) phase of the cycle. */
+  phase: SweepPhase
+  /** Cycle end (epoch ms); absent while running. */
+  finishedAt?: number
+  /** Wall-clock duration (ms); absent while running. */
+  durationMs?: number
+  /** Session files walked by the retention pass. */
+  filesSeen: number
+  deletedFiles: number
+  trimmedFiles: number
+  /** Files the migrator scanned that still held legacy lines. */
+  migrationCandidates: number
+  migratedFiles: number
+  removedObjects: number
+  removedTemp: number
+  /** Most recent swallowed stage failure, as "<stage>: <message>". */
+  error?: string
+}
+
 /**
  * Stamp logical-call steps onto a chronological entry list (see
  * {@link CallIndexEntry.step}). Ordinary calls consume a step each — attempt 1
@@ -263,6 +297,9 @@ export class CallStore {
   private readonly logicalCache = new Map<string, LogicalMarker>()
   private readonly blobs: BlobStore
   private mkdirPromise: Promise<void> | undefined
+  private sweepStatus: SweepStatus | undefined
+  /** Error sink of the in-flight sweep cycle (absent outside a sweep). */
+  private sweepErrorSink: ((stage: string, error: unknown) => void) | undefined
 
   constructor(private readonly config: StoreConfig, blobStore?: BlobStore) {
     this.blobs = blobStore ?? new BlobStore({ directory: join(config.directory, 'objects') })
@@ -279,6 +316,11 @@ export class CallStore {
   /** The configured per-session cap — the API derives its page ceiling from it. */
   get maxCallsPerSession(): number {
     return this.config.maxCallsPerSession
+  }
+
+  /** The latest sweep cycle's status — live while running, served by /health. */
+  get lastSweepStatus(): SweepStatus | undefined {
+    return this.sweepStatus
   }
 
   private pathOf(sessionId: string): string {
@@ -309,10 +351,10 @@ export class CallStore {
   }
 
   /** Run a file mutation on the session's chain, keeping the chain alive after failures. */
-  private enqueue(sessionId: string, job: () => Promise<void>): Promise<void> {
+  private enqueue<T>(sessionId: string, job: () => Promise<T>): Promise<T> {
     const state = this.appendStateOf(sessionId)
     const next = state.queue.then(job)
-    state.queue = next.catch(() => {})
+    state.queue = next.then(() => {}, () => {})
     return next
   }
 
@@ -402,7 +444,11 @@ export class CallStore {
     const env = buildEnvelope(record, pieces)
     try {
       await this.sealEnvelope(env, pieces)
-    } catch {
+    } catch (error) {
+      // Fail-soft is the data-safety contract (the v1 line survives), but not
+      // silent: an in-flight sweep publishes the bake failure so /health can
+      // explain a file that never converts.
+      this.sweepErrorSink?.('blob bake', error)
       return line
     }
     return JSON.stringify(env)
@@ -739,85 +785,131 @@ export class CallStore {
    * reachable hashes are marked from the files read here anyway, then the GC
    * sweeps unreachable objects past a grace floor plus tmp debris, and the
    * migrator converts not-yet-v2 files newest-first until the per-cycle byte
-   * budget is spent. Returns the disposal counts (for the health log).
+   * budget is spent. Returns the disposal counts; the live cycle state is
+   * published as {@link CallStore.lastSweepStatus} (for /health), where every
+   * fail-soft stage reports what it swallowed instead of going silent.
    */
-  async sweep(now: number = Date.now()): Promise<{ deletedFiles: number; trimmedFiles: number }> {
-    let deletedFiles = 0
-    let trimmedFiles = 0
-    let names: string[]
+  async sweep(now: number = Date.now()): Promise<{ deletedFiles: number; trimmedFiles: number; migratedFiles: number }> {
+    const status: SweepStatus = {
+      startedAt: Date.now(),
+      running: true,
+      phase: 'retention',
+      filesSeen: 0,
+      deletedFiles: 0,
+      trimmedFiles: 0,
+      migrationCandidates: 0,
+      migratedFiles: 0,
+      removedObjects: 0,
+      removedTemp: 0,
+    }
+    this.sweepStatus = status
+    const swallowed = (stage: string, error: unknown): void => {
+      status.error = `${stage}: ${error instanceof Error ? error.message : String(error)}`
+    }
+    this.sweepErrorSink = swallowed
     try {
-      names = await readdir(this.config.directory)
-    } catch {
-      return { deletedFiles, trimmedFiles }
-    }
-    const cutoff = now - this.config.retentionDays * DAY_MS
-    const reachable = new Set<string>()
-    const migrationCandidates: { sessionId: string; path: string; mtimeMs: number; size: number }[] = []
-    for (const name of names) {
-      if (!name.endsWith('.jsonl')) continue
-      const path = join(this.config.directory, name)
-      const sessionId = name.replace(/\.jsonl$/, '')
+      let names: string[]
       try {
-        const info = await stat(path)
-        if (this.v2Enabled) migrationCandidates.push({ sessionId, path, mtimeMs: info.mtimeMs, size: info.size })
-        if (info.mtimeMs < cutoff) {
-          await rm(path)
-          this.invalidateCaches(sessionId)
-          deletedFiles += 1
-          continue
-        }
-        // Line counting needs no parsing: the cap is about file growth, and
-        // invalid lines are filtered by the read path regardless.
-        const text = await readFile(path, 'utf8')
-        // The GC mark phase rides reads this sweep performs anyway.
-        if (this.v2Enabled) {
-          for (const match of text.matchAll(REACHABLE_HASH)) reachable.add(match[1])
-        }
-        const lines = text.split('\n')
-        while (lines.length > 0 && lines[lines.length - 1].length === 0) lines.pop()
-        const overLines = lines.length > this.config.maxCallsPerSession
-        const overBytes = info.size > this.config.maxFileBytes
-        if (!overLines && !overBytes) continue
-        // The trim rides the file's append chain and re-reads the file there:
-        // a record appended between the sweep's read and the trim cannot be
-        // lost to the rewrite window.
-        await this.enqueue(sessionId, async () => {
-          if (overLines) await this.rewriteLineCapped(sessionId, path)
-          else await this.trimForBytes(sessionId, path, 0)
-        })
-        trimmedFiles += 1
-      } catch {
-        // One unreadable file never blocks the sweep of the others.
+        names = await readdir(this.config.directory)
+      } catch (error) {
+        swallowed('scan directory', error)
+        return { deletedFiles: 0, trimmedFiles: 0, migratedFiles: 0 }
       }
-    }
-    if (this.v2Enabled) {
-      try {
-        await this.blobs.gc(reachable, now)
-      } catch {
-        // GC is best-effort; missed objects get reclaimed next cycle.
-      }
-      // Newest first: a fresh session has the most retention life ahead of it,
-      // so converting it buys the most stored-byte-days - and the oldest files
-      // may not survive to the next cycle anyway.
-      migrationCandidates.sort((a, b) => b.mtimeMs - a.mtimeMs)
-      const budget = this.config.migrationBudgetBytes ?? DEFAULT_MIGRATION_BUDGET_BYTES
-      let spent = 0
-      for (const candidate of migrationCandidates) {
-        // Checked BEFORE the conversion, so one file always makes progress
-        // however large it is; the budget bounds the cycle, never starves it.
-        if (spent >= budget) break
-        let wanted = false
-        try { wanted = await this.fileHasLegacyLines(candidate.path) } catch { wanted = false }
-        if (!wanted) continue
+      const cutoff = now - this.config.retentionDays * DAY_MS
+      const reachable = new Set<string>()
+      const migrationCandidates: { sessionId: string; path: string; mtimeMs: number; size: number }[] = []
+      for (const name of names) {
+        if (!name.endsWith('.jsonl')) continue
+        status.filesSeen += 1
+        const path = join(this.config.directory, name)
+        const sessionId = name.replace(/\.jsonl$/, '')
         try {
-          await this.migrateFile(candidate.sessionId, candidate.path)
-        } catch {
-          // A stubborn conversion retries on the next daily cycle.
+          const info = await stat(path)
+          if (this.v2Enabled) migrationCandidates.push({ sessionId, path, mtimeMs: info.mtimeMs, size: info.size })
+          if (info.mtimeMs < cutoff) {
+            await rm(path)
+            this.invalidateCaches(sessionId)
+            status.deletedFiles += 1
+            continue
+          }
+          // Line counting needs no parsing: the cap is about file growth, and
+          // invalid lines are filtered by the read path regardless.
+          const text = await readFile(path, 'utf8')
+          // The GC mark phase rides reads this sweep performs anyway.
+          if (this.v2Enabled) {
+            for (const match of text.matchAll(REACHABLE_HASH)) reachable.add(match[1])
+          }
+          const lines = text.split('\n')
+          while (lines.length > 0 && lines[lines.length - 1].length === 0) lines.pop()
+          const overLines = lines.length > this.config.maxCallsPerSession
+          const overBytes = info.size > this.config.maxFileBytes
+          if (!overLines && !overBytes) continue
+          // The trim rides the file's append chain and re-reads the file there:
+          // a record appended between the sweep's read and the trim cannot be
+          // lost to the rewrite window.
+          await this.enqueue(sessionId, async () => {
+            if (overLines) await this.rewriteLineCapped(sessionId, path)
+            else await this.trimForBytes(sessionId, path, 0)
+          })
+          status.trimmedFiles += 1
+        } catch (error) {
+          // One unreadable file never blocks the sweep of the others.
+          swallowed(`retention ${name}`, error)
         }
-        spent += candidate.size
       }
+      if (this.v2Enabled) {
+        status.phase = 'gc'
+        try {
+          const gc = await this.blobs.gc(reachable, now)
+          status.removedObjects = gc.removedObjects
+          status.removedTemp = gc.removedTemp
+        } catch (error) {
+          // GC is best-effort; missed objects get reclaimed next cycle.
+          swallowed('object gc', error)
+        }
+        status.phase = 'migration'
+        // Newest first: a fresh session has the most retention life ahead of it,
+        // so converting it buys the most stored-byte-days - and the oldest files
+        // may not survive to the next cycle anyway.
+        migrationCandidates.sort((a, b) => b.mtimeMs - a.mtimeMs)
+        const budget = this.config.migrationBudgetBytes ?? DEFAULT_MIGRATION_BUDGET_BYTES
+        let spent = 0
+        for (const candidate of migrationCandidates) {
+          // Checked BEFORE the conversion, so one file always makes progress
+          // however large it is; the budget bounds the cycle, never starves it.
+          if (spent >= budget) break
+          let wanted = false
+          try {
+            wanted = await this.fileHasLegacyLines(candidate.path)
+          } catch (error) {
+            swallowed(`scan ${candidate.sessionId}`, error)
+            wanted = false
+          }
+          if (!wanted) continue
+          status.migrationCandidates += 1
+          try {
+            if (await this.migrateFile(candidate.sessionId, candidate.path)) status.migratedFiles += 1
+          } catch (error) {
+            // A stubborn conversion retries on the next daily cycle.
+            swallowed(`migrate ${candidate.sessionId}`, error)
+          }
+          spent += candidate.size
+        }
+      }
+      status.phase = 'done'
+      return { deletedFiles: status.deletedFiles, trimmedFiles: status.trimmedFiles, migratedFiles: status.migratedFiles }
+    } catch (error) {
+      // Unreachable while every stage catches its own; the guard keeps a
+      // future edit from reintroducing a silent whole-cycle loss.
+      swallowed('sweep', error)
+      status.phase = 'done'
+      throw error
+    } finally {
+      this.sweepErrorSink = undefined
+      status.running = false
+      status.finishedAt = Date.now()
+      status.durationMs = status.finishedAt - status.startedAt
     }
-    return { deletedFiles, trimmedFiles }
   }
 
   /** Cheap predicate for the migrator: does any complete line still hold a v1 record? */
@@ -838,15 +930,16 @@ export class CallStore {
    * Convert every parsable v1 line of one file to a v2 envelope and rewrite
    * atomically (temp + rename commit point — a crash mid-conversion leaves
    * the original intact and the pass restarts deterministically). Idempotent:
-   * nothing left to convert leaves the file untouched.
+   * nothing left to convert leaves the file untouched. Resolves to whether
+   * the file was actually rewritten (the sweep's migratedFiles count).
    */
-  private migrateFile(sessionId: string, path: string): Promise<void> {
+  private migrateFile(sessionId: string, path: string): Promise<boolean> {
     return this.enqueue(sessionId, async () => {
       let text: string
       try {
         text = await readFile(path, 'utf8')
       } catch {
-        return
+        return false
       }
       const lines = completeLines(text)
       const converted: string[] = []
@@ -860,9 +953,10 @@ export class CallStore {
         changed = changed || upgraded !== line
         converted.push(upgraded)
       }
-      if (!changed) return
+      if (!changed) return false
       await this.atomicWriteText(path, converted.join('\n') + (converted.length > 0 ? '\n' : ''))
       this.invalidateCaches(sessionId)
+      return true
     })
   }
 }

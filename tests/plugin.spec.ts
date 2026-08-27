@@ -5,8 +5,9 @@
 
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
-import { describe, expect, it } from 'vitest'
-import { Config, DEFAULTS, VERSION, name, resolveStoreConfig } from '../src/host/index.ts'
+import { describe, expect, it, vi } from 'vitest'
+import { Config, DEFAULTS, VERSION, name, resolveStoreConfig, scheduleSweep } from '../src/host/index.ts'
+import type { CallStore } from '../src/host/store.ts'
 
 const pkg = JSON.parse(
   readFileSync(fileURLToPath(new URL('../package.json', import.meta.url)), 'utf8'),
@@ -72,5 +73,39 @@ describe('resolveStoreConfig', () => {
 
   it('honours an explicit directory', () => {
     expect(resolveStoreConfig({ directory: '/var/log/drl' }).directory).toBe('/var/log/drl')
+  })
+})
+
+describe('scheduleSweep', () => {
+  it('fires the boot sweep immediately and warns through the logger on rejection', async () => {
+    const warn = vi.fn()
+    const store = {
+      sweep: vi.fn(() => Promise.reject(new Error('boom'))),
+    } as unknown as CallStore
+
+    scheduleSweep(store, { warn })
+    await new Promise(resolve => setImmediate(resolve))
+
+    // Boot sweep ran once; the rejection surfaced as a warn, not a swallow.
+    expect(store.sweep).toHaveBeenCalledTimes(1)
+    expect(warn).toHaveBeenCalledTimes(1)
+    expect(String(warn.mock.calls[0]?.[0])).toContain('sweep failed')
+  })
+
+  it('returns the interval callback and does not crash it either', async () => {
+    const warn = vi.fn()
+    let sweeps = 0
+    const store = {
+      sweep: vi.fn(() => {
+        sweeps += 1
+        return sweeps === 1 ? Promise.resolve({ deletedFiles: 0, trimmedFiles: 0, migratedFiles: 0 }) : Promise.reject(new Error('later'))
+      }),
+    } as unknown as CallStore
+
+    const interval = scheduleSweep(store, { warn })
+    interval()
+    await new Promise(resolve => setImmediate(resolve))
+    expect(sweeps).toBe(2)
+    expect(warn).toHaveBeenCalledTimes(1)
   })
 })

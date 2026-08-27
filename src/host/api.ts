@@ -159,7 +159,10 @@ export function installApi(ctx: Context, store: CallStore, version: string, opti
         return
       }
       if (segments.length === 1 && segments[0] === 'health') {
-        sendJson(res, 200, { ok: true, plugin: 'dsh-request-log', version })
+        // The sweep status rides along: undefined = no cycle finished yet,
+        // running = in flight, error = the last failure a fail-soft stage
+        // swallowed. A migration that "never happens" must be legible here.
+        sendJson(res, 200, { ok: true, plugin: 'dsh-request-log', version, sweep: store.lastSweepStatus })
         return
       }
       // /sessions/:sessionId/calls[/:callId]

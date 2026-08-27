@@ -243,11 +243,9 @@ export function countToolCalls(blocks: RecordedBlock[]): { total: number, dispat
 /** Project an index entry out of a full record (host-side, exported for tests). */
 export function toIndexEntry(record: CallRecord): CallIndexEntry {
   let requestChars = record.request.system?.length ?? 0
-  const blockKinds = new Set<string>()
   for (const message of record.request.messages) {
     for (const block of message.content) {
       if (block.type === 'text' && typeof block.text === 'string') requestChars += block.text.length
-      blockKinds.add(`req:${block.type}`)
     }
   }
   const responseBlockKinds: string[] = []

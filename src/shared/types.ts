@@ -282,3 +282,133 @@ export function toIndexEntry(record: CallRecord): CallIndexEntry {
     responseBlockKinds,
   }
 }
+// ---- v2 envelope vocabulary (deduplicating persistence) -----------------------
+
+/** Wire schema version of a v2 envelope line (`{"v":2,...}`). */
+export const RECORD_SCHEMA_V2 = 2
+
+/** What one blob reference stands for (system / tools / message / response). */
+export type EnvelopeRefKind = 's' | 't' | 'm' | 'r'
+
+/** One content-addressed reference inside an envelope line. */
+export interface EnvelopeRef {
+  /** Which recorded piece this hash names: s system, t tools, m message, r response. */
+  k: EnvelopeRefKind
+  /** Full lowercase hex sha256 over the exact JSON of the piece. */
+  h: string
+  /** Measured compressed byte size of the object payload (budget accounting). */
+  z: number
+}
+
+/** Request scalars kept inline in the envelope (never blobbed). */
+export interface EnvelopeOpts {
+  temperature?: number
+  maxTokens?: number
+  stop?: string[]
+}
+
+/**
+ * Precomputed projection of the blobbed request/response bodies, mirroring
+ * {@link CallIndexEntry} exactly so the list path touches zero blobs.
+ */
+export interface EnvelopeSum {
+  messageCount: number
+  requestChars: number
+  /** Response block kinds in order (may repeat); absent when no response settled. */
+  blockKinds?: string[]
+  toolCalls?: number
+  calledTools?: ToolDispatch[]
+  toolNames?: string[]
+  usage?: RecordedUsage
+  finishKind?: RecordedFinish['kind']
+  finishMessage?: string
+}
+
+/** One persisted provider-call attempt in v2 form: scalars inline, bodies by hash. */
+export interface CallEnvelope {
+  v: typeof RECORD_SCHEMA_V2
+  id: string
+  sessionId: string
+  purpose?: 'compaction' | 'session-title'
+  provider: string
+  model: string
+  reasoningEffort?: string
+  requestHash: string
+  attempt: number
+  timing: RecordedTiming
+  status: CallStatus
+  opts?: EnvelopeOpts
+  refs: EnvelopeRef[]
+  sum: EnvelopeSum
+}
+
+/** Fail-soft placeholder substituted for one unreadable blob slot in a detail read. */
+export interface UnavailableSlot {
+  $unavailable: string
+}
+
+/**
+ * Precompute the {@link EnvelopeSum} for a record — the same traversal
+ * {@link toIndexEntry} performs, frozen at append time so the index can be
+ * projected from the envelope line alone.
+ */
+export function envelopeSumOf(record: CallRecord): EnvelopeSum {
+  let requestChars = record.request.system?.length ?? 0
+  for (const message of record.request.messages) {
+    for (const block of message.content) {
+      if (block.type === 'text' && typeof block.text === 'string') requestChars += block.text.length
+    }
+  }
+  return {
+    messageCount: record.request.messages.length,
+    requestChars,
+    ...record.response === undefined ? {} : (() => {
+      const blockKinds = record.response.blocks.map(block => block.type)
+      const { total, dispatches } = countToolCalls(record.response.blocks)
+      const failure = record.response.finish.failure
+      return {
+        blockKinds,
+        toolCalls: total,
+        ...(dispatches.length === 0 ? {} : { calledTools: dispatches }),
+        ...record.response.usage === undefined ? {} : { usage: record.response.usage },
+        finishKind: record.response.finish.kind,
+        ...failure === undefined ? {} : { finishMessage: failure.message },
+      }
+    })(),
+    ...record.request.tools === undefined ? {} : { toolNames: record.request.tools.map(tool => tool.name) },
+  }
+}
+
+/**
+ * Project an index entry out of a v2 envelope — pure arithmetic over inline
+ * scalars and the precomputed sum, identical field-for-field to what
+ * {@link toIndexEntry} yields for the equivalent v1 record.
+ */
+export function entryFromEnvelope(env: CallEnvelope): CallIndexEntry {
+  const timing = env.timing
+  const sum = env.sum
+  return {
+    id: env.id,
+    sessionId: env.sessionId,
+    ...env.purpose === undefined ? {} : { purpose: env.purpose },
+    provider: env.provider,
+    model: env.model,
+    ...env.reasoningEffort === undefined ? {} : { reasoningEffort: env.reasoningEffort },
+    requestHash: env.requestHash,
+    attempt: env.attempt,
+    startedAt: timing.startedAt,
+    ...timing.firstChunkAt === undefined ? {} : { ttfbMs: timing.firstChunkAt - timing.startedAt },
+    ...timing.endedAt === undefined ? {} : { durationMs: timing.endedAt - timing.startedAt },
+    status: env.status,
+    ...sum.usage === undefined ? {} : { usage: sum.usage },
+    ...sum.finishKind === undefined ? {} : { finishKind: sum.finishKind },
+    ...sum.finishMessage === undefined ? {} : { finishMessage: sum.finishMessage },
+    messageCount: sum.messageCount,
+    ...sum.toolCalls === undefined ? {} : { toolCalls: sum.toolCalls },
+    ...(sum.calledTools === undefined || sum.calledTools.length === 0 ? {} : { calledTools: sum.calledTools }),
+    ...sum.toolNames === undefined ? {} : { toolNames: sum.toolNames },
+    requestChars: sum.requestChars,
+    responseBlockKinds: sum.blockKinds ?? [],
+  }
+}
+

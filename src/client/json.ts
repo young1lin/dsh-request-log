@@ -14,12 +14,59 @@
  *   - a whole-view node budget stops an Expand-all on a pathological body
  *     from building tens of thousands of DOM rows at once.
  *
+ * Every human-readable string comes from {@link JsonLabels}, so the view
+ * rides the plugin's locale dictionary like the rest of the UI.
+ *
  * @module dsh-request-log/client/json
  */
 
 import { React, h } from './react'
 
 export type TreeMode = 'default' | 'expanded' | 'collapsed'
+
+/** Localizable strings of the tree view; defaults are English. */
+export interface JsonLabels {
+  collapse: string
+  expand: string
+  /** Char count of an opened string; {count} = length. */
+  charsCount: string
+  viewAsJson: string
+  viewAsText: string
+  viewAsJsonTitle: string
+  viewAsTextTitle: string
+  collapseStringTitle: string
+  /** Clamp chip of a folded string; {count} = hidden chars. */
+  openString: string
+  openStringTitle: string
+  jsonChip: string
+  /** Truncation notice of an over-cap string; {count} = the cap. */
+  truncatedNote: string
+  itemsCount: string
+  keysCount: string
+  nodeBudget: string
+}
+
+export const DEFAULT_JSON_LABELS: JsonLabels = {
+  collapse: 'collapse',
+  expand: 'expand',
+  charsCount: '{count} chars',
+  viewAsJson: 'view as JSON',
+  viewAsText: 'view text',
+  viewAsJsonTitle: 'Parse this string and show it as JSON',
+  viewAsTextTitle: 'Show this string as plain text',
+  collapseStringTitle: 'Collapse this string back to its preview',
+  openString: '… +{count} chars',
+  openStringTitle: 'Open this string in full',
+  jsonChip: '{ } JSON',
+  truncatedNote: '… truncated at {count} chars — use Copy JSON for the full body',
+  itemsCount: '{count} items',
+  keysCount: '{count} keys',
+  nodeBudget: '… node budget exceeded, collapse other nodes or use Copy JSON ',
+}
+
+function interp(template: string, params: Record<string, string | number>): string {
+  return template.replace(/\{(\w+)\}/g, (_, key: string) => String(params[key] ?? ''))
+}
 
 const DEFAULT_COLLAPSE_DEPTH = 2
 const STRING_CLAMP_CHARS = 280
@@ -37,6 +84,7 @@ const MAX_RENDER_NODES = 20_000
 
 interface TreeCtx {
   mode: TreeMode
+  labels: JsonLabels
   overrides: Map<string, boolean>
   /** Store the inverse of the node's CURRENT effective state. */
   toggle: (path: string, currentEffective: boolean) => void
@@ -74,16 +122,47 @@ function childPathOf(path: string, key: string, isArray: boolean): string {
 /**
  * Parse cache: one long string can be probed several times per render and
  * re-probed on every re-render (poll tick, locale switch, sibling toggle),
- * while a 40KB+ system prompt pays a full JSON.parse each time. Keyed by the
- * string itself, capped and wholesale-evicted to stay tiny.
+ * while a 40KB+ system prompt pays a full JSON.parse each time. Keyed by
+ * the string itself and bounded by a BYTE budget (UTF-16 code units, the
+ * cheap upper bound): hits refresh recency, misses insert and evict the
+ * least-recently-used entries until the budget holds. A string larger than
+ * the whole budget is never cached — it could only evict everything else
+ * and still not stay.
  */
-const PARSE_CACHE_MAX = 256
+const PARSE_CACHE_MAX_BYTES = 4 * 1024 * 1024
 const parseCache = new Map<string, unknown | undefined>()
+let parseCacheBytes = 0
+
+const cacheBytesOf = (text: string): number => text.length * 2
+
+function cacheRefresh(text: string): void {
+  if (!parseCache.has(text)) return
+  const value = parseCache.get(text)
+  parseCache.delete(text)
+  parseCache.set(text, value)
+}
+
+function cachePut(text: string, parsed: unknown | undefined): void {
+  const bytes = cacheBytesOf(text)
+  if (bytes > PARSE_CACHE_MAX_BYTES) return
+  if (parseCache.has(text)) parseCache.delete(text)
+  parseCache.set(text, parsed)
+  parseCacheBytes += bytes
+  while (parseCacheBytes > PARSE_CACHE_MAX_BYTES && parseCache.size > 1) {
+    const oldest = parseCache.keys().next().value
+    if (oldest === undefined) break
+    parseCacheBytes -= cacheBytesOf(oldest)
+    parseCache.delete(oldest)
+  }
+}
 
 /** Parse a string as JSON when it plausibly is one (object/array literal). */
 function tryParseJsonString(text: string): unknown | undefined {
   if (text.length < JSON_STRING_MIN_CHARS) return undefined
-  if (parseCache.has(text)) return parseCache.get(text)
+  if (parseCache.has(text)) {
+    cacheRefresh(text)
+    return parseCache.get(text)
+  }
   const trimmed = text.trim()
   if (!trimmed.startsWith('{') && !trimmed.startsWith('[')) return undefined
   let parsed: unknown | undefined = undefined
@@ -93,19 +172,18 @@ function tryParseJsonString(text: string): unknown | undefined {
   } catch {
     // Not JSON — cached as undefined by falling through.
   }
-  if (parseCache.size >= PARSE_CACHE_MAX) parseCache.clear()
-  parseCache.set(text, parsed)
+  cachePut(text, parsed)
   return parsed
 }
 
-function Caret(props: { open: boolean; onClick: () => void }): React.ReactElement {
+function Caret(props: { open: boolean; label: string; onClick: () => void }): React.ReactElement {
   return h('button', {
     className: 'rl-caret',
     onClick: (event: React.MouseEvent) => {
       event.stopPropagation()
       props.onClick()
     },
-    'aria-label': props.open ? 'collapse' : 'expand',
+    'aria-label': props.label,
   }, props.open ? '▾' : '▸')
 }
 
@@ -130,26 +208,28 @@ function StringToolbar(props: {
   top: boolean
 }): React.ReactElement {
   const { text, path, ctx, jsonCandidate } = props
+  const labels = ctx.labels
   const asJson = ctx.jsonView.has(path)
   return h('span', { className: 'rl-str-tools' },
-    h('span', { className: 'rl-str-count' }, String(text.length) + ' chars'),
+    h('span', { className: 'rl-str-count' }, interp(labels.charsCount, { count: text.length })),
     jsonCandidate
       ? h(Chip, {
-          label: asJson ? 'view text' : 'view as JSON',
-          title: asJson ? 'Show this string as plain text' : 'Parse this string and show it as JSON',
+          label: asJson ? labels.viewAsText : labels.viewAsJson,
+          title: asJson ? labels.viewAsTextTitle : labels.viewAsJsonTitle,
           on: asJson,
           onClick: () => { ctx.setJsonView(path, !asJson) },
         })
       : null,
     h(Chip, {
-      label: 'collapse',
-      title: 'Collapse this string back to its preview',
+      label: labels.collapse,
+      title: labels.collapseStringTitle,
       onClick: () => { ctx.toggle(path, false) },
     }))
 }
 
 function StringValue(props: { text: string; path: string; ctx: TreeCtx }): React.ReactElement {
   const { text, path, ctx } = props
+  const labels = ctx.labels
   // The ordinary case: a short string renders INLINE as a quoted token —
   // no toolbar, no block. Only long strings get the clamp/open machinery.
   if (text.length <= STRING_CLAMP_CHARS) {
@@ -162,13 +242,13 @@ function StringValue(props: { text: string; path: string; ctx: TreeCtx }): React
     return h('span', { className: 'rl-tree-string-clamp' },
       h('span', { className: 'rl-j-str' }, JSON.stringify(preview).slice(0, -1)),
       h(Chip, {
-        label: '… +' + String(rest) + ' chars',
-        title: 'Open this string in full',
+        label: interp(labels.openString, { count: rest }),
+        title: labels.openStringTitle,
         onClick: () => { ctx.toggle(path, true) },
       }),
       jsonCandidate ? h(Chip, {
-        label: '{ } JSON',
-        title: 'Parse this string and show it as JSON',
+        label: labels.jsonChip,
+        title: labels.viewAsJsonTitle,
         on: true,
         onClick: () => { ctx.setJsonView(path, true); ctx.toggle(path, false) },
       }) : null,
@@ -197,7 +277,7 @@ function StringValue(props: { text: string; path: string; ctx: TreeCtx }): React
     h('span', { className: 'rl-tree-string-block' }, shown,
       truncated
         ? h('span', { className: 'rl-str-truncated' },
-            '\n… truncated at ' + String(STRING_RENDER_CAP) + ' chars — use Copy JSON for the full body')
+            interp(labels.truncatedNote, { count: STRING_RENDER_CAP }))
         : null),
     h('span', { className: 'rl-str-tools' },
       h(StringToolbar, { text, path, ctx, jsonCandidate: false, top: false })))
@@ -212,15 +292,16 @@ function Container(props: {
   ctx: TreeCtx
 }): React.ReactElement {
   const { name, entries, isArray, path, depth, ctx } = props
+  const labels = ctx.labels
   const collapsed = containerCollapsed(ctx, path, depth)
   const open = isArray ? '[' : '{'
   const close = isArray ? ']' : '}'
-  const count = String(entries.length) + (isArray ? ' items' : ' keys')
+  const count = interp(isArray ? labels.itemsCount : labels.keysCount, { count: entries.length })
   const label = name === undefined ? null : h('span', { className: 'rl-j-key' }, JSON.stringify(name) + ': ')
 
   if (collapsed) {
     return h('div', { className: 'rl-tree-line' },
-      h(Caret, { open: false, onClick: () => ctx.toggle(path, true) }),
+      h(Caret, { open: false, label: labels.expand, onClick: () => ctx.toggle(path, true) }),
       label,
       h('span', { className: 'rl-j-punc' }, open + ' '),
       h('span', { className: 'rl-tree-summary' }, '… ' + count + ' '),
@@ -233,8 +314,7 @@ function Container(props: {
   if (ctx.nodes + entries.length + 2 > MAX_RENDER_NODES) {
     return h('div', { className: 'rl-tree-line' },
       h('span', { className: 'rl-j-punc' }, open + ' '),
-      h('span', { className: 'rl-tree-summary' },
-        '… ' + count + ' — node budget exceeded, collapse other nodes or use Copy JSON '),
+      h('span', { className: 'rl-tree-summary' }, '… ' + count + ' — ' + labels.nodeBudget),
       h('span', { className: 'rl-j-punc' }, close))
   }
   ctx.nodes += entries.length + 2
@@ -251,7 +331,7 @@ function Container(props: {
 
   return h('div', { className: 'rl-tree-node' },
     h('div', { className: 'rl-tree-line' },
-      h(Caret, { open: true, onClick: () => ctx.toggle(path, false) }),
+      h(Caret, { open: true, label: labels.collapse, onClick: () => ctx.toggle(path, false) }),
       label,
       h('span', { className: 'rl-j-punc' }, open)),
     h('div', { className: 'rl-tree-children' }, children),
@@ -304,7 +384,7 @@ function JsonNode(props: {
 }
 
 /** The tree view: owns per-node overrides; `mode` sets the defaults. */
-export function JsonTree(props: { value: unknown; mode: TreeMode }): React.ReactElement {
+export function JsonTree(props: { value: unknown; mode: TreeMode; labels?: JsonLabels }): React.ReactElement {
   const [overrides, setOverrides] = React.useState<Map<string, boolean>>(new Map())
   const [jsonView, setJsonViewState] = React.useState<Set<string>>(new Set())
   const toggle = React.useCallback((path: string, currentEffective: boolean): void => {
@@ -328,6 +408,7 @@ export function JsonTree(props: { value: unknown; mode: TreeMode }): React.React
     setOverrides(new Map())
     setJsonViewState(new Set())
   }, [props.mode])
-  const ctx: TreeCtx = { mode: props.mode, overrides, toggle, jsonView, setJsonView, nodes: 0 }
+  const labels = props.labels === undefined ? DEFAULT_JSON_LABELS : { ...DEFAULT_JSON_LABELS, ...props.labels }
+  const ctx: TreeCtx = { mode: props.mode, labels, overrides, toggle, jsonView, setJsonView, nodes: 0 }
   return h('div', { className: 'rl-tree' }, h(JsonNode, { value: props.value, path: '', depth: 0, ctx }))
 }

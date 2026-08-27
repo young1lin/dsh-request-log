@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { isBuiltin } from 'node:module'
-import { basename, dirname, join, resolve as resolvePath } from 'node:path'
+import { basename, dirname, join, relative as relativePath, resolve as resolvePath } from 'node:path'
 import { transform } from 'lightningcss'
 import { defineConfig } from 'tsdown'
 
@@ -51,9 +51,25 @@ const NODE_ENV = process.env.NODE_ENV ?? 'production'
 // CSS channels, mirrored from packages/client/tsdown.client.ts. The virtual
 // ids must NOT end in `.css` — tsdown's own css-pipeline guard matches on that
 // suffix; the plugin's flat rl-* class namespace is the anti-collision rule.
+// Virtual ids carry a CWD-RELATIVE path so the emitted bundle's module
+// comments never leak the build machine's absolute paths.
 const CSS_VIRTUAL_PREFIX = '\0dsh-css:'
 const GLOBAL_CSS_VIRTUAL_PREFIX = '\0dsh-global-css:'
 const CSS_VIRTUAL_SUFFIX = '.mjs'
+
+/** Virtual id for a stylesheet path: relative (when under cwd) or absolute. */
+function cssVirtualIdOf(prefix: string, abs: string): string {
+  const rel = relativePath(process.cwd(), abs)
+  return prefix + (rel === '' || rel.startsWith('..') ? abs : rel) + CSS_VIRTUAL_SUFFIX
+}
+
+/** The physical stylesheet path a css virtual id was built from. */
+function cssFileIdOf(prefix: string, virtualId: string): string {
+  const inner = virtualId.slice(prefix.length, -CSS_VIRTUAL_SUFFIX.length)
+  return inner.includes(':') || inner.startsWith('\\') || inner.startsWith('/')
+    ? inner
+    : resolvePath(process.cwd(), inner)
+}
 
 /** The dedupe-guarded `<style>` injection both CSS channels emit before their exports. */
 function injectStyleTag(id: string, fileId: string): string {
@@ -106,11 +122,11 @@ function cssChannels(id: string) {
     resolveId(source: string, importer: string | undefined) {
       if (!source.endsWith('.module.css')) return null
       const abs = importer !== undefined ? sourceAssetPath(source, importer) : source
-      return CSS_VIRTUAL_PREFIX + abs + CSS_VIRTUAL_SUFFIX
+      return cssVirtualIdOf(CSS_VIRTUAL_PREFIX, abs)
     },
     async load(this: { addWatchFile(file: string): void }, virtualId: string) {
       if (!virtualId.startsWith(CSS_VIRTUAL_PREFIX)) return null
-      const fileId = virtualId.slice(CSS_VIRTUAL_PREFIX.length, -CSS_VIRTUAL_SUFFIX.length)
+      const fileId = cssFileIdOf(CSS_VIRTUAL_PREFIX, virtualId)
       // The virtual id otherwise hides the physical stylesheet from the watch graph.
       this.addWatchFile(fileId)
       const source = await readFile(fileId)
@@ -127,11 +143,11 @@ function cssChannels(id: string) {
     resolveId(source: string, importer: string | undefined) {
       if (!source.endsWith('.css') || source.endsWith('.module.css')) return null
       const abs = importer !== undefined ? sourceAssetPath(source, importer) : source
-      return GLOBAL_CSS_VIRTUAL_PREFIX + abs + CSS_VIRTUAL_SUFFIX
+      return cssVirtualIdOf(GLOBAL_CSS_VIRTUAL_PREFIX, abs)
     },
     async load(this: { addWatchFile(file: string): void }, virtualId: string) {
       if (!virtualId.startsWith(GLOBAL_CSS_VIRTUAL_PREFIX)) return null
-      const fileId = virtualId.slice(GLOBAL_CSS_VIRTUAL_PREFIX.length, -CSS_VIRTUAL_SUFFIX.length)
+      const fileId = cssFileIdOf(GLOBAL_CSS_VIRTUAL_PREFIX, virtualId)
       // The virtual id otherwise hides the physical stylesheet from the watch graph.
       this.addWatchFile(fileId)
       const source = await readFile(fileId)
@@ -166,7 +182,9 @@ export default defineConfig([
     outDir: 'lib',
     format: 'cjs',
     platform: 'browser',
-    dts: false,
+    // Emits lib/client.d.ts so TypeScript consumers of the ./client
+    // subpath get types (the runtime consumer is the module loader).
+    dts: { sourcemap: false },
     sourcemap: true,
     clean: false,
     deps: {

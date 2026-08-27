@@ -43,6 +43,7 @@ describe('fresh defaults', () => {
       limit: PAGE_SIZE,
       auto: true,
       detail: { side: 'request', format: null },
+      charts: { open: true, group: 'hitrate', stacks: false },
     })
   })
 })
@@ -57,6 +58,7 @@ describe('in-page round-trip', () => {
       limit: PAGE_SIZE * 2,
       auto: false,
       detail: { side: 'response', format: 'openai-responses' },
+      charts: { open: true, group: 'hitrate', stacks: false },
     })
     expect(loadViewMemory('s2')).toEqual(freshViewMemory())
   })
@@ -92,16 +94,35 @@ describe('sessionStorage write-through', () => {
     // A previous page wrote this; this page starts with an empty in-page map
     // (exactly the state after a refresh).
     store.setItem(KEY, JSON.stringify({
-      selected: { id: 'call-1' },
+      selected: { id: 'call-1', prevId: 'call-0', step: 4 },
       limit: 300,
       auto: false,
       detail: { side: 'response', format: 'neutral' },
     }))
     const loaded = loadViewMemory('s1')
-    expect(loaded.selected).toEqual({ id: 'call-1' })
+    expect(loaded.selected).toEqual({ id: 'call-1', prevId: 'call-0', step: 4 })
     expect(loaded.limit).toBe(300)
     expect(loaded.auto).toBe(false)
     expect(loaded.detail).toEqual({ side: 'response', format: 'neutral' })
+  })
+
+  it('restores the selected step only when it is a positive integer', () => {
+    const store = fakeStorage()
+    vi.stubGlobal('sessionStorage', store)
+    const seed = (sessionId: string, selected: unknown): void => {
+      store.setItem('dsh-request-log:view:' + sessionId, JSON.stringify({
+        selected,
+        detail: { side: 'request', format: null },
+      }))
+    }
+    seed('zero', { id: 'call-1', step: 0 })
+    expect(loadViewMemory('zero').selected).toEqual({ id: 'call-1' })
+    seed('text', { id: 'call-2', step: '3' })
+    expect(loadViewMemory('text').selected).toEqual({ id: 'call-2' })
+    seed('frac', { id: 'call-3', step: 1.5 })
+    expect(loadViewMemory('frac').selected).toEqual({ id: 'call-3' })
+    seed('ok', { id: 'call-4', step: 7 })
+    expect(loadViewMemory('ok').selected).toEqual({ id: 'call-4', step: 7 })
   })
 
   it('degrades corrupted JSON to defaults', () => {
@@ -125,7 +146,26 @@ describe('sessionStorage write-through', () => {
       limit: PAGE_SIZE,
       auto: true,
       detail: { side: 'request', format: null },
+      charts: { open: true, group: 'hitrate', stacks: false },
     })
+  })
+
+  it('coerces chart prefs narrowly and keeps valid ones', () => {
+    const store = fakeStorage()
+    vi.stubGlobal('sessionStorage', store)
+    store.setItem(KEY, JSON.stringify({
+      charts: { open: false, group: 'tokens', stacks: 3 },
+    }))
+    const loaded = loadViewMemory('s1')
+    expect(loaded.charts).toEqual({ open: false, group: 'tokens', stacks: false })
+    store.setItem('dsh-request-log:view:s2', JSON.stringify({
+      charts: { open: true, group: 'galaxy' },
+    }))
+    // An uncached session id reads through to storage; s1 stays in-page.
+    expect(loadViewMemory('s2').charts).toEqual({ open: true, group: 'hitrate', stacks: false })
+    // A partial patch rides the merge without dropping untouched fields.
+    updateViewMemory('s1', { charts: { group: 'latency', open: false, stacks: false } })
+    expect(loadViewMemory('s1').charts).toEqual({ open: false, group: 'latency', stacks: false })
   })
 
   it('drops a selection whose id is not a string', () => {

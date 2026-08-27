@@ -13,8 +13,9 @@ import { React, h } from './react'
 import type { CallIndexEntry } from '../shared/types'
 import { ApiError, fetchCalls, formatDateTime, formatDuration, formatPct, formatTime, formatToolDispatches, formatTokens, formatTokPerSec } from './data'
 import { makeCallDetail } from './detail'
+import { StatsPanel } from './chart'
 import { interp, type ViewDict } from './dict'
-import { PAGE_SIZE, loadViewMemory, updateViewMemory, type DetailPrefs, type SelectedCall } from './persist'
+import { PAGE_SIZE, loadViewMemory, updateViewMemory, type ChartsPrefs, type DetailPrefs, type SelectedCall } from './persist'
 
 export interface DictSource {
   dictOf: () => ViewDict
@@ -46,7 +47,7 @@ function findScroller(root: HTMLElement): HTMLElement {
  * then skips re-diffing unchanged rows across the 3s poll, because their
  * `call` prop keeps its object identity.
  */
-function reconcileCalls(next: CallIndexEntry[], prev: CallIndexEntry[] | undefined): CallIndexEntry[] {
+export function reconcileCalls(next: CallIndexEntry[], prev: CallIndexEntry[] | undefined): CallIndexEntry[] {
   if (prev === undefined) return next.slice().reverse()
   const prevById = new Map(prev.map(call => [call.id, call]))
   const reversed = next.slice().reverse()
@@ -77,7 +78,7 @@ function StatusDot(props: { status: string }): React.ReactElement {
  * hashes (same-hash retries collapse into one slot), so a query consults at
  * most the top two slots.
  */
-function prevIdsOf(calls: CallIndexEntry[]): Map<string, string | undefined> {
+export function prevIdsOf(calls: CallIndexEntry[]): Map<string, string | undefined> {
   const result = new Map<string, string | undefined>()
   const chains = new Map<string, { hash: string; id: string }[]>()
   for (const call of calls) {
@@ -101,7 +102,7 @@ function prevIdsOf(calls: CallIndexEntry[]): Map<string, string | undefined> {
 }
 
 /** Sum the loaded window's usage into the overview card. */
-function summarize(calls: CallIndexEntry[]): {
+export function summarize(calls: CallIndexEntry[]): {
   count: number
   /** Billed input = uncached input + cache hits + cache writes, per call. */
   billed: number
@@ -236,8 +237,12 @@ export function makeRequestLogView(source: DictSource): (props: { sessionId?: st
     const [initial] = React.useState(() => loadViewMemory(sessionId))
     const [state, setState] = React.useState<LoadState>({ kind: 'loading' })
     const [auto, setAuto] = React.useState(initial.auto)
+    const [charts, setCharts] = React.useState<ChartsPrefs>(initial.charts)
     const [selected, setSelected] = React.useState<SelectedCall | null>(initial.selected)
     const [tick, setTick] = React.useState(0)
+    // Auto-refresh drives this probe counter (see the probe effect below);
+    // manual refresh drives `tick` and reloads the whole window.
+    const [probeTick, setProbeTick] = React.useState(0)
     // How many of the newest calls the ledger shows; "Load older" grows it.
     // One fetch of `limit` newest entries keeps refresh simple and the whole
     // loaded window consistent (the server caps it at its own MAX_LIMIT).
@@ -305,7 +310,17 @@ export function makeRequestLogView(source: DictSource): (props: { sessionId?: st
       prefsRef.current = prefs
       updateViewMemory(sessionId, { detail: prefs })
     }, [sessionId])
+    const onChartsPrefs = React.useCallback((patch: Partial<ChartsPrefs>): void => {
+      setCharts(prev => {
+        const next = { ...prev, ...patch }
+        updateViewMemory(sessionId, { charts: next })
+        return next
+      })
+    }, [sessionId])
 
+    // Full load: the whole loaded window (initial load, manual refresh,
+    // "Load older" growing the limit). Records settle once and never
+    // change, so identity reuse below keeps React.memo rows inert.
     React.useEffect(() => {
       let cancelled = false
       // Aborting on cleanup also cancels the in-flight fetch itself (session
@@ -338,13 +353,56 @@ export function makeRequestLogView(source: DictSource): (props: { sessionId?: st
       }
     }, [sessionId, tick, limit])
 
+    // Auto-refresh probe: fetch only the newest PAGE and splice it into the
+    // loaded window — a 3s poll on a session paged in 2000-deep costs one
+    // page, not the whole window re-fetched and re-parsed every tick. A full
+    // refresh (manual, limit change) re-syncs whatever this splice misses.
+    const firstProbe = React.useRef(true)
+    React.useEffect(() => {
+      if (firstProbe.current) {
+        firstProbe.current = false
+        return
+      }
+      let cancelled = false
+      const abort = new AbortController()
+      const probe = async (): Promise<void> => {
+        try {
+          const page = await fetchCalls(sessionId, Math.min(PAGE_SIZE, limit), 0, abort.signal)
+          if (cancelled) return
+          setState(prev => {
+            if (prev.kind !== 'ready') {
+              return { kind: 'ready', calls: reconcileCalls(page.calls, undefined), total: page.total }
+            }
+            const probeIds = new Set(page.calls.map(call => call.id))
+            const prevById = new Map(prev.calls.map(call => [call.id, call]))
+            // Keep the older loaded rows the probe window does not cover,
+            // reuse entry objects for the rows it does (memo identity).
+            const older = prev.calls.filter(call => !probeIds.has(call.id))
+            const spliced = page.calls.slice().reverse().map(call => prevById.get(call.id) ?? call)
+            return { kind: 'ready', calls: [...older, ...spliced], total: page.total }
+          })
+        } catch (error) {
+          if (cancelled || abort.signal.aborted) return
+          const message = error instanceof ApiError ? error.message : String(error)
+          setState(prev => prev.kind === 'ready'
+            ? { kind: 'ready', calls: prev.calls, total: prev.total, warning: message }
+            : prev)
+        }
+      }
+      void probe()
+      return () => {
+        cancelled = true
+        abort.abort()
+      }
+    }, [sessionId, probeTick, limit])
+
     React.useEffect(() => {
       if (!auto || selected !== null) return
       const timer = setInterval(() => {
         // A hidden tab cannot be read; skip the tick so the poll costs
         // nothing while the conversation is in the background.
         if (typeof document === 'object' && document.visibilityState === 'hidden') return
-        setTick(value => value + 1)
+        setProbeTick(value => value + 1)
       }, 3000)
       return () => clearInterval(timer)
     }, [auto, selected])
@@ -379,7 +437,11 @@ export function makeRequestLogView(source: DictSource): (props: { sessionId?: st
     }
 
     if (selected !== null) {
+      // Keyed per call: switching calls REMOUNTS the detail, so no state
+      // (the chained-previous fetch above all) can leak from one call into
+      // the next. Reading position survives via initialPrefs / memory.
       return h(CallDetail, {
+        key: selected.id,
         sessionId,
         callId: selected.id,
         ...selected.prevId === undefined ? {} : { prevId: selected.prevId },
@@ -427,6 +489,11 @@ export function makeRequestLogView(source: DictSource): (props: { sessionId?: st
           h('span', { className: 'rl-head-title' }, dict.calls + ' · ' + String(state.total)),
           h('span', { className: 'rl-head-actions' },
             h('button', {
+              className: 'rl-btn' + (charts.open ? ' rl-btn-on' : ''),
+              title: dict.charts.toggleHint,
+              onClick: () => onChartsPrefs({ open: !charts.open }),
+            }, dict.charts.toggle),
+            h('button', {
               className: 'rl-btn' + (auto ? ' rl-btn-on' : ''),
               onClick: () => {
                 const next = !auto
@@ -443,6 +510,9 @@ export function makeRequestLogView(source: DictSource): (props: { sessionId?: st
         stat(dict.sumHitRate, formatPct(sums.cacheRead, sums.billed), 'rl-stat-hit'),
           stat(dict.sumCacheWrite, formatTokens(sums.cacheWrite)),
           stat(dict.sumOutput, formatTokens(sums.output), 'rl-stat-out'))),
+        charts.open
+          ? h(StatsPanel, { calls: state.calls, dict, prefs: charts, onPrefs: onChartsPrefs })
+          : null,
       state.calls.length < state.total
         ? h('div', { className: 'rl-loadmore' },
             h('button', {

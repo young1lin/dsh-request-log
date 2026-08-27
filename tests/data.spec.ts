@@ -3,9 +3,12 @@
  * time formatters' undefined handling.
  */
 
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   STREAM_FLOOR_MS,
+  ApiError,
+  fetchCall,
+  fetchCalls,
   formatDateTime,
   formatDuration,
   formatPct,
@@ -15,7 +18,40 @@ import {
   formatTokens,
 } from '../src/client/data.ts'
 
+afterEach(() => {
+  vi.unstubAllGlobals()
+})
+
 const DASH = '\u2013'
+
+describe('fetch layer', () => {
+  it('encodes session and call ids into the request path', async () => {
+    const calls: string[] = []
+    vi.stubGlobal('fetch', async (input: RequestInfo | URL): Promise<Response> => {
+      calls.push(String(input))
+      return new Response(JSON.stringify({ calls: [], total: 0, offset: 0, limit: 0 }), { status: 200 })
+    })
+    await fetchCalls('a b/c', 10, 5)
+    await fetchCall('x y', 'id/1')
+    expect(calls).toEqual([
+      '/dsh-request-log/sessions/a%20b%2Fc/calls?limit=10&offset=5',
+      '/dsh-request-log/sessions/x%20y/calls/id%2F1',
+    ])
+  })
+
+  it('raises ApiError with the HTTP status and parses success bodies', async () => {
+    vi.stubGlobal('fetch', async (): Promise<Response> => new Response('nope', { status: 503 }))
+    const error = (await fetchCalls('s', 1, 0).catch(cause => cause as ApiError)) as ApiError
+    expect(error).toBeInstanceOf(ApiError)
+    expect(error.status).toBe(503)
+    expect(error.message).toBe('HTTP 503')
+
+    vi.stubGlobal('fetch', async (): Promise<Response> =>
+      new Response(JSON.stringify({ id: 'c1' }), { status: 200, headers: { 'content-type': 'application/json' } }))
+    const record = await fetchCall('s', 'c1')
+    expect(record.id).toBe('c1')
+  })
+})
 
 describe('formatDuration', () => {
   it('renders sub-second as rounded milliseconds', () => {

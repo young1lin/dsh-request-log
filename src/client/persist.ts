@@ -23,6 +23,7 @@
  */
 
 import { WIRE_PROTOCOLS, type WireProtocol } from '../wire'
+import type { MetricGroupKey } from './chart-stats'
 
 export type DetailSide = 'request' | 'response'
 
@@ -42,12 +43,20 @@ export interface SelectedCall {
   step?: number
 }
 
+/** 统计 panel reading position: open?, active metric group, token stacking. */
+export interface ChartsPrefs {
+  open: boolean
+  group: MetricGroupKey
+  stacks: boolean
+}
+
 export interface ViewMemory {
   selected: SelectedCall | null
   /** How many of the newest calls the ledger window covers. */
   limit: number
   auto: boolean
   detail: DetailPrefs
+  charts: ChartsPrefs
 }
 
 /** Ledger page size: how many of the newest calls a fresh view loads. */
@@ -61,8 +70,16 @@ const VALID_FORMATS: readonly string[] = ['neutral', ...WIRE_PROTOCOLS.map(entry
 
 const memory = new Map<string, ViewMemory>()
 
+const VALID_GROUPS: readonly MetricGroupKey[] = ['hitrate', 'tokens', 'latency', 'speed']
+
 export function freshViewMemory(): ViewMemory {
-  return { selected: null, limit: PAGE_SIZE, auto: true, detail: { side: 'request', format: null } }
+  return {
+    selected: null,
+    limit: PAGE_SIZE,
+    auto: true,
+    detail: { side: 'request', format: null },
+    charts: { open: true, group: 'hitrate', stacks: false },
+  }
 }
 
 function sessionStorageOrNull(): Storage | null {
@@ -115,6 +132,9 @@ function coerceMemory(raw: unknown): ViewMemory | null {
       selected = {
         id: candidate.id,
         ...typeof candidate.prevId === 'string' && candidate.prevId !== '' ? { prevId: candidate.prevId } : {},
+        ...typeof candidate.step === 'number' && Number.isInteger(candidate.step) && candidate.step >= 1
+          ? { step: candidate.step }
+          : {},
       }
     }
   }
@@ -134,11 +154,24 @@ function coerceMemory(raw: unknown): ViewMemory | null {
     ? record.limit
     : fresh.limit
 
+  const chartsRaw = typeof record.charts === 'object' && record.charts !== null
+    ? record.charts as Record<string, unknown>
+    : {}
+  const groupRaw = chartsRaw.group
+  const charts: ChartsPrefs = {
+    open: typeof chartsRaw.open === 'boolean' ? chartsRaw.open : fresh.charts.open,
+    group: VALID_GROUPS.includes(groupRaw as MetricGroupKey)
+      ? groupRaw as MetricGroupKey
+      : fresh.charts.group,
+    stacks: typeof chartsRaw.stacks === 'boolean' ? chartsRaw.stacks : fresh.charts.stacks,
+  }
+
   return {
     selected,
     limit,
     auto: typeof record.auto === 'boolean' ? record.auto : fresh.auto,
     detail: { side, format },
+    charts,
   }
 }
 
@@ -158,6 +191,7 @@ export function loadViewMemory(sessionId: string): ViewMemory {
     limit: entry.limit,
     auto: entry.auto,
     detail: { ...entry.detail },
+    charts: { ...entry.charts },
   }
 }
 
@@ -172,6 +206,10 @@ export function updateViewMemory(sessionId: string, patch: Partial<ViewMemory>):
     limit: patch.limit !== undefined ? patch.limit : entry.limit,
     auto: patch.auto !== undefined ? patch.auto : entry.auto,
     detail: patch.detail !== undefined ? patch.detail : entry.detail,
+    charts:
+      patch.charts !== undefined
+        ? { ...entry.charts, ...patch.charts }
+        : entry.charts,
   }
   // Delete-then-set bumps the session to the most-recent end of the Map's
   // insertion order — the poor man's LRU the cap below trims from the front.

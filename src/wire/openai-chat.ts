@@ -79,6 +79,13 @@ function chatMessagesOf(record: CallRecord): ChatMessage[] {
       continue
     }
 
+    if (message.role === 'system') {
+      // A system-role message inside the history maps to a system row here
+      // (the neutral system slot above is the adapter's usual seat).
+      rows.push({ role: 'system', content: blocksToPlainText(message.content) })
+      continue
+    }
+
     if (ordinary.length > 0) {
       rows.push({ role: 'user', content: contentPartsOf(message) })
     }
@@ -95,19 +102,31 @@ function chatMessagesOf(record: CallRecord): ChatMessage[] {
   return rows
 }
 
+/** Legal finish_reason values only; error/abort are not part of the enum. */
 const FINISH_REASON: Record<string, string> = {
   'stop': 'stop',
   'tool-calls': 'tool_calls',
   'max-tokens': 'length',
-  'aborted': 'aborted',
-  'error': 'error',
+}
+
+/**
+ * The reasoning-first model families (o-series, gpt-5+) accept only
+ * `max_completion_tokens` — the compat rule the adapter applies per model,
+ * approximated from the model id here.
+ */
+function usesMaxCompletionTokens(model: string): boolean {
+  return /^o\d/.test(model) || /^gpt-[5-9]/.test(model)
 }
 
 /** Render the request exchange (method, path, body). */
 export function renderOpenAiChatRequest(record: CallRecord): WireExchange {
+  const maxTokensField = usesMaxCompletionTokens(record.model) ? 'max_completion_tokens' : 'max_tokens'
   const body: Record<string, unknown> = {
     model: record.model,
     messages: chatMessagesOf(record),
+    // Every request on this route streams (the harness adapters always do).
+    stream: true,
+    stream_options: { include_usage: true },
     ...record.request.tools === undefined || record.request.tools.length === 0 ? {} : {
       tools: record.request.tools.map(tool => ({
         type: 'function',
@@ -115,7 +134,7 @@ export function renderOpenAiChatRequest(record: CallRecord): WireExchange {
       })),
     },
     ...record.request.temperature === undefined ? {} : { temperature: record.request.temperature },
-    ...record.request.maxTokens === undefined ? {} : { max_tokens: record.request.maxTokens },
+    ...record.request.maxTokens === undefined ? {} : { [maxTokensField]: record.request.maxTokens },
     ...record.request.stop === undefined ? {} : { stop: record.request.stop },
     ...record.reasoningEffort === undefined || record.reasoningEffort === 'off' ? {} : {
       reasoning_effort: record.reasoningEffort,
@@ -134,6 +153,8 @@ export function renderOpenAiChatResponse(record: CallRecord): Record<string, unk
     index,
   }))
   const usage = record.response?.usage
+  const failure = record.response?.finish.failure
+  const kind = record.response?.finish.kind ?? 'stop'
   const body = responseTextOf(record)
   return {
     id: `chatcmpl-${responseIdOf(record)}`,
@@ -150,8 +171,11 @@ export function renderOpenAiChatResponse(record: CallRecord): Record<string, unk
         ...reasoning.length > 0 ? { reasoning_content: reasoning } : {},
         ...toolCalls.length > 0 ? { tool_calls: toolCalls } : {},
       },
-      finish_reason: FINISH_REASON[record.response?.finish.kind ?? 'stop'] ?? 'stop',
+      // Only enum members render; an aborted/error finish reports null and
+      // the failure details ride the namespaced _error field.
+      finish_reason: FINISH_REASON[kind] ?? null,
     }],
+    ...failure === undefined ? {} : { _error: { message: failure.message, code: failure.code, ...failure.status === undefined ? {} : { status: failure.status } } },
     usage: {
       // OpenAI reports the TOTAL input here (cached_tokens is a subset
       // breakdown), so the disjoint neutral counts fold back together.

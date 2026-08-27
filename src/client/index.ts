@@ -57,6 +57,22 @@ const DICT_EN: ViewDict = {
   sumCacheWrite: 'Cache write',
   sumOutput: 'Output',
   loadMore: 'Load older ({count} more)',
+  charts: {
+    toggle: 'Charts',
+    toggleHint: 'Per-call line charts over the loaded window',
+    groupHitRate: 'Hit rate',
+    groupTokens: 'Tokens',
+    groupLatency: 'Latency',
+    groupSpeed: 'Speed',
+    stacks: 'Stacked',
+    stacksHint: 'Stack the token series cumulatively',
+    emptyTitle: 'Nothing to plot yet',
+    emptyHint: 'Statistics appear once calls settle with usage in this session.',
+    allNull: 'This metric was never reported for the loaded calls.',
+    speedApproxHint: '≈ value = output ÷ total duration — this response flushed at once (no measurable stream phase), so TTFT is included.',
+    excludedShort: '{count} aux',
+    excludedHint: '{count} auxiliary calls (compaction / session-title) are not on the numbered step axis.',
+  },
   detail: {
     back: 'Back',
     step: 'Step',
@@ -97,11 +113,27 @@ const DICT_EN: ViewDict = {
     expandHint: 'Expand every node and string',
     collapseAll: 'Collapse',
     collapseHint: 'Collapse every node and clamp long strings',
-    chainOn: 'Chained: only {sent} new items sent · previous_response_id reused ({skipped} items held server-side)',
+    chainOn: 'Chain view: {sent} new items · a chaining client could reuse previous_response_id ({skipped} items held server-side)',
     chainOff: 'Full input: the whole history travels in this request ({items} items)',
     copy: 'Copy JSON',
     copied: 'Copied',
+    copyFailed: 'Copy failed',
     loadError: 'Failed to load call',
+    jsonCollapse: 'collapse',
+    jsonExpand: 'expand',
+    jsonChars: '{count} chars',
+    jsonViewAsJson: 'view as JSON',
+    jsonViewAsText: 'view text',
+    jsonViewAsJsonTitle: 'Parse this string and show it as JSON',
+    jsonViewAsTextTitle: 'Show this string as plain text',
+    jsonCollapseStringTitle: 'Collapse this string back to its preview',
+    jsonOpenString: '… +{count} chars',
+    jsonOpenStringTitle: 'Open this string in full',
+    jsonChip: '{ } JSON',
+    jsonTruncated: '… truncated at {count} chars — use Copy JSON for the full body',
+    jsonItems: '{count} items',
+    jsonKeys: '{count} keys',
+    jsonNodeBudget: '… node budget exceeded, collapse other nodes or use Copy JSON ',
   },
 }
 
@@ -141,6 +173,22 @@ const DICT_ZH: ViewDict = {
   sumCacheWrite: '缓存写入',
   sumOutput: '输出',
   loadMore: '加载更早的调用（还有 {count} 条）',
+  charts: {
+    toggle: '图表',
+    toggleHint: '按已加载调用的逐次折线统计图',
+    groupHitRate: '命中率',
+    groupTokens: 'Token',
+    groupLatency: '延迟',
+    groupSpeed: '速度',
+    stacks: '堆叠',
+    stacksHint: '将 Token 各序列按累积值堆叠显示',
+    emptyTitle: '暂无可绘制的数据',
+    emptyHint: '本会话的调用完成并报告用量后，这里会出现统计折线。',
+    allNull: '已加载的调用从未报告该指标。',
+    speedApproxHint: '≈ 数值 = 输出 ÷ 总时长 —— 该响应一次性返回（无可测流式阶段），已计入首字等待。',
+    excludedShort: '{count} 辅助',
+    excludedHint: '{count} 个辅助调用（压缩 / 标题）不在编号步骤轴上，未计入折线。',
+  },
   detail: {
     back: '返回',
     step: '步骤',
@@ -181,11 +229,27 @@ const DICT_ZH: ViewDict = {
     expandHint: '展开全部节点和字符串',
     collapseAll: '折叠',
     collapseHint: '折叠全部节点并收起长字符串',
-    chainOn: '链式增量：本次仅发送 {sent} 条新增内容 · 复用 previous_response_id（{skipped} 条由服务端状态保留）',
+    chainOn: '链式视图：{sent} 条新增内容 · 链式客户端可复用 previous_response_id（{skipped} 条由服务端状态保留）',
     chainOff: '全量输入：完整历史随本次请求发送（{items} 条）',
     copy: '复制 JSON',
     copied: '已复制',
+    copyFailed: '复制失败',
     loadError: '加载调用记录失败',
+    jsonCollapse: '收起',
+    jsonExpand: '展开',
+    jsonChars: '{count} 字符',
+    jsonViewAsJson: '按 JSON 查看',
+    jsonViewAsText: '查看文本',
+    jsonViewAsJsonTitle: '解析该字符串并按 JSON 显示',
+    jsonViewAsTextTitle: '将该字符串按纯文本显示',
+    jsonCollapseStringTitle: '收起该字符串，回到预览',
+    jsonOpenString: '… +{count} 字符',
+    jsonOpenStringTitle: '完整展开该字符串',
+    jsonChip: '{ } JSON',
+    jsonTruncated: '… 已在 {count} 字符处截断 — 完整内容请使用“复制 JSON”',
+    jsonItems: '{count} 项',
+    jsonKeys: '{count} 个键',
+    jsonNodeBudget: '… 渲染节点数超限，请折叠其他节点或使用“复制 JSON”',
   },
 }
 
@@ -215,8 +279,8 @@ function apply(ctx: ClientCtx): void {
   })
 }
 
-module.exports = {
-  name: 'dsh-request-log',
-  inject: ['slots', 'locale'],
-  apply,
-}
+// Named exports (the CJS bundle delivers them as module.exports members —
+// the shape the harness's client module loader consumes).
+export const name = 'dsh-request-log'
+export const inject = ['slots', 'locale']
+export { apply }

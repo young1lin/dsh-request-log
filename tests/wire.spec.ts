@@ -1,6 +1,8 @@
 /**
  * Wire renderer specs: golden-shape assertions for the three protocol
- * renderings of one fixture record (text + tool traffic + reasoning + image).
+ * renderings of one fixture record (text + tool traffic + reasoning + image)
+ * — including every usage field the neutral record can carry, and the
+ * degraded shapes (unsettled records, failures, missing usage).
  */
 
 import { describe, expect, it } from 'vitest'
@@ -64,23 +66,32 @@ const record: CallRecord = {
       { type: 'text', text: 'all done' },
       { type: 'tool-call', id: 'call-10', name: 'lookup', arguments: '{"q":"again"}' },
     ],
-    usage: { inputTokens: 100, outputTokens: 20, cacheReadTokens: 40 },
+    usage: { inputTokens: 100, outputTokens: 20, cacheReadTokens: 40, cacheWriteTokens: 25, reasoningTokens: 8 },
     finish: { kind: 'tool-calls' },
     chunkCount: 9,
   },
 }
 
 describe('anthropic rendering', () => {
-  it('renders the Messages request shape', () => {
+  it('renders the Messages request shape the adapter can legally send', () => {
     const exchange = renderAnthropicRequest(record)
     expect(exchange.method).toBe('POST')
     expect(exchange.path).toBe('/v1/messages')
     const body = exchange.body
     expect(body.model).toBe('some-model')
+    expect(body.stream).toBe(true)
     expect(body.system).toEqual([{ type: 'text', text: 'be brief' }])
     expect(body.max_tokens).toBe(512)
     expect(body.stop_sequences).toEqual(['END'])
-    expect(body.thinking).toEqual({ type: 'enabled', effort: 'high' })
+    // Thinking renders the LEGAL adaptive shape + output_config (the real
+    // adapter sends adaptive+output_config or enabled+budget_tokens — only
+    // the effort crossed the llm/stream boundary).
+    expect(body.thinking).toEqual({ type: 'adaptive', display: 'summarized' })
+    expect(body.output_config).toEqual({ effort: 'high' })
+    // Temperature is incompatible with thinking: omitted, and noted.
+    expect(body.temperature).toBeUndefined()
+    expect(body._note).toEqual(expect.any(Array))
+    expect((body._note as string[]).join(' ')).toContain('temperature omitted')
     expect(body.tools).toEqual([{
       name: 'lookup',
       description: 'look things up',
@@ -90,32 +101,104 @@ describe('anthropic rendering', () => {
     expect(messages).toHaveLength(3)
     expect(messages[1].role).toBe('assistant')
     const assistantContent = messages[1].content as Record<string, unknown>[]
-    expect(assistantContent[0]).toEqual({ type: 'thinking', thinking: 'thinking about it' })
+    expect(assistantContent[0]).toEqual({ type: 'thinking', thinking: 'thinking about it', _note: expect.any(String) })
     expect(assistantContent[2]).toEqual({ type: 'tool_use', id: 'call-9', name: 'lookup', input: { q: 'wire' } })
     const toolResultContent = (messages[2].content as Record<string, unknown>[])[0]
     expect(toolResultContent.type).toBe('tool_result')
     expect(toolResultContent.tool_use_id).toBe('call-9')
   })
 
-  it('renders the final response object with cache usage', () => {
+  it('keeps temperature when thinking is off', () => {
+    const plain = { ...record, reasoningEffort: 'off' } as CallRecord
+    const body = renderAnthropicRequest(plain).body
+    expect(body.temperature).toBe(0.2)
+    expect(body.thinking).toBeUndefined()
+  })
+
+  it('marks a missing maxTokens with a note (the API requires it)', () => {
+    const body = renderAnthropicRequest({
+      ...record,
+      request: { ...record.request, maxTokens: undefined },
+    } as CallRecord).body
+    expect(body.max_tokens).toBeUndefined()
+    expect((body._note as string[]).join(' ')).toContain('max_tokens')
+  })
+
+  it('renders the final response with cache usage, preserving block order', () => {
     const response = renderAnthropicResponse(record)
     expect(response.stop_reason).toBe('tool_use')
     expect(response.usage).toEqual({
       input_tokens: 100,
       output_tokens: 20,
       cache_read_input_tokens: 40,
+      cache_creation_input_tokens: 25,
     })
     const content = response.content as Record<string, unknown>[]
     expect(content.map(block => block.type)).toEqual(['thinking', 'text', 'tool_use'])
   })
+
+  it('preserves interleaved thinking/text order instead of regrouping', () => {
+    const interleaved: CallRecord = {
+      ...record,
+      response: {
+        ...record.response!,
+        blocks: [
+          { type: 'text', text: 'first' },
+          { type: 'reasoning', text: 'mid think' },
+          { type: 'text', text: 'last' },
+        ],
+      },
+    }
+    const content = renderAnthropicResponse(interleaved).content as Record<string, unknown>[]
+    expect(content.map(block => block.type)).toEqual(['text', 'thinking', 'text'])
+  })
+
+  it('renders failures with a null stop_reason and namespaced _error', () => {
+    const failed: CallRecord = {
+      ...record,
+      status: 'error',
+      response: {
+        blocks: [],
+        finish: { kind: 'error', failure: { message: 'boom', code: 'RATE_LIMIT', status: 429 } },
+        chunkCount: 1,
+      },
+    }
+    const response = renderAnthropicResponse(failed)
+    expect(response.stop_reason).toBeNull()
+    expect(response._error).toEqual({ message: 'boom', code: 'RATE_LIMIT', status: 429 })
+  })
+
+  it('renders zeroed usage when none was reported', () => {
+    const bare: CallRecord = {
+      ...record,
+      response: { blocks: [], finish: { kind: 'stop' }, chunkCount: 1 },
+    }
+    expect(renderAnthropicResponse(bare).usage).toEqual({ input_tokens: 0, output_tokens: 0 })
+  })
+
+  it('keeps unparsable tool arguments visible instead of a silent {}', () => {
+    const broken: CallRecord = {
+      ...record,
+      response: {
+        ...record.response!,
+        blocks: [{ type: 'tool-call', id: 'c', name: 'lookup', arguments: '{oops' }],
+      },
+    }
+    const content = renderAnthropicResponse(broken).content as Record<string, unknown>[]
+    const input = content[0].input as Record<string, unknown>
+    expect(input._note).toContain('did not parse')
+    expect(input.raw).toBe('{oops')
+  })
 })
 
 describe('openai chat rendering', () => {
-  it('renders the chat.completions request shape', () => {
+  it('renders the chat.completions request shape with streaming fields', () => {
     const exchange = renderOpenAiChatRequest(record)
     expect(exchange.path).toBe('/v1/chat/completions')
     const body = exchange.body
     expect(body.model).toBe('some-model')
+    expect(body.stream).toBe(true)
+    expect(body.stream_options).toEqual({ include_usage: true })
     expect(body.reasoning_effort).toBe('high')
     expect(body.max_tokens).toBe(512)
     expect(body.stop).toEqual(['END'])
@@ -136,7 +219,31 @@ describe('openai chat rendering', () => {
     expect(toolRow.content).toBe('found it')
   })
 
-  it('renders the final response object with cached token details', () => {
+  it('maps system-role history messages to system rows', () => {
+    const withSystemMsg: CallRecord = {
+      ...record,
+      request: {
+        ...record.request,
+        messages: [{ role: 'system', content: [{ type: 'text', text: 'inline rule' }] }],
+      },
+    }
+    const rows = renderOpenAiChatRequest(withSystemMsg).body.messages as Record<string, unknown>[]
+    expect(rows[0]).toEqual({ role: 'system', content: 'be brief' })
+    expect(rows[1]).toEqual({ role: 'system', content: 'inline rule' })
+  })
+
+  it('uses max_completion_tokens for the reasoning-first model families', () => {
+    const gpt5 = renderOpenAiChatRequest({ ...record, model: 'gpt-5.2' } as CallRecord).body
+    expect(gpt5.max_completion_tokens).toBe(512)
+    expect(gpt5.max_tokens).toBeUndefined()
+    const o4 = renderOpenAiChatRequest({ ...record, model: 'o4-mini' } as CallRecord).body
+    expect(o4.max_completion_tokens).toBe(512)
+    // Everything else (DeepSeek et al.) keeps max_tokens.
+    const ds = renderOpenAiChatRequest({ ...record, model: 'deepseek-v4' } as CallRecord).body
+    expect(ds.max_tokens).toBe(512)
+  })
+
+  it('renders the final response with cached and reasoning token details', () => {
     const response = renderOpenAiChatResponse(record)
     expect(response.object).toBe('chat.completion')
     const choice = (response.choices as Record<string, unknown>[])[0]
@@ -145,49 +252,138 @@ describe('openai chat rendering', () => {
     expect(message.content).toBe('all done')
     expect(message.reasoning_content).toBe('short think')
     // OpenAI reports the TOTAL input (cached_tokens is a subset of it):
-    // 100 uncached + 40 cached = 140 in, 160 total.
+    // 100 uncached + 40 cached + 25 written = 165 in, 185 total.
     expect(response.usage).toEqual({
-      prompt_tokens: 140,
+      prompt_tokens: 165,
       completion_tokens: 20,
-      total_tokens: 160,
+      total_tokens: 185,
       prompt_tokens_details: { cached_tokens: 40 },
+      completion_tokens_details: { reasoning_tokens: 8 },
+    })
+  })
+
+  it('renders failures with a null finish_reason and namespaced _error', () => {
+    const failed: CallRecord = {
+      ...record,
+      status: 'aborted',
+      response: {
+        blocks: [],
+        finish: { kind: 'aborted', failure: { message: 'stream closed before finish', code: 'ABORTED' } },
+        chunkCount: 2,
+      },
+    }
+    const response = renderOpenAiChatResponse(failed)
+    const choice = (response.choices as Record<string, unknown>[])[0]
+    expect(choice.finish_reason).toBeNull()
+    expect(response._error).toEqual({ message: 'stream closed before finish', code: 'ABORTED' })
+    expect(response.usage).toEqual({
+      prompt_tokens: 0,
+      completion_tokens: 0,
+      total_tokens: 0,
     })
   })
 })
 
 describe('openai responses rendering', () => {
-  it('renders the /v1/responses request shape with store enabled', () => {
+  it('renders the adapter\'s real request form: full input, store disabled', () => {
     const exchange = renderOpenAiResponsesRequest(record)
     expect(exchange.path).toBe('/v1/responses')
     const body = exchange.body
-    expect(body.store).toBe(true)
+    expect(body.store).toBe(false)
     expect(body.previous_response_id).toBeUndefined()
-    expect(body.instructions).toBe('be brief')
-    expect(body.max_output_tokens).toBe(512)
+    expect(body.stream).toBe(true)
+    expect(body.prompt_cache_key).toBe('s1')
+    // The system prompt rides a leading developer message item (reasoning
+    // call), not instructions.
+    expect(body.instructions).toBeUndefined()
     const items = body.input as Record<string, unknown>[]
-    const kinds = items.map(item => item.type)
+    expect(items[0]).toEqual({
+      type: 'message',
+      role: 'developer',
+      content: [{ type: 'input_text', text: 'be brief' }],
+    })
+    const kinds = items.slice(1).map(item => item.type)
     expect(kinds).toEqual(['message', 'reasoning', 'message', 'function_call', 'function_call_output'])
-    expect(items[4]).toEqual({ type: 'function_call_output', call_id: 'call-9', output: 'found it' })
+    expect(items[5]).toEqual({ type: 'function_call_output', call_id: 'call-9', output: 'found it' })
+    // Effort lands in the native reasoning parameter.
+    expect(body.reasoning).toEqual({ effort: 'high', summary: 'auto' })
+    expect(body.include).toEqual(['reasoning.encrypted_content'])
+    expect(body.max_output_tokens).toBe(512)
     expect(body.tools).toEqual([{
       type: 'function',
       name: 'lookup',
       description: 'look things up',
       parameters: { type: 'object', properties: { q: { type: 'string' } } },
     }])
+    expect(body._chain).toBeUndefined()
   })
 
-  it('renders the final response object', () => {
+  it('seats the system prompt as a system item when the call had no effort', () => {
+    const plain = renderOpenAiResponsesRequest({ ...record, reasoningEffort: 'off' } as CallRecord).body
+    const items = plain.input as Record<string, unknown>[]
+    expect(items[0].role).toBe('system')
+    expect(plain.reasoning).toBeUndefined()
+  })
+
+  it('keeps tool-result images visible in function_call_output', () => {
+    const withImage: CallRecord = {
+      ...record,
+      request: {
+        ...record.request,
+        messages: [
+          { id: 'm3', role: 'user', content: [
+            { type: 'tool-result', toolCallId: 'call-9', content: [
+              { type: 'text', text: 'shot: ' },
+              { type: 'image', attachment: { attachmentId: 'att-2', mediaType: 'image/png' } },
+            ] },
+          ] },
+        ],
+      },
+    }
+    const items = renderOpenAiResponsesRequest(withImage).body.input as Record<string, unknown>[]
+    const output = items[1] as { output?: string }
+    expect(output.output).toBe('shot: [image att-2]')
+  })
+
+  it('renders the final response with reasoning token details', () => {
     const response = renderOpenAiResponsesResponse(record)
     expect(response.object).toBe('response')
     expect(response.status).toBe('completed')
     const output = response.output as Record<string, unknown>[]
     expect(output.map(item => item.type)).toEqual(['reasoning', 'message', 'function_call'])
-    // Total input semantics: 100 uncached + 40 cached = 140 in, 160 total.
+    // Total input semantics: 100 uncached + 40 cached + 25 written = 165.
     expect(response.usage).toEqual({
-      input_tokens: 140,
+      input_tokens: 165,
       output_tokens: 20,
       input_tokens_details: { cached_tokens: 40 },
-      total_tokens: 160,
+      output_tokens_details: { reasoning_tokens: 8 },
+      total_tokens: 185,
+    })
+  })
+
+  it('maps abort and error finishes to legal statuses', () => {
+    const aborted: CallRecord = {
+      ...record,
+      response: { ...record.response!, finish: { kind: 'aborted', failure: { message: 'gone', code: 'ABORTED' } } },
+    }
+    expect(renderOpenAiResponsesResponse(aborted).status).toBe('cancelled')
+    const errored: CallRecord = {
+      ...record,
+      response: { ...record.response!, finish: { kind: 'error', failure: { message: 'boom', code: 'X' } } },
+    }
+    expect(renderOpenAiResponsesResponse(errored).status).toBe('failed')
+    expect((renderOpenAiResponsesResponse(errored).error as Record<string, unknown>).message).toBe('boom')
+  })
+
+  it('renders zeroed usage when none was reported', () => {
+    const bare: CallRecord = {
+      ...record,
+      response: { blocks: [], finish: { kind: 'stop' }, chunkCount: 1 },
+    }
+    expect(renderOpenAiResponsesResponse(bare).usage).toEqual({
+      input_tokens: 0,
+      output_tokens: 0,
+      total_tokens: 0,
     })
   })
 })
@@ -222,7 +418,7 @@ describe('responses chaining', () => {
     },
   }
 
-  it('chains against a prior call: delta input only, previous_response_id set', () => {
+  it('annotates the chain against a prior call; the body stays the real full-input form', () => {
     const info = responsesChainOf(chainedRecord, prior)
     expect(info.chained).toBe(true)
     // Item counts (what `input:` holds): the delta is 2 items, the full
@@ -233,18 +429,22 @@ describe('responses chaining', () => {
 
     const exchange = renderOpenAiResponsesRequest(chainedRecord, { previous: prior })
     const body = exchange.body
-    expect(body.previous_response_id).toBe(info.previousResponseId)
-    expect(body.store).toBe(true)
+    // The reconstruction never masquerades as the real request: full input
+    // rides the body, the chain rides a namespaced annotation.
+    expect(body.store).toBe(false)
+    expect(body.previous_response_id).toBeUndefined()
     const items = body.input as Record<string, unknown>[]
-    // Only the new rows: the tool result and the new user message — the
-    // prefix and the prior assistant reply stay server-side.
-    expect(items).toEqual([
-      { type: 'function_call_output', call_id: 'call-9', output: 'found it' },
-      { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'and now?' }] },
-    ])
+    expect(items).toHaveLength(6) // developer system item + the 5 history items
+    expect(body._chain).toEqual({
+      chained: true,
+      previous_response_id: info.previousResponseId,
+      sent_items: 2,
+      skipped_items: 3,
+      _note: expect.stringContaining('hypothetical'),
+    })
   })
 
-  it('degrades to full input when ids do not line up (compaction/edit)', () => {
+  it('marks the annotation degraded when ids do not line up (compaction/edit)', () => {
     const broken: CallRecord = {
       ...chainedRecord,
       request: {
@@ -257,8 +457,14 @@ describe('responses chaining', () => {
     const info = responsesChainOf(broken, prior)
     expect(info.chained).toBe(false)
     expect(info.sentItems).toBe(1)
-    const exchange = renderOpenAiResponsesRequest(broken, { previous: prior })
-    expect(exchange.body.previous_response_id).toBeUndefined()
+    const body = renderOpenAiResponsesRequest(broken, { previous: prior }).body
+    expect(body._chain).toEqual({
+      chained: false,
+      previous_response_id: undefined,
+      sent_items: 1,
+      skipped_items: 0,
+      _note: expect.any(String),
+    })
   })
 
   it('degrades to full input for a failed prior call', () => {
@@ -290,8 +496,6 @@ describe('responses chaining', () => {
     expect(info.chained).toBe(false)
     // Full input then: every message ships, none held server-side.
     expect(info.skippedItems).toBe(0)
-    const exchange = renderOpenAiResponsesRequest(onlyAssistant, { previous: prior })
-    expect(exchange.body.previous_response_id).toBeUndefined()
   })
 
   it('reports full input without a prior call', () => {

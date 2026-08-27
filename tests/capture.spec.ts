@@ -5,7 +5,7 @@
 
 import { describe, expect, it } from 'vitest'
 import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
-import { installCapture } from '../src/host/capture.ts'
+import { createAttemptTracker, installCapture } from '../src/host/capture.ts'
 import type { CallRecord } from '../src/shared/types'
 
 type Listener = (options: GenerateOptions, next: () => AsyncIterable<StreamChunk>) => AsyncIterable<StreamChunk>
@@ -169,5 +169,109 @@ describe('capture', () => {
     installCapture(ctx as never, { store })
     await collect(listener()(optionsOf(), () => chunksOf(okChunks)))
     expect(store.appended[0].sessionId).toBe('_')
+    // An EMPTY string is unattributed too, not a session id.
+    await collect(listener()(optionsOf({ sessionId: '' }), () => chunksOf(okChunks)))
+    expect(store.appended[1].sessionId).toBe('_')
+  })
+
+  it('passes purpose and reasoningEffort through to the record', async () => {
+    const store = fakeStore()
+    const { ctx, listener } = contextDouble()
+    installCapture(ctx as never, { store })
+    await collect(listener()(optionsOf({ purpose: 'compaction', reasoningEffort: 'high' }), () => chunksOf(okChunks)))
+    expect(store.appended[0].purpose).toBe('compaction')
+    expect(store.appended[0].reasoningEffort).toBe('high')
+  })
+
+  it('settles ok when the stream ends cleanly without a finish chunk', async () => {
+    const store = fakeStore()
+    const { ctx, listener } = contextDouble()
+    installCapture(ctx as never, { store })
+    const noFinish = okChunks.filter(chunk => chunk.type !== 'finish')
+    await collect(listener()(optionsOf(), () => chunksOf(noFinish)))
+    const record = store.appended[0]
+    expect(record.status).toBe('ok')
+    expect(record.response?.finish).toEqual({ kind: 'stop' })
+    expect(record.response?.blocks).toEqual([{ type: 'text', text: 'world' }])
+  })
+
+  it('never breaks the call when persisting fails (fail-soft core promise)', async () => {
+    const appended: CallRecord[] = []
+    let failFirst = true
+    const store = {
+      append: async (record: CallRecord): Promise<void> => {
+        if (failFirst) {
+          failFirst = false
+          throw new Error('ENOSPC')
+        }
+        appended.push(record)
+      },
+    }
+    const warnings: string[] = []
+    const logger = { warn: (message: string) => { warnings.push(message) } }
+    const { ctx, listener } = contextDouble()
+    installCapture(ctx as never, { store, logger })
+
+    // The stream completes intact despite the persistence failure...
+    const seen = await collect(listener()(optionsOf(), () => chunksOf(okChunks)))
+    expect(seen).toEqual(okChunks)
+    expect(warnings.length).toBe(1)
+    expect(warnings[0]).toContain('failed to persist call record')
+    // ...and the NEXT call records normally.
+    await collect(listener()(optionsOf(), () => chunksOf(okChunks)))
+    expect(appended).toHaveLength(1)
+  })
+
+  it('degrades to an empty request record when the payload is unserializable', async () => {
+    const store = fakeStore()
+    const warnings: string[] = []
+    const logger = { warn: (message: string) => { warnings.push(message) } }
+    const { ctx, listener } = contextDouble()
+    installCapture(ctx as never, { store, logger })
+
+    // BigInt breaks JSON serialization: the record degrades, the call does not.
+    const options = optionsOf({
+      messages: [{ id: 'm1', role: 'user', content: [{ type: 'text', text: 'x', n: 10n }] }],
+    })
+    const seen = await collect(listener()(options as GenerateOptions, () => chunksOf(okChunks)))
+    expect(seen).toEqual(okChunks)
+    const record = store.appended[0]
+    expect(record.status).toBe('ok')
+    expect(record.request.messages).toEqual([])
+    expect(record.provider).toBe('test-provider')
+    expect(warnings.length).toBeGreaterThanOrEqual(1)
+  })
+
+  it('stops recording after dispose', async () => {
+    const store = fakeStore()
+    const { ctx, listener } = contextDouble()
+    const dispose = installCapture(ctx as never, { store })
+    await collect(listener()(optionsOf(), () => chunksOf(okChunks)))
+    expect(store.appended).toHaveLength(1)
+    dispose()
+    expect(listener()).toBeNull()
+  })
+})
+
+describe('createAttemptTracker', () => {
+  it('expires retry correlation past the window', () => {
+    const tracker = createAttemptTracker()
+    const key = 's:p'
+    expect(tracker.begin(key, 'h', 1_000)).toBe(1)
+    tracker.settle(key, false)
+    // Inside the window: a retry.
+    expect(tracker.begin(key, 'h', 60_000)).toBe(2)
+    tracker.settle(key, false)
+    // Outside the window (2 minutes later): a fresh logical call.
+    expect(tracker.begin(key, 'h', 61_000 + 120_000)).toBe(1)
+  })
+
+  it('keeps a same-hash failure after a window-expired success as fresh', () => {
+    const tracker = createAttemptTracker()
+    const key = 's:p'
+    expect(tracker.begin(key, 'h', 1_000)).toBe(1)
+    tracker.settle(key, true)
+    // A successful call never makes the next identical one a retry.
+    expect(tracker.begin(key, 'h', 2_000)).toBe(1)
   })
 })

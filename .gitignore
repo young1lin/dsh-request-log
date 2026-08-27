@@ -6,8 +6,10 @@ lib/
 *.d.ts.map
 *.log
 *.tgz
+coverage/
 .npm-cache/
 .pnpm-store/
 .tmp/
+.bench/
 .env
 .env.local

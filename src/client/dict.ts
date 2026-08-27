@@ -53,7 +53,50 @@ export interface DetailDict {
   chainOff: string
   copy: string
   copied: string
+  /** Copy-button label after a failed clipboard write. */
+  copyFailed: string
   loadError: string
+  /** JSON tree strings (see ./json JsonLabels). */
+  jsonCollapse: string
+  jsonExpand: string
+  jsonChars: string
+  jsonViewAsJson: string
+  jsonViewAsText: string
+  jsonViewAsJsonTitle: string
+  jsonViewAsTextTitle: string
+  jsonCollapseStringTitle: string
+  jsonOpenString: string
+  jsonOpenStringTitle: string
+  jsonChip: string
+  jsonTruncated: string
+  jsonItems: string
+  jsonKeys: string
+  jsonNodeBudget: string
+}
+
+/** 统计 panel strings: metric-group tabs, states, legend helpers. */
+export interface ChartsDict {
+  /** Head-actions toggle label. */
+  toggle: string
+  toggleHint: string
+  /** Metric-group tab labels. */
+  groupHitRate: string
+  groupTokens: string
+  groupLatency: string
+  groupSpeed: string
+  /** Token-group stack toggle + its tooltip. */
+  stacks: string
+  stacksHint: string
+  /** Shown when no plotted value exists anywhere. */
+  emptyTitle: string
+  emptyHint: string
+  /** A group exists but every point is null (metric never reported). */
+  allNull: string
+  /** Tooltip for ≈-tagged speed points: what the approximation covers. */
+  speedApproxHint: string
+  /** Short badge + tooltip about auxiliary calls off the step axis. */
+  excludedShort: string
+  excludedHint: string
 }
 
 export interface ViewDict {
@@ -96,5 +139,6 @@ export interface ViewDict {
   sumOutput: string
   /** Load-older button label; {count} = entries not yet loaded. */
   loadMore: string
+  charts: ChartsDict
   detail: DetailDict
 }

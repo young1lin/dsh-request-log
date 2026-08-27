@@ -29,12 +29,29 @@ export interface Config {
   retentionDays?: number
   /** Per-session cap on kept call records (newest kept). */
   maxCallsPerSession?: number
+  /** Per-session byte cap on each JSONL file (oldest records trimmed first). */
+  maxFileBytes?: number
+  /**
+   * Non-loopback authorities the read API may serve (LAN IP literals,
+   * hostnames): exact `host:port`, or port-less `host` matching any port.
+   * Every other Host — DNS-rebinding domains included — is refused.
+   */
+  trustedHosts?: string[]
+  /**
+   * Persistence format. `auto` (default) writes deduplicating v2 envelopes
+   * into a content-addressed object store and lazily converts old files;
+   * `v1` freezes the legacy behavior byte-for-byte (kill switch).
+   */
+  format?: 'v1' | 'auto'
 }
 
-export const DEFAULTS: Required<Pick<Config, 'retentionDays' | 'maxCallsPerSession'>> = {
+export const DEFAULTS: Required<Pick<Config, 'retentionDays' | 'maxCallsPerSession' | 'maxFileBytes'>> = {
   retentionDays: 14,
   maxCallsPerSession: 2000,
+  maxFileBytes: 128 * 1024 * 1024,
 }
+
+const TRUSTED_AUTHORITY = /^[\w.\-:[\]]+$/
 
 export const Config = z.preprocess(
   v => v ?? {},
@@ -42,6 +59,9 @@ export const Config = z.preprocess(
     directory: z.string().min(1).optional(),
     retentionDays: z.number().int().min(1).max(3650).default(DEFAULTS.retentionDays),
     maxCallsPerSession: z.number().int().min(1).default(DEFAULTS.maxCallsPerSession),
+    maxFileBytes: z.number().int().min(1024 * 1024).default(DEFAULTS.maxFileBytes),
+    trustedHosts: z.array(z.string().regex(TRUSTED_AUTHORITY)).default([]),
+    format: z.enum(['v1', 'auto']).default('auto'),
   }).strict(),
 )
 
@@ -51,6 +71,8 @@ export function resolveStoreConfig(config: Config | undefined): StoreConfig {
     directory: parsed.directory ?? dshHomePath('request-log'),
     retentionDays: parsed.retentionDays,
     maxCallsPerSession: parsed.maxCallsPerSession,
+    maxFileBytes: parsed.maxFileBytes,
+    format: parsed.format,
   }
 }
 
@@ -65,17 +87,24 @@ export function apply(ctx: Context, config: Config = {}): void {
 
   // The read API rides the webServer service: runtime inject keeps it
   // OPTIONAL — a headless composition without the web server leaves the
-  // callback pending forever, and capture/storage keep working.
+  // callback pending forever, and capture/storage keep working. The browser
+  // trust fence serves loopback plus the configured trusted authorities.
   ctx.inject(['webServer'], webCtx => {
-    webCtx.effect(() => installApi(webCtx, store, VERSION), 'dsh-request-log: read api')
+    const parsed = Config.parse(config ?? {})
+    webCtx.effect(
+      () => installApi(webCtx, store, VERSION, { trustedHosts: parsed.trustedHosts }),
+      'dsh-request-log: read api',
+    )
   })
 
   // Boot sweep + daily sweep. Fire-and-forget: sweep failures are contained
-  // inside the store and never surface as plugin errors.
+  // inside the store and never surface as plugin errors. The timer is
+  // unref'd so a headless/CLI composition can still exit naturally.
   const sweep = (): void => { store.sweep().catch(() => {}) }
   sweep()
   ctx.effect(() => {
     const timer = setInterval(sweep, SWEEP_INTERVAL_MS)
+    timer.unref?.()
     return () => clearInterval(timer)
   }, 'dsh-request-log: retention sweep')
 }

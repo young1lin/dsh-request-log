@@ -9,8 +9,13 @@
  * Consecutive attempts are correlated through the request hash.
  *
  * The listener is a pure pass-through: every chunk observed is yielded
- * through unchanged, and recording failures never break the call (a store
- * append error is logged and dropped).
+ * through unchanged, and RECORDING failures never break the call. Every
+ * snapshot this module takes of the request or the stream is fenced — a
+ * payload the JSON projection cannot serialize (circular references,
+ * BigInt, throwing getters from a foreign plugin's hand-built call)
+ * degrades that record's fidelity (a placeholder, a warn) instead of
+ * throwing into the consumer's `for await`. Only errors raised by the
+ * source stream itself propagate, as the waterfall contract requires.
  *
  * @module dsh-request-log/host/capture
  */
@@ -101,6 +106,13 @@ export interface CaptureOptions {
   logger?: { warn: (message: string, ...args: unknown[]) => void }
 }
 
+type Warn = ((message: string, ...args: unknown[]) => void) | undefined
+
+/** The logger face capture needs (satisfied by cordis ctx.logger). */
+interface WarnLogger {
+  warn: (message: string, ...args: unknown[]) => void
+}
+
 /**
  * Install the waterfall listener. Registered `global` so attempts from every
  * session scope (subagents included) are recorded.
@@ -120,16 +132,40 @@ export function requestHashOf(identity: { provider: string; model: string; reque
   return createHash('sha1').update(JSON.stringify(identity)).digest('hex').slice(0, 12)
 }
 
-/** JSON-safe projection of one request payload (drops non-serializable fields like `signal`). */
-function toRecordedRequest(options: GenerateOptions): CallRecord['request'] {
-  return JSON.parse(JSON.stringify({
-    system: options.system,
-    messages: options.messages,
-    tools: options.tools,
-    temperature: options.temperature,
-    maxTokens: options.maxTokens,
-    stop: options.stop,
-  }))
+/**
+ * JSON-safe clone of a snapshot value. A non-serializable input (cycles,
+ * BigInt, throwing getters) yields the fallback instead of throwing — the
+ * recording degrades, the call never does.
+ */
+function safeSnapshot<T>(value: unknown, fallback: T, warn: Warn, what: string): T {
+  try {
+    return JSON.parse(JSON.stringify(value)) as T
+  } catch (error) {
+    warn?.(`dsh-request-log: ${what} was not JSON-serializable; a placeholder was recorded: %o`, error)
+    return fallback
+  }
+}
+
+/**
+ * JSON-safe projection of one request payload (drops non-serializable fields like `signal`).
+ * A wholly unprojectable request records as an empty message list — metadata
+ * (provider, model, timing, outcome) still lands, and the call still runs.
+ */
+function toRecordedRequest(options: GenerateOptions, logger?: WarnLogger): CallRecord['request'] {
+  try {
+    const projection = {
+      system: options.system,
+      messages: options.messages,
+      tools: options.tools,
+      temperature: options.temperature,
+      maxTokens: options.maxTokens,
+      stop: options.stop,
+    }
+    return safeSnapshot<CallRecord['request']>(projection, { messages: [] }, logger?.warn, 'the request payload')
+  } catch (error) {
+    logger?.warn('dsh-request-log: the request payload could not be read; an empty record was kept: %o', error)
+    return { messages: [] }
+  }
 }
 
 async function* recordAttempt(
@@ -139,23 +175,32 @@ async function* recordAttempt(
   tracker: AttemptTracker,
   logger?: { warn: (message: string, ...args: unknown[]) => void },
 ): AsyncIterable<StreamChunk> {
-  const request = toRecordedRequest(options)
-  const hash = requestHashOf({ provider: options.provider, model: options.model, request })
-  const sessionId = typeof options.sessionId === 'string' && options.sessionId.length > 0 ? options.sessionId : '_'
-  const key = `${sessionId}:${options.provider}`
-  const record: CallRecord = {
-    schema: RECORD_SCHEMA,
-    id: randomUUID(),
-    sessionId,
-    ...options.purpose === undefined ? {} : { purpose: options.purpose },
-    provider: options.provider,
-    model: options.model,
-    ...options.reasoningEffort === undefined ? {} : { reasoningEffort: options.reasoningEffort },
-    requestHash: hash,
-    attempt: tracker.begin(key, hash, Date.now()),
-    timing: { startedAt: Date.now() },
-    request,
-    status: 'open',
+  let record: CallRecord
+  try {
+    const request = toRecordedRequest(options, logger)
+    const hash = requestHashOf({ provider: options.provider, model: options.model, request })
+    const sessionId = typeof options.sessionId === 'string' && options.sessionId.length > 0 ? options.sessionId : '_'
+    const key = `${sessionId}:${options.provider}`
+    record = {
+      schema: RECORD_SCHEMA,
+      id: randomUUID(),
+      sessionId,
+      ...options.purpose === undefined ? {} : { purpose: options.purpose },
+      provider: options.provider,
+      model: options.model,
+      ...options.reasoningEffort === undefined ? {} : { reasoningEffort: options.reasoningEffort },
+      requestHash: hash,
+      attempt: tracker.begin(key, hash, Date.now()),
+      timing: { startedAt: Date.now() },
+      request,
+      status: 'open',
+    }
+  } catch (error) {
+    // Red line: a recording failure must never break the model call. Without
+    // a record there is nothing to persist — pass the stream through as-is.
+    logger?.warn('dsh-request-log: failed to open a call record; this attempt is not recorded: %o', error)
+    yield* source
+    return
   }
 
   const blocks: RecordedResponse['blocks'] = []
@@ -164,36 +209,47 @@ async function* recordAttempt(
 
   try {
     for await (const chunk of source) {
-      if (record.timing.firstChunkAt === undefined) record.timing.firstChunkAt = Date.now()
-      chunkCount += 1
-      switch (chunk.type) {
-        case 'block-end':
-          blocks.push(JSON.parse(JSON.stringify(chunk.block)))
-          break
-        case 'usage':
-          usage = JSON.parse(JSON.stringify(chunk.usage))
-          break
-        case 'finish': {
-          const reason = chunk.reason
-          const failure = 'failure' in reason ? reason.failure : undefined
-          const finish: RecordedFinish = {
-            kind: reason.kind,
-            ...failure === undefined ? {} : {
-              failure: {
-                message: failure.message,
-                code: failure.code,
-                ...failure.status === undefined ? {} : { status: failure.status },
-                ...failure.requestId === undefined ? {} : { requestId: failure.requestId },
+      try {
+        if (record.timing.firstChunkAt === undefined) record.timing.firstChunkAt = Date.now()
+        chunkCount += 1
+        switch (chunk.type) {
+          case 'block-end':
+            blocks.push(safeSnapshot<RecordedResponse['blocks'][number]>(
+              chunk.block,
+              { type: 'opaque', unserializable: true },
+              logger?.warn,
+              'a response block',
+            ))
+            break
+          case 'usage':
+            usage = safeSnapshot<RecordedResponse['usage'] | undefined>(chunk.usage, undefined, logger?.warn, 'a usage report')
+            break
+          case 'finish': {
+            const reason = chunk.reason
+            const failure = 'failure' in reason ? reason.failure : undefined
+            const finish: RecordedFinish = {
+              kind: reason.kind,
+              ...failure === undefined ? {} : {
+                failure: {
+                  message: failure.message,
+                  code: failure.code,
+                  ...failure.status === undefined ? {} : { status: failure.status },
+                  ...failure.requestId === undefined ? {} : { requestId: failure.requestId },
+                },
               },
-            },
+            }
+            record.response = { blocks, usage, finish, chunkCount }
+            record.status = reason.kind === 'error' ? 'error' : reason.kind === 'aborted' ? 'aborted' : 'ok'
+            record.timing.endedAt = Date.now()
+            break
           }
-          record.response = { blocks, usage, finish, chunkCount }
-          record.status = reason.kind === 'error' ? 'error' : reason.kind === 'aborted' ? 'aborted' : 'ok'
-          record.timing.endedAt = Date.now()
-          break
+          default:
+            break
         }
-        default:
-          break
+      } catch (error) {
+        // Observing one chunk failed — the record loses that chunk's
+        // fidelity, not the consumer its stream.
+        logger?.warn('dsh-request-log: failed to observe a stream chunk: %o', error)
       }
       yield chunk
     }
@@ -218,7 +274,7 @@ async function* recordAttempt(
       record.status = 'aborted'
       record.timing.endedAt = Date.now()
     }
-    tracker.settle(key, record.status === 'ok')
+    tracker.settle(key(record), record.status === 'ok')
     // Fire-and-forget: this finally runs inside the consumer's `for await`
     // teardown, so persistence latency (disk flush, antivirus scan) must not
     // extend the stream's tail. Append order across concurrent calls was
@@ -227,4 +283,9 @@ async function* recordAttempt(
       logger?.warn('dsh-request-log: failed to persist call record: %o', error)
     })
   }
+}
+
+/** The tracker key of a settled record — recompute rather than close over (kept lean). */
+function key(record: CallRecord): string {
+  return `${record.sessionId}:${record.provider}`
 }

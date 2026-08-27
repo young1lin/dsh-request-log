@@ -6,9 +6,16 @@
  *   GET /dsh-request-log/sessions/:sessionId/calls/:callId
  *
  * The route prefix is deliberately NOT under /api — that prefix belongs to
- * the harness's own RPC carrier (`client-connection`). Reads only, no
+ * the harness's own RPC carrier (client-connection). Reads only, no
  * credentials: the payloads are the user's own session content served to
  * the same origin that already renders them.
+ *
+ * Because the payload IS the full conversation transcript, every request
+ * passes a browser-trust fence first (mirroring the one client-connection
+ * mounts on /api): the Host header must be a loopback or a configured
+ * trusted authority — DNS rebinding cannot forge Host — and any attached
+ * browser markers (Origin, Sec-Fetch-Site) must be same-origin. Anything
+ * else 403s before a store read happens.
  *
  * @module dsh-request-log/host/api
  */
@@ -28,6 +35,15 @@ interface WebServerFace {
   }): () => void
 }
 
+export interface ApiOptions {
+  /**
+   * Non-loopback authorities this deployment serves the web UI under
+   * (LAN IP literals, hostnames): exact `host:port` or port-less `host`
+   * matching any port. Requests carrying any other Host are refused.
+   */
+  trustedHosts?: readonly string[]
+}
+
 const DEFAULT_LIMIT = 50
 
 /**
@@ -40,6 +56,62 @@ function safeDecode(segment: string): string | undefined {
     return decodeURIComponent(segment)
   } catch {
     return undefined
+  }
+}
+
+function headerOf(headers: IncomingMessage['headers'], name: string): string | undefined {
+  const value = headers[name]
+  return typeof value === 'string' ? value : undefined
+}
+
+/** Loopback hostname: the literal localhost names or any 127.x.x.x quad. */
+function isLoopbackHostname(hostname: string): boolean {
+  if (hostname === 'localhost' || hostname === '[::1]') return true
+  if (!hostname.startsWith('127.')) return false
+  const parts = hostname.split('.')
+  return parts.length === 4 && parts.every(part => /^\d{1,3}$/.test(part) && Number(part) <= 255)
+}
+
+/** Whether one configured trustedHosts entry (host or host:port) matches. */
+function trustedAuthorityMatches(entry: string, hostUrl: URL): boolean {
+  let entryUrl: URL
+  try {
+    entryUrl = new URL(`http://${entry}`)
+  } catch {
+    return false
+  }
+  if (entryUrl.hostname !== hostUrl.hostname) return false
+  // Port-less entries grant the hostname on any port (OS-assigned ports);
+  // explicit ports grant that exact authority only.
+  return entryUrl.port === '' || entryUrl.port === hostUrl.port
+}
+
+/**
+ * Browser-trust fence (same policy the harness's client-connection applies
+ * to every /api route): Host must parse to a loopback or trusted authority,
+ * `sec-fetch-site: cross-site` is refused, and an attached Origin must be
+ * same-origin. Over plain HTTP a browser attaches neither Origin nor
+ * Fetch-Metadata to reads, so the Host header is the one marker DNS
+ * rebinding cannot forge — it binds every request, browser-looking or not.
+ */
+export function isTrustedReadRequest(req: IncomingMessage, trustedHosts: readonly string[]): boolean {
+  const host = headerOf(req.headers, 'host')
+  if (host === undefined) return false
+  let hostUrl: URL
+  try {
+    hostUrl = new URL(`http://${host}`)
+  } catch {
+    return false
+  }
+  if (!isLoopbackHostname(hostUrl.hostname)
+    && !trustedHosts.some(entry => trustedAuthorityMatches(entry, hostUrl))) return false
+  if (headerOf(req.headers, 'sec-fetch-site') === 'cross-site') return false
+  const origin = headerOf(req.headers, 'origin')
+  if (origin === undefined) return true
+  try {
+    return new URL(origin).host === hostUrl.host
+  } catch {
+    return false
   }
 }
 
@@ -60,9 +132,10 @@ function drain(req: IncomingMessage): void {
  * the web server simply gets no read API — capture and storage still work).
  * @returns the disposer removing the route.
  */
-export function installApi(ctx: Context, store: CallStore, version: string): () => void {
+export function installApi(ctx: Context, store: CallStore, version: string, options: ApiOptions = {}): () => void {
   const webServer = (ctx as Context & { webServer?: WebServerFace }).webServer
   if (webServer === undefined || typeof webServer.register !== 'function') return () => {}
+  const trustedHosts = options.trustedHosts ?? []
   // Derived from the live store config (not a frozen constant) so a
   // deployment raising maxCallsPerSession above 2000 can still page its
   // whole ledger — a full session then fits a single page.
@@ -74,6 +147,10 @@ export function installApi(ctx: Context, store: CallStore, version: string): () 
     path: API_PREFIX,
     handler: async (req, res) => {
       drain(req)
+      if (!isTrustedReadRequest(req, trustedHosts)) {
+        sendJson(res, 403, { error: 'forbidden' })
+        return
+      }
       const url = new URL(req.url ?? '/', 'http://localhost')
       const segments = url.pathname.slice(API_PREFIX.length).split('/').filter(part => part.length > 0)
 

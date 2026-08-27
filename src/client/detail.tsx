@@ -2,15 +2,16 @@
  * The per-call detail viewer: summary cards (timing phases, full token
  * usage, call identity) plus the collapsible request/response JSON tree in
  * the neutral capture or one of the three wire renderings. The Responses
- * rendering reconstructs the chained incremental form when the prior call of
- * the same conversation is known (previous_response_id + delta input).
+ * rendering carries the adapter's real full-input form; the chained
+ * reconstruction (what a stateful client could have sent against the prior
+ * call) rides a clearly-marked annotation and the chain banner.
  */
 
 import { React, h } from './react'
 import { countToolCalls, type CallRecord } from '../shared/types'
 import { WIRE_PROTOCOLS, detectProtocol, renderWire, responsesChainOf } from '../wire'
 import { ApiError, fetchCall, formatDateTime, formatDuration, formatPct, formatToolDispatches, formatTokens, formatTokPerSec } from './data'
-import { JsonTree, type TreeMode } from './json'
+import { JsonTree, type JsonLabels, type TreeMode } from './json'
 import { interp } from './dict'
 import type { DetailFormat, DetailPrefs, DetailSide } from './persist'
 import type { DictSource } from './view'
@@ -23,22 +24,35 @@ function Row(props: { label: string; children?: React.ReactNode; title?: string 
     h('span', { className: 'rl-sum-value' }, props.children))
 }
 
-function CopyButton(props: { getText: () => string; label: string; copiedLabel: string }): React.ReactElement {
-  const [copied, setCopied] = React.useState(false)
+function CopyButton(props: { getText: () => string; label: string; copiedLabel: string; failedLabel: string }): React.ReactElement {
+  const [state, setState] = React.useState<'idle' | 'copied' | 'failed'>('idle')
   const timerRef = React.useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
   React.useEffect(() => () => {
     if (timerRef.current !== undefined) clearTimeout(timerRef.current)
   }, [])
+  const flash = (next: 'copied' | 'failed'): void => {
+    setState(next)
+    if (timerRef.current !== undefined) clearTimeout(timerRef.current)
+    timerRef.current = setTimeout(() => { setState('idle') }, 1500)
+  }
   const onClick = (): void => {
     // Stringify lazily: an MB-scale body is only paid for when the reader
-    // actually copies, not on every side/format switch.
+    // actually copies, not on every side/format switch. A missing clipboard
+    // (non-secure context) or a refused write is SHOWN, not swallowed.
+    const clipboard = navigator.clipboard
+    if (clipboard === undefined || typeof clipboard.writeText !== 'function') {
+      flash('failed')
+      return
+    }
     const text = props.getText()
-    void navigator.clipboard?.writeText(text).then(() => {
-      setCopied(true)
-      timerRef.current = setTimeout(() => { setCopied(false) }, 1500)
-    }).catch(() => {})
+    void clipboard.writeText(text).then(() => {
+      flash('copied')
+    }).catch(() => {
+      flash('failed')
+    })
   }
-  return h('button', { className: 'rl-btn', onClick }, copied ? props.copiedLabel : props.label)
+  return h('button', { className: 'rl-btn', onClick },
+    state === 'copied' ? props.copiedLabel : state === 'failed' ? props.failedLabel : props.label)
 }
 
 /** Timing phases: wait (start → first chunk) and stream (first chunk → end). */
@@ -112,6 +126,13 @@ export function makeCallDetail(source: DictSource): (props: {
       }
     }, [props.sessionId, props.callId])
 
+    // A reused instance must never render the PRIOR call's chain: reset the
+    // chained-previous record whenever the call identity changes (the ledger
+    // also keys CallDetail per call — this is the defense in depth).
+    React.useEffect(() => {
+      setPrevious(undefined)
+    }, [props.sessionId, props.callId, props.prevId])
+
     // The prior call is only needed for the chained Responses view; fetch it
     // lazily on first switch to that format, once per prevId.
     React.useEffect(() => {
@@ -164,6 +185,23 @@ export function makeCallDetail(source: DictSource): (props: {
     const chain = effectiveFormat === 'openai-responses' && side === 'request'
       ? responsesChainOf(record, previous)
       : undefined
+    const jsonLabels: JsonLabels = {
+      collapse: d.jsonCollapse,
+      expand: d.jsonExpand,
+      charsCount: d.jsonChars,
+      viewAsJson: d.jsonViewAsJson,
+      viewAsText: d.jsonViewAsText,
+      viewAsJsonTitle: d.jsonViewAsJsonTitle,
+      viewAsTextTitle: d.jsonViewAsTextTitle,
+      collapseStringTitle: d.jsonCollapseStringTitle,
+      openString: d.jsonOpenString,
+      openStringTitle: d.jsonOpenStringTitle,
+      jsonChip: d.jsonChip,
+      truncatedNote: d.jsonTruncated,
+      itemsCount: d.jsonItems,
+      keysCount: d.jsonKeys,
+      nodeBudget: d.jsonNodeBudget,
+    }
     const usage = record.response?.usage
     const timing = timingOf(record)
     const billed = usage === undefined
@@ -185,6 +223,7 @@ export function makeCallDetail(source: DictSource): (props: {
             getText: () => textRef.current === null ? '' : JSON.stringify(textRef.current, null, 2),
             label: d.copy,
             copiedLabel: d.copied,
+            failedLabel: d.copyFailed,
           }))),
       h('div', { className: 'rl-cards' },
         h('div', { className: 'rl-card' },
@@ -295,6 +334,7 @@ export function makeCallDetail(source: DictSource): (props: {
           key: record.id + ':' + side + ':' + String(format) + ':' + String(previous?.id),
           value: payload,
           mode: treeMode,
+          labels: jsonLabels,
         })))
   }
 

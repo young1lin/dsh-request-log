@@ -1,0 +1,473 @@
+# dsh-request-log — Deduplicating Compressed Persistence Layer (v2 Format Design)
+
+Target: src/host/store.ts, src/host/capture.ts, plugin entry src/host/index.ts, wire vocab src/shared/types.ts.
+Status: proposal, buildable as specified. All line numbers refer to the current checkout of this repository.
+
+---
+
+## 0. Problem statement, quantified
+
+Each settled provider attempt is persisted as ONE JSONL line holding the FULL CallRecord
+(src/shared/types.ts L89–112: request.system, request.messages[], request.tools[],
+response.blocks[]). Because every turn resends the whole prior conversation
+(RecordedRequest.messages grows monotonically; capture.ts L154–169 projects exactly
+system + messages + tools + scalars), the per-file cost of a session grows ~quadratically:
+call N carries ≈ N−1 previously-persisted messages again. A few dozen calls therefore reach
+the configured ceiling — DEFAULTS.maxFileBytes = 128 * 1024 * 1024 (index.ts L797) — and
+users observe 100–190 MB files. Every existing read cost is linear in those raw bytes:
+get() reads and splits the WHOLE file (store.ts L373–389), readAll() parses every byte
+(L250–267).
+
+Goal: same append-only, crash-tolerant, fail-soft, one-file-per-session model — but bytes on
+disk proportional to UNIQUE content, reads independent of history length, v1 and v2 lines
+interoperable in one file during transition.
+
+Design decisions are prefixed DECISION.
+
+---
+
+## 1. Exact current behavior (quoted anchors)
+
+### 1.1 Config and caps
+
+- StoreConfig (store.ts L33–42): directory, retentionDays, maxCallsPerSession, maxFileBytes.
+- Defaults (index.ts L794–798): retentionDays: 14, maxCallsPerSession: 2000,
+  maxFileBytes: 128 * 1024 * 1024. Zod bounds (index.ts L802–811): retentionDays 1..3650,
+  maxCallsPerSession >= 1, maxFileBytes >= 1 MiB.
+- Path sanitization: fileNameOf (store.ts L50–56) whitelists [a-zA-Z0-9._-], strips trailing
+  dots, prefixes Win32 reserved device names (RESERVED_DEVICE_NAME L47).
+  File name: <sanitized>.jsonl under dshHomePath('request-log') (index.ts L64).
+
+### 1.2 Write path (store.ts append, L227–248)
+
+1. JSON.stringify(record) + '\n'; byte length via lineBytes (L158–161).
+2. Serialized through the per-file promise chain: enqueue (L151–156) tails
+   state.queue.then(job); the stored tail swallows errors (next.catch(() => {})) so one
+   failure never wedges later appends.
+3. Inside the job:
+   - ensureDirectory() memoized mkdir (L127–139).
+   - If state.poisoned -> repairTail first (L236).
+   - stat current size (missing file => 0) (L237).
+   - If size + bytes > maxFileBytes -> trimForBytes(sessionId, path, bytes) (L238).
+   - writeLine(path, line) -> plain appendFile (L218–220). NO fsync/fdatasync anywhere
+     (import list L28). A power loss may drop the tail — tolerated, see §6.2.
+   - On ANY error: state.poisoned = true, rethrow (L241–245). Capture logs and continues
+     (capture.ts L282–284 fire-and-forget store.append(record).catch(warn)), so the model
+     call never breaks.
+4. Trimming (trimForBytes, L186–212): reads the whole file UTF-8, splits on newline, pops
+   trailing empties, budget = maxFileBytes - incoming (L195), keeps NEWEST whole lines whose
+   bytes fit (always keeps >=1 line, L202), tmp+rename path.tmp -> path (L207–209; atomic
+   replace, libuv MOVEFILE_REPLACE_EXISTING on Win32), invalidates index cache (L210).
+5. Poison flag set ONLY when the job threw — in practice a torn/failed writeLine.
+
+### 1.3 Partial-line repair (repairTail, L168–179)
+
+Reads the file; if it does not end with a newline, truncates to lastIndexOf('\n')+1 bytes and
+deletes the cache entry. A half-written record (ENOSPC sim tests/store.spec.ts L319–344 via
+the protected writeLine seam / FlakyStore) is discarded; only the torn record itself is lost.
+
+### 1.4 Read path
+
+- Index/poll (entriesOf, L317–353): stat -> cached (mtimeMs,size) match serves entries
+  (L325–328). Grew past parsedBytes -> readTail incremental (L331–340). Else readAll full
+  (L341–345). Cache bounded to 16 sessions, insertion-order eviction (L347–350).
+- Incremental tail (readTail, L276–309): reads only [fromByte,size); null-forces full re-read
+  when the file SHRANK below fromByte (trim happened, L282) or short-read; trailing chunk
+  without newline stops at last newline, stays unparsed until completed (L290–299).
+- Full read (readAll, L250–267): slices to last complete line, splits, parseLine each
+  (L98–107): JSON.parse, refuse schema !== RECORD_SCHEMA (L102), silently skip corrupt /
+  foreign lines (tests/store.spec.ts L182–195 pin this).
+- Detail (get, L373–389): whole-file read; substring prefilter
+  needle = '"id":' + JSON.stringify(callId) (L382); verifies record.id === callId (L386).
+- Projection: toIndexEntry(record) (src/shared/types.ts L244–284) derives the row (usage,
+  finishKind, ttfb/duration, messageCount, toolCalls/calledTools via countToolCalls L214–241
+  with TOOL_DISPATCH_SITE regex L189, toolNames, requestChars, responseBlockKinds). Consumed
+  by entriesOf; api.ts serves it at GET /dsh-request-log/sessions/:sessionId/calls
+  (installApi L145–206; listIndex called L178; page ceiling from store.maxCallsPerSession
+  L142) and full records at /calls/:callId (store.get, L192). assignSteps (store.ts L87–95)
+  stamps steps after merge.
+
+### 1.5 Retention (sweep, L397–440)
+
+Boot + every 24 h (index.ts L71 SWEEP_INTERVAL_MS, L95–101, timer unref'd L851). Per .jsonl:
+stat; mtimeMs < now − retentionDays·DAY_MS -> rm + drop cache (L413–416). Else full readFile
+to COUNT lines without parsing (L421–423); lines > maxCallsPerSession -> rewriteLineCapped
+(keep newest N, L443–457, tmp+rename); else size > maxFileBytes -> trimForBytes(path, 0)
+(L430–433). Trims ride the same per-file enqueue so they cannot race an append into losing
+records (comment L427–430). Fail-soft per file (catch, L435–437).
+
+### 1.6 Capture feed
+
+installCapture registers a GLOBAL llm/stream waterfall listener (capture.ts L121–128);
+recordAttempt (L171–286) snapshots the request (toRecordedRequest L154–169), fingerprints
+{provider,model,request} with requestHashOf sha1-slice12 (L131–133), assembles
+response.blocks from block-end chunks (L217–222), settles usage/finish/status (L227–244,
+fallbacks L259–276), persists fire-and-forget (L282–284).
+
+---
+
+## 2. V2 record format (mixed-v1-friendly, same append model)
+
+### 2.1 Shape of the redundancy
+
+From types.ts: RecordedRequest = system?: string, messages: RecordedMessage[]
+({ id?, role, content: RecordedBlock[], sourceKind? } L31–37), tools?: RecordedToolSchema[]
+({name,description,parameters} L13–17), plus scalars. RecordedResponse = blocks, usage,
+finish, chunkCount (L77–83). RecordedBlock open ({type}+keys, L25–28); run_code arguments
+embed whole programs (tests/store.spec.ts L225–249).
+
+Between consecutive ordinary calls in a session:
+- messages prefix [0..k) is BYTE-IDENTICAL (re-serialized session memory) => ~100% redundancy;
+- tools and system are stable for most of a session => highly repeated;
+- response is unique per attempt (fresh tokens; self-compresses well);
+- timing/id/status/usage are small scalars.
+
+So N messages resend per call => quadratic duplication. The dedup unit must be smaller than
+"request", coarser than "block".
+
+### 2.2 Chunking unit candidates and the pick
+
+| Candidate | Pros | Cons |
+|---|---|---|
+| A. per-message hash | Exactly matches resend pattern; blob size 0.1–50 KB; retries share all blobs | ~80 B ref line per message |
+| B. response-block-group hash | One hash/call | Responses unique => saves nothing over compression alone |
+| C. tools-array hash | Huge win (KB-scale schemas, stable) | Not sufficient alone |
+| D. system-prompt hash | Stable, medium size | Not sufficient alone |
+| E. whole-request hash | simplest | Never repeats (grows each turn) => zero dedup |
+
+DECISION — chunk by structural piece, hashed over EXACT recorded JSON:
+1. m — one per-message blob (A), the workhorse: turn-over-turn history identical by
+   construction => each new call persists only genuinely NEW messages.
+2. t — one blob for the whole tools array (C): ~one physical copy per session, often shared
+   cross-session within a project.
+3. s — one blob for the system prompt string (D).
+4. r — one blob for the ENTIRE response body (blocks+usage+finish+chunkCount). Blocks NOT
+   hashed individually (rejects B at block grain): nearly all unique => finer grain only adds
+   refs; retries then share ALL m/s/t objects and differ only in r.
+
+Hash input = exact JSON of the recorded piece (post-safeSnapshot); for m the FULL
+RecordedMessage INCLUDING id/sourceKind. Deliberate conservatism: an adapter regenerating
+message ids per request degrades dedup silently (duplicate objects persist — correctness and
+losslessness intact); hashing only {role, content} could return the WRONG object (an earlier
+twin with a different id) — rejected. Algorithm sha256, full lowercase hex identity;
+measured ~10 µs per KB-class message vs the JSON.stringify we already pay in append.
+
+### 2.3 Envelope line (self-describing, same JSONL)
+
+V2 continues one-line-one-record JSONL, distinguishable per line by leading key: current
+records start {"schema":1,...} (capture.ts L185, recordOf in tests); v2 starts {"v":2,...}.
+Readers branch on a single peek — no out-of-band version marker; both schemas stay
+first-class forever.
+
+    {
+      "v": 2,
+      "id": "<uuid>",                 // same semantics as CallRecord.id
+      "sessionId": "...",
+      "purpose": "compaction",        // optional
+      "provider": "...", "model": "...",
+      "reasoningEffort": "...",       // optional
+      "requestHash": "...", "attempt": 1,
+      "timing": {"startedAt": ..., "firstChunkAt": ..., "endedAt": ...},
+      "status": "ok",
+      "opts": {"temperature": .., "maxTokens": .., "stop": [..]},   // inline scalars
+      "refs": [
+        {"k":"s","h":"<sha256hex>","z":310},          // system, if present
+        {"k":"t","h":"<sha256hex>","z":9021},         // tools, if present
+        {"k":"m","h":"<sha256hex>","z":480},          // messages, IN ORDER, duplicates allowed
+        ...,
+        {"k":"r","h":"<sha256hex>","z":1500}          // response, if settled
+      ],
+      "sum": {                                        // precomputed projection: almost-CallIndexEntry
+        "messageCount": 31, "requestChars": 80213,
+        "blockKinds": ["text","tool-call"],           // -> responseBlockKinds
+        "toolCalls": 3, "calledTools": [{"name":"run_code","count":1}],
+        "toolNames": ["run_code", "..."]
+      }
+    }
+
+Field-order discipline: id emitted immediately after v so get()'s substring prefilter
+(store.ts L382) works unchanged on v2 lines. sum removes ALL traversal of blob payloads from
+the list path — toIndexEntry-grade rows materialize from the envelope alone. Missing/unreadable
+blob => detail degradation ONLY (metadata + {"unavailable":true}), mirroring capture's
+fail-soft fidelity rule for unserializable blocks (capture.ts L217–222); index rows unaffected.
+
+### 2.4 Where hashes live — decided
+
+- Per-file footer: hostile to append-only + torn-tail repair (L168–179) and parsedBytes
+  machinery (L276–309). REJECTED.
+- Sidecar .idx: doubles crash surface across trim renames; duplicates state indexCache
+  already caches. REJECTED.
+- Inline refs array in each envelope line: appended atomically WITH the record riding the
+  existing chain; self-describing; scan-able.
+
+DECISION — inline refs in each envelope line. Write path stays ONE appendFile of one line;
+index projection needs no blob IO; footer/sidecar buys seek speed we do not need because
+envelopes are ~0.3–2 KB and bounded by maxCallsPerSession.
+
+---
+
+## 3. Blob storage — DECISION: global content-addressed store (option b)
+
+    $DSH_HOME/request-log/<session>.jsonl            # envelopes (mixed v1+v2)
+    $DSH_HOME/request-log/objects/aa/<sha256hex>.drl # 256 fan-out buckets
+    $DSH_HOME/request-log/objects/tmp-*              # staging (same volume => atomic rename)
+
+Object bytes: 'DRL1' magic + 1 codec byte (0=identity, 1=deflateRaw no-dict, 2=deflateRaw
+seed-dict) + payload.
+
+Why (b) beats (a) single-pack-per-session:
+
+- Atomic writes: CAS objects immutable + uniquely named; concurrent writers of one hash
+  produce identical bytes ("last rename wins" = no-op). EBUSY/EPERM on Win32 rename
+  (target handle open) recoverable by any later writer. A pack needs offset-table mutation
+  synchronized under the per-session chain plus torn-pack recovery of its own.
+- Windows fs semantics: temp lives in SAME bucket dir => same-volume rename (cross-volume
+  rename copies and is NOT atomic). Content-derived names eliminate contention. Fan-out
+  2 hex chars keeps dirs small. Existing code already trusts tmp+rename on Windows
+  (trimForBytes L207–209, rewriteLineCapped L453–455).
+- GC/retention interplay: objects referenced only by expired sessions must die. Mark-sweep
+  attaches to the ALREADY-existing sweep (L397) which readFile's every live file anyway
+  (L421): extract "h":"[0-9a-f]{64}" matches into reachable-set; unlink unreachable objects
+  older than a grace floor (mtime >= GC-start exempt — defeats append-during-GC race).
+  Refcounting rejected: atomic bump paired with non-atomic envelope append is unfixable
+  across crashes; mark-sweep derives truth from files alone, restartable for free. Lag
+  between envelope-trim and reclaim <= SWEEP_INTERVAL_MS + grace; extra objects inert.
+- Code complexity: (b) REMOVES code overall — no offsets, no pack compaction, no torn-pack
+  repair; readers just open/read/inflate. Cross-session dedup free (same project => shared
+  tools/system/user messages).
+
+Fallback (documented, not implemented): per-session pack can layer later behind the same
+BlobStore interface without envelope-syntax change.
+
+---
+
+## 4. Compression
+
+### 4.1 Codec selection for 1–50 KB blobs
+
+Sync one-shots only (write-once-read-rarely; sizes too small to amortize async streams):
+
+- gzip: −18 B container + CRC/ISIZE we do not need (no HTTP transport; blobs are files).
+  Excluded.
+- brotli: best raw ratio but slower cold decode and custom dictionary would need
+  training/bundling. Runner-up.
+- node:zlib deflateRaw (CHOSEN): level configurable, default 6; compute rides the decoupled
+  persistence leg anyway (capture.ts L278–284 keeps persistence OFF the stream tail).
+
+Empirical (Node 22.18, synthetic record shaped like CallRecord — padded prose + 14-tool
+array + run_code program; synthetic padding OVERSTATES absolute ratios; real code/log JSON
+should be assumed roughly 1/3–1/2 of these):
+
+  3 records sum 70,026 B raw
+   - independent deflateRaw L6 -> 3,409 (~20x)
+   - independent gzip6         -> 3,463
+   - independent brotli q4     -> 2,892 (~24x)
+   - whole-stream gzip6        -> 1,695 (~41x)
+  single 24,628 B record deflateRaw L6 -> 1,203 B in 0.28 ms; br q4 1,022 B/0.38 ms; br q6 999 B/1.17 ms
+
+Reading: structural dedup replaces the cross-line context that whole-stream deflate
+exploits, so per-record compression + dedup ~= effective 15–50x reduction vs v1 bytes on
+history-dominated sessions.
+
+### 4.2 Shared dictionary
+
+Verified empirically on Node 22.18.0: zlib.deflateRawSync(buf, {dictionary}) /
+inflateRawSync(x, {dictionary}) round-trip correctly; wrapped deflateSync ALSO accepts the
+option without throwing, but raw framing is where dictionary semantics are contractual =>
+standardize on deflateRaw/inflateRaw exclusively.
+
+Dictionary bootstrap: repetition that matters at 1–10 KB is JSON scaffolding + tool-schema
+boilerplate. Ship DICTIONARY_SEED constant (~8–16 KB common keys/types/tool-description
+fragments), codec byte selects dict (1=none, 2=seed). Adaptive/lazy extension optional later.
+Measured indicative: small 589 B message with unrelated 8 KB dict -> 137 vs 142 B (no-dict);
+benefit concentrates exactly in the 1–10 KB band v2 targets.
+
+Escape hatch: pieces > maxChunkBytes (config, default 32 MiB) store codec 0 (identity).
+
+---
+
+## 5. Read path
+
+### 5.1 List/index (hot, zero blob IO)
+
+entriesOf unchanged mechanically: same (mtime,size) stat gate, same readTail incremental
+append, same parsedBytes bookkeeping, same bounded-16 cache. Only parseLine branches:
+schema===1 -> legacy path (toIndexEntry); v===2 -> assemble CallIndexEntry DIRECTLY from the
+envelope (sum + scalars + assignSteps participation) touching NO blobs. Cold-start today =
+readAll JSON.parses up to 128 MB (multi-second poll on first open); v2 cold-start parses
+envelopes only = maxCallsPerSession x ~1 KB worst-case, typically well under 1 MB =>
+milliseconds, independent of accumulated history.
+
+### 5.2 Detail reads (get)
+
+Locate envelope (needle prefilter intact) -> collect distinct hashes -> parallel
+blobStore.get(h) -> inflate -> JSON.parse -> splice request/response -> return plain
+CallRecord-compatible object (schema:1 shimmed so API payloads stay stable). Missing blob =>
+placeholder {"$unavailable":"<hash>"} at that slot (fail-soft, mirrors unserializable-block
+policy).
+
+### 5.3 In-memory caches
+
+- Envelope index: EXISTING indexCache (bound 16, insertion-order evict) — semantics unchanged.
+- NEW bodyCache: byte-budgeted LRU over reassembled records (default 64 MiB / 64 entries)
+  + separate raw-blob LRU (default 16 MiB) keyed by hash. Blob cache needs NO invalidation
+  (content-addressed = immutable); body caches ride the existing stat-gate.
+
+---
+
+## 6. Migration, crash safety, GC scheduling
+
+### 6.1 Modes (Config.format, default 'auto')
+
+- 'v1' — frozen legacy behavior byte-for-byte (kill switch).
+- 'auto' — NEW appends are v2; old files convert LAZILY and gradually:
+  (i) inherently — every trimForBytes/rewriteLineCapped rewrite emits survivors as v2
+  envelopes (those rewrites already re-materialize every kept line); (ii) bounded background
+  migrator piggybacked on the sweep cycle + boot pass, oldest-mtime-first, budgeted
+  (e.g. <=64 MiB raw/day), one file in flight, riding the file's enqueue chain like
+  sweep-trims (L430–433).
+- No forced explicit config beyond format:'v1'.
+
+Mixed files first-class forever: parseLine accepts both; rollback to an older binary simply
+IGNORES v2 lines via the foreign-schema skip at L102 — degraded view, zero corruption.
+
+### 6.2 Crash-safety ledger (every step restartable)
+
+| Step | Mechanism | After crash/power cut |
+|---|---|---|
+| Object write | writeFile(bucket/tmp-uniq) then rename (same dir) | orphan tmp (GC sweeps), OR complete immutable object; never partial visible target |
+| Blob-vs-envelope order | blobs written INSIDE the enqueued job BEFORE writeLine | persisted envelope references only already-renamed objects; mid-phase failure => record never landed => equals today's loss semantics |
+| Envelope append | unchanged appendFile + newline rule | torn tail repaired by repairTail exactly as today (spec L319–344 keeps passing) |
+| Lazy migration rewrite | read -> CAS blobs -> build v2 text -> tmp+rename | mid-way crash leaves original INTACT (rename = commit point); restart redoes deterministically |
+| Sweep / GC | mark from LIVE files only; grace floor on mtime | missed objects reclaimed next cycle; never deletes referenced data |
+| fsync stance | NONE added (matches import surface L28) | post-crash missing recent blobs => placeholders (fail-soft, logged); wrong data impossible — content addressing prevents torn-partial masquerade (magic+frame validation) |
+
+### 6.3 Semantics shifts codified
+
+- maxFileBytes re-pointed at LOGICAL stored bytes attributed to the session = sum(envelope
+  line bytes) + sum(refs[].z) over KEPT envelopes (tracked incrementally per cached entry;
+  recount on cold load by summation of envelopes only). File-by-stat survives as cheap
+  precondition: file bytes <= attributed bytes => crossing it implies breach (early-exit).
+- Trim accounting counts an OBJECT once per referencing envelope (shared-blob double-count
+  makes per-session budgets an UPPER bound of marginal bytes; disk relief lands when ALL
+  referencers trim and GC collects). Documented approximation; trim stays O(envelopes),
+  no global coordination.
+- maxCallsPerSession UNCHANGED (raw line count — v2 envelopes are lines like v1).
+
+---
+
+## 7. Risks and mitigations
+
+1. Many-small-files pressure (256 dirs x sessions x objects): fan-out + GC; acceptable for
+   a dev-machine diagnostics plugin; expose object count via health later.
+2. fsync-less durability: unchanged exposure for envelopes; NEW exposure for blobs. Chosen
+   deliberately (fail-soft contract, debug-data stakes); escape hatch Config.durability =>
+   fh.datasync() after each object rename if losses reported.
+3. maxFileBytes semantics drift (external scripts measuring raw size): release note +
+   health endpoint exposing both measures; zod min stays 1 MiB.
+4. Memory caps: envelope index bound 16 sessions ~= <=32 MB worst; LRUs byte-budgeted;
+   decompress inputs gated by declared z sanity ceiling (reject z > maxChunkBytes) against
+   zip-bomb inflation from corrupt/tampered files.
+5. Multi-process staleness: second DSH instance appending while cached — IDENTICAL exposure
+   exists today via the stat-gate; nothing new introduced.
+6. Windows rename-vs-open-reader races: benign (unique targets; reader retry; terminal
+   failure <=> ENOSPC-class outcome equal to today).
+7. Testability seams (mirroring protected writeLine):
+   - KEEP writeLine (FlakyStore depends on it).
+   - NEW protected putObject/getObject on BlobStore for ENOSPC sims.
+   - Injectable Compressor {deflate/inflate} => golden-vector tests with pinned dictionary.
+   - now-injection for sweep/GC timing (pattern preserved from sweep(now), L397).
+   - Every §1 observable in tests/store.spec.ts must keep passing unchanged: torn-fuse
+     semantics (L128–153), trim-then-full-reread (L155–166), sweep delete/trim (L168–195),
+     foreign-schema skip (L182–195 — unknown schema/v treated identically), byte-cap bound
+     (L346–361 asserts stat.size <= cap => trivially true in v2), sanitization,
+     mkdir-on-append, lossless get(). New specs: mixed-line sessions, migration idempotence
+     between simulated crash points, GC grace race, LRU bounds, budget accounting.
+
+---
+
+## 8. Pseudocode
+
+### 8.1 Write (append v2)
+
+    async append(record /* CallRecord */): Promise<void>
+      const line = buildEnvelope(record)          // split pieces, sha256 each, refs[] planned
+      return this.enqueue(record.sessionId, async () => {
+        await this.ensureDirectories()
+        // 1. materialize blobs (skip puts whose object already present — verified cache/path)
+        for (const ref of line.refsPendingBlob()) {
+          const out = compressor.deflate(pieceBytes(ref), dictFor(ref))   // deflateRaw L6
+          await this.blobStore.put(ref.h, wrapFrame(codec, out))          // tmp+rename, CAS-named
+          ref.z = out.length
+        }
+        // 2. budget trim — same shape as today, logical measure
+        const projected = envelopeBytes(line)                            // refs[].z known now
+        if (attributedBytes(id) + projected > config.maxFileBytes || rawStatOverCap(path))
+          await this.trimForBytesLogical(id, projected)                  // drop oldest ENVELOPES
+        // 3. single guarded append (unchanged mechanics)
+        try {
+          if (state.poisoned) await this.repairTail(path, sessionId)
+          await this.writeLine(path, JSON.stringify(line) + '\n')
+          state.poisoned = false            // blobs done BEFORE this => no torn-ref case possible
+        } catch (e) { state.poisoned = true; throw e }   // blob-phase failures NEVER set poisoned
+      })
+
+### 8.2 Read (list + detail)
+
+    parseEntryLine(raw):
+      obj = JSON.parse(raw)                       // caller guaranteed complete line
+      if (obj.schema === 1) return toIndexEntry(obj)
+      if (obj.v === 2)       return entryFromSum(obj)   // pure projection, ZERO blob IO
+      return undefined                                   // fail-soft skip (spec-pinned)
+
+    async get(sessionId, callId): Promise<CallRecord | undefined>
+      env = scanEnvelopesOnce(sessionId).find(e => e.id === callId)   // needle prefilter intact
+      if (!env) return undefined
+      const cached = bodyLru.get(cacheKey); if (cached) return cached
+      const pieces = await Promise.all(env.refs.map(async r =>
+        ({ k: r.k, val: await orPlaceholder(r.h, () => decompressParse(blobStore.get(r.h))) })))
+      const out = shimCallRecord(env,
+        take(pieces,'s'), take(pieces,'t'),
+        pieces.filter(p => p.k === 'm').map(p => p.val), take(pieces,'r'))
+      bodyLru.put(cacheKey, out, weightBytes(out))
+      return out
+
+### 8.3 Migration (lazy, rides enqueue)
+
+    async migrateFile(sessionId):
+      return this.enqueue(sessionId, async () => {
+        const text = await readFileOrEmpty(path); if (!text.includes('"schema":1')) return
+        const converted = []
+        for (const rec of completeLines(text)) {              // torn-tail rule intact
+          if (isV1(rec)) {
+            for (const piece of splitPieces(rec))
+              await this.blobStore.put(hashOf(piece), wrap(compress(piece))).catch(failSoft) // idempotent
+            converted.push(buildEnvelopeLine(rec))
+          } else converted.push(rec.raw)
+        }
+        await atomicRewrite(tmpToPath)                        // commit point
+        this.indexCache.delete(sessionId)
+      })
+
+### 8.4 GC (attached to sweep, after deletion phase)
+
+    async gcObjects(graceMs = 3600000):
+      reachable = new Set()
+      for each live *.jsonl:                                  // sweep already reads each (L421)
+        for m of text.matchAll(/"h":"([0-9a-f]{64})"/g)) reachable.add(m[1])
+      for each objects/<xx>/<h>.drl:
+        if (!reachable.has(h) && now - stat.mtimeMs > graceMs) rm.catch(() => {})
+      for each objects/tmp-*: rm                              // crash debris
+
+---
+
+## 9. Effort map
+
+- src/host/store.ts: parseLine dual-arm; CallStore gains BlobStore + LRUs +
+  buildEnvelope/entryFromSum; trimForBytes -> logical variant; sweep gains GC leg + migrate
+  hook; append reordered (blobs-inside-chain before writeLine).
+- src/host/blob.ts (NEW): CAS put/get, frame codecs, dictionary registry, tmp+rename helpers.
+- src/shared/types.ts: RECORD_SCHEMA_V2 = 2, envelope + sum interfaces; toIndexEntry untouched.
+- src/host/capture.ts: NO changes (speaks CallRecord; conversion at the store boundary —
+  CaptureStore.append signature intact).
+- src/host/api.ts: NO changes (endpoints identical; degradation rides record shape).

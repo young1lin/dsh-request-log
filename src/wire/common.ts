@@ -12,7 +12,14 @@
 
 import type { CallRecord, RecordedBlock, RecordedMessage, RecordedUsage } from '../shared/types'
 
-/** One rendered HTTP exchange: the method, path, and JSON body. */
+/**
+ * One rendered HTTP exchange: the method, path, and JSON body.
+ *
+ * READ-ONLY CONTRACT: `body` is a projection of the recorded call and may
+ * SHARE nested objects/arrays with the record (tool schemas, stop lists) —
+ * consumers must never mutate it. Renderers are pure functions; a fresh
+ * render is one call away.
+ */
 export interface WireExchange {
   method: 'POST'
   path: string

@@ -1454,3 +1454,54 @@ describe('repack', () => {
     expect(await readdir(join(directory, 'objects', 'packs'))).toEqual(before)
   })
 })
+
+describe('unpacking', () => {
+  it('unpacks back to loose objects when packing is turned off', async () => {
+    const directory = await tempDir()
+    const packed = new CallStore(resolveStoreConfig({ directory }))
+    await packed.append(recordOf({ id: 'a' }))
+    const past = new Date(Date.now() - 3 * 60 * 60 * 1000)
+    for (const row of await packed.objectCensusForTest()) {
+      await utimes(join(directory, 'objects', row.hash.slice(0, 2), `${row.hash}.drl`), past, past)
+    }
+    await packed.sweep()
+    expect(await packed.objectCensusForTest()).toHaveLength(0)
+
+    const off = new CallStore(resolveStoreConfig({ directory, pack: 'off' }))
+    await off.sweep()
+
+    expect(off.lastSweepStatus?.unpackedObjects).toBeGreaterThan(0)
+    expect(await off.objectCensusForTest()).not.toHaveLength(0)
+    expect((await off.get('sess-1', 'a'))?.id).toBe('a')
+  })
+
+  it('keeps a pack whose object it could not read back, so nothing is lost', async () => {
+    const directory = await tempDir()
+    const packed = new CallStore(resolveStoreConfig({ directory }))
+    await packed.append(recordOf({ id: 'a' }))
+    const past = new Date(Date.now() - 3 * 60 * 60 * 1000)
+    for (const row of await packed.objectCensusForTest()) {
+      await utimes(join(directory, 'objects', row.hash.slice(0, 2), `${row.hash}.drl`), past, past)
+    }
+    await packed.sweep()
+
+    const off = new CallStore(resolveStoreConfig({ directory, pack: 'off' }))
+    const packs = (off as unknown as { packs: PackStore }).packs
+    const target = (await packs.entriesOf((await packs.list())[0]!.id))[0]!
+    // One object's pack read fails: the pack still holds its only copy, so
+    // retiring the pack anyway would delete it forever.
+    const original = PackStore.prototype.read
+    PackStore.prototype.read = async function (this: PackStore, hash: string) {
+      return hash === target ? null : await original.call(this, hash)
+    }
+    try {
+      await off.sweep()
+    } finally {
+      PackStore.prototype.read = original
+    }
+
+    expect(off.lastSweepStatus?.unpackedObjects).toBeGreaterThan(0)
+    const packFiles = (await readdir(join(directory, 'objects', 'packs'))).filter(n => n.endsWith('.pack'))
+    expect(packFiles).toHaveLength(1)
+  })
+})

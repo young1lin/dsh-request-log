@@ -264,6 +264,28 @@ export class BlobStore {
     // A packed object is already durable; re-writing it loose would undo the
     // sweep's work and bill bytes the store did not materialize.
     if (await this.config.packs?.has(hash)) return { z: 0, created: false }
+    return this.write(hash, buf)
+  }
+
+  /**
+   * Materialize a loose copy even though the object is already packed — the
+   * unpack path, and the only caller that wants to ignore a pack hit.
+   */
+  async putLoose(hash: string, raw: string | Buffer): Promise<PutResult> {
+    const buf = typeof raw === 'string' ? Buffer.from(raw, 'utf8') : raw
+    // Same rejection as put: these bytes come straight out of a pack,
+    // unverified, and a mismatch must fail one object rather than persist
+    // wrong content under a good name.
+    if (hashOfContent(buf) !== hash) throw new Error('blob put rejected: hash/content mismatch')
+    // Already loose (a budget-interrupted pack resumed mid-way): nothing to
+    // write, and reporting created would recount it.
+    const existing = await this.infoOf(hash)
+    if (existing !== null) return { z: existing.z, created: false }
+    return this.write(hash, buf)
+  }
+
+  /** The write itself, below the dedup and pack short-circuits both doors share. */
+  private async write(hash: string, buf: Buffer): Promise<PutResult> {
     const codec = codecFor(buf.length, this.maxChunkBytes)
     let payload: Buffer
     if (codec === CODEC_IDENTITY) {

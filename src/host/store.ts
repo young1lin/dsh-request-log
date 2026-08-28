@@ -181,7 +181,7 @@ function requestPieces(record: CallRecord): Piece[] {
 }
 
 /** Coarse sweep phases, published live while a cycle is in flight. */
-export type SweepPhase = 'retention' | 'gc' | 'pack' | 'repack' | 'migration' | 'done'
+export type SweepPhase = 'retention' | 'gc' | 'pack' | 'repack' | 'unpack' | 'migration' | 'done'
 
 /**
  * The latest sweep cycle's observable outcome, published for /health. While
@@ -216,6 +216,8 @@ export interface SweepStatus {
   packedBytes: number
   /** Mostly-dead packs rewritten: survivors moved on, the old file retired. */
   repackedPacks: number
+  /** Packed objects materialized loose again by the unpack phase. */
+  unpackedObjects: number
   /**
    * Whether the mark phase read every session file to the end. False means
    * the reachable set is partial, so the reclaiming phases stood down.
@@ -1155,6 +1157,7 @@ export class CallStore {
       packedObjects: 0,
       packedBytes: 0,
       repackedPacks: 0,
+      unpackedObjects: 0,
       markComplete: true,
     }
     this.sweepStatus = status
@@ -1262,20 +1265,35 @@ export class CallStore {
         // in call order is what keeps neighbouring near-duplicates in one
         // block where they compress together.
         const order = packingOrder(orderLines)
-        if (this.packingEnabled && markComplete) {
-          status.phase = 'pack'
-          try {
-            await this.packColdObjects(reachable, order, now, status)
-          } catch (error) {
-            // Packing is an optimization: a failure leaves everything loose.
-            swallowed('pack', error)
+        if (this.packingEnabled) {
+          // Packing on a partial reachable set is a deletion in disguise —
+          // the loose copy goes away — so the GC's guard covers it too.
+          if (markComplete) {
+            status.phase = 'pack'
+            try {
+              await this.packColdObjects(reachable, order, now, status)
+            } catch (error) {
+              // Packing is an optimization: a failure leaves everything loose.
+              swallowed('pack', error)
+            }
+            status.phase = 'repack'
+            try {
+              await this.repackDeadPacks(reachable, status)
+            } catch (error) {
+              // A failed repack leaves the old pack serving every read.
+              swallowed('repack', error)
+            }
           }
-          status.phase = 'repack'
+        } else {
+          // Unpacking is deliberately NOT gated on markComplete: it copies
+          // bytes back and consults no reachability set at all, so the
+          // rollback door stays open even on a store whose mark phase fails.
+          status.phase = 'unpack'
           try {
-            await this.repackDeadPacks(reachable, status)
+            await this.unpackObjects(status)
           } catch (error) {
-            // A failed repack leaves the old pack serving every read.
-            swallowed('repack', error)
+            // A failed unpack leaves the packs serving every read.
+            swallowed('unpack', error)
           }
         }
         status.phase = 'migration'
@@ -1443,6 +1461,36 @@ export class CallStore {
       if (objects.length > 0) await this.packs.append(objects, this.config.packBlockBytes ?? DEFAULT_PACK_BLOCK_BYTES)
       await this.packs.retire(info.id)
       status.repackedPacks += 1
+    }
+    await this.packs.reapRetired()
+  }
+
+  /**
+   * The way back out. Packing changes only where bytes live, so undoing it is
+   * a copy in the other direction — but a build that cannot read packs is a
+   * build that would see every packed record as unavailable, so this exists
+   * before anyone needs it, not after.
+   */
+  private async unpackObjects(status: SweepStatus): Promise<void> {
+    const budget = this.config.packBudgetBytes ?? DEFAULT_PACK_BUDGET_BYTES
+    let spent = 0
+    for (const info of await this.packs.list()) {
+      const hashes = await this.packs.entriesOf(info.id)
+      let allLoose = true
+      for (const hash of hashes) {
+        if (spent >= budget) { allLoose = false; break }
+        const raw = await this.packs.read(hash).catch(() => null)
+        if (raw === null) {
+          // An object this build could not read back is NOT loose, and
+          // retiring the pack anyway would delete its only copy.
+          allLoose = false
+          continue
+        }
+        const result = await this.blobs.putLoose(hash, raw)
+        if (result.created) status.unpackedObjects += 1
+        spent += raw.length
+      }
+      if (allLoose) await this.packs.retire(info.id)
     }
     await this.packs.reapRetired()
   }

@@ -1362,3 +1362,39 @@ describe('sweep packing', () => {
     expect(await readdir(join(directory, 'objects', 'packs')).catch(() => [])).toEqual([])
   })
 })
+
+describe('sweep safety', () => {
+  it('skips GC and packing entirely when the reachable set is incomplete', async () => {
+    const directory = await tempDir()
+    const store = new CallStore(resolveStoreConfig({ directory }))
+    await store.append(recordOf({ id: 'kept' }))
+
+    // A session file the mark phase cannot read: a directory where a .jsonl
+    // should be. The reachable set is now missing whatever it referenced.
+    await mkdir(join(directory, 'wedged.jsonl'))
+    const before = (await store.objectCensusForTest()).length
+    const past = new Date(Date.now() - 3 * 60 * 60 * 1000)
+    for (const row of await store.objectCensusForTest()) {
+      await utimes(join(directory, 'objects', row.hash.slice(0, 2), `${row.hash}.drl`), past, past)
+    }
+
+    await store.sweep()
+
+    const status = store.lastSweepStatus
+    expect(status?.markComplete).toBe(false)
+    expect(status?.removedObjects).toBe(0)
+    expect(status?.packedObjects).toBe(0)
+    // Nothing was deleted and nothing was moved: the store is exactly as it was.
+    expect(await store.objectCensusForTest()).toHaveLength(before)
+    expect((await store.get('sess-1', 'kept'))?.id).toBe('kept')
+  })
+
+  it('still reports the failure it swallowed', async () => {
+    const directory = await tempDir()
+    const store = new CallStore(resolveStoreConfig({ directory }))
+    await store.append(recordOf({ id: 'x' }))
+    await mkdir(join(directory, 'wedged.jsonl'))
+    await store.sweep()
+    expect(store.lastSweepStatus?.error).toBeDefined()
+  })
+})

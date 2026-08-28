@@ -210,6 +210,11 @@ export interface SweepStatus {
   packedObjects: number
   /** Raw loose bytes those packed objects represented. */
   packedBytes: number
+  /**
+   * Whether the mark phase read every session file to the end. False means
+   * the reachable set is partial, so the reclaiming phases stood down.
+   */
+  markComplete: boolean
   /** Most recent swallowed stage failure, as "<stage>: <message>". */
   error?: string
 }
@@ -1143,6 +1148,7 @@ export class CallStore {
       removedTemp: 0,
       packedObjects: 0,
       packedBytes: 0,
+      markComplete: true,
     }
     this.sweepStatus = status
     const swallowed = (stage: string, error: unknown): void => {
@@ -1169,6 +1175,9 @@ export class CallStore {
         : now - this.config.retentionDays * DAY_MS
       const reachable = new Set<string>()
       const treeRoots = new Set<string>()
+      // Any failure below leaves the reachable set partial; the reclaiming
+      // phases must stand down rather than act on it.
+      let markComplete = true
       /** One {at, hashes} row per envelope line, feeding the packer's order. */
       const orderLines: { at: number; hashes: string[] }[] = []
       const migrationCandidates: { sessionId: string; path: string; mtimeMs: number; size: number }[] = []
@@ -1217,6 +1226,7 @@ export class CallStore {
         } catch (error) {
           // One unreadable file never blocks the sweep of the others.
           swallowed(`retention ${name}`, error)
+          markComplete = false
         }
       }
       if (this.v2Enabled) {
@@ -1225,21 +1235,27 @@ export class CallStore {
           await this.markTreeChains(treeRoots, reachable)
         } catch (error) {
           swallowed('tree mark', error)
+          markComplete = false
         }
-        try {
-          const gc = await this.blobs.gc(reachable, now)
-          status.removedObjects = gc.removedObjects
-          status.removedTemp = gc.removedTemp
-        } catch (error) {
-          // GC is best-effort; missed objects get reclaimed next cycle.
-          swallowed('object gc', error)
+        // A reachable set built from an incomplete read marks live objects as
+        // garbage. Missing a cycle costs a day of disk; deleting a body costs
+        // the record forever.
+        if (markComplete) {
+          try {
+            const gc = await this.blobs.gc(reachable, now)
+            status.removedObjects = gc.removedObjects
+            status.removedTemp = gc.removedTemp
+          } catch (error) {
+            // GC is best-effort; missed objects get reclaimed next cycle.
+            swallowed('object gc', error)
+          }
         }
         // Chronological pack order from the rows the mark phase collected:
         // neighbouring calls re-send nearly the same conversation, so packing
         // in call order is what keeps neighbouring near-duplicates in one
         // block where they compress together.
         const order = packingOrder(orderLines)
-        if (this.packingEnabled) {
+        if (this.packingEnabled && markComplete) {
           status.phase = 'pack'
           try {
             await this.packColdObjects(reachable, order, now, status)
@@ -1299,6 +1315,7 @@ export class CallStore {
           spent += candidate.size
         }
       }
+      status.markComplete = markComplete
       status.phase = 'done'
       return { deletedFiles: status.deletedFiles, trimmedFiles: status.trimmedFiles, migratedFiles: status.migratedFiles }
     } catch (error) {

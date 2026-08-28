@@ -157,7 +157,15 @@ export class PackStore {
     const handle = await open(join(this.config.directory, `${id}.pack`), 'r')
     try {
       const buffer = Buffer.allocUnsafe(record.blockLength)
-      await handle.read(buffer, 0, record.blockLength, record.blockOffset)
+      const { bytesRead } = await handle.read(buffer, 0, record.blockLength, record.blockOffset)
+      // A short read leaves the rest of an allocUnsafe buffer holding whatever
+      // was in that memory; decompressing it would fail somewhere far from
+      // here, naming zlib rather than the pack that is actually truncated.
+      if (bytesRead !== record.blockLength) {
+        throw new Error(
+          `pack ${id} truncated: block at ${record.blockOffset} needs ${record.blockLength} bytes, read ${bytesRead}`,
+        )
+      }
       const raw = decompressBlock(decodeBlock(buffer, 0))
       this.cacheBlock(key, raw)
       return raw

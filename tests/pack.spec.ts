@@ -1,6 +1,7 @@
 // tests/pack.spec.ts
 /** PackStore specs: reading, index rebuilding, and retirement. */
 import { mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises'
+import { randomBytes } from 'node:crypto'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -72,6 +73,22 @@ describe('PackStore reads', () => {
 
     const store = new PackStore({ directory })
     expect(await store.read(b.hash)).toEqual(b.raw)
+  })
+
+  it('names a pack that is shorter than its index claims, instead of inflating garbage', async () => {
+    const directory = await tempDir()
+    // Incompressible, so the block is comfortably longer than the cut below.
+    const raw = randomBytes(4000)
+    const a = { hash: hashOfContent(raw), raw }
+    const pack = Buffer.concat([encodePackHeader(), encodeBlock([a])])
+    const { records } = scanPack(pack)
+    // A pack cut short after the index was written: the index passes its own
+    // length check, so nothing upstream catches the short read.
+    await writeFile(join(directory, 'pack-1.pack'), pack.subarray(0, pack.length - 200))
+    await writeFile(join(directory, 'pack-1.idx'), encodeIndex(records, pack.length - 200))
+
+    const store = new PackStore({ directory })
+    await expect(store.read(a.hash)).rejects.toThrow(/truncat/i)
   })
 
   it('skips a retired pack', async () => {

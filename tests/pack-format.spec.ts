@@ -53,6 +53,16 @@ describe('block codec', () => {
     expect(() => decodeBlock(badCodec, 0)).toThrow(/codec/i)
   })
 
+  it('refuses an entry whose hash is not a sha256, rather than padding it', () => {
+    // Buffer.from(hash, 'hex') stops at the first invalid character, so a
+    // malformed hash would leave the rest of its 32-byte slot untouched -
+    // writing whatever the allocation happened to hold into a pack file.
+    expect(() => encodeBlock([{ hash: 'not-a-hash', raw: Buffer.from('x') }]))
+      .toThrow(/sha256/i)
+    expect(() => encodeBlock([{ hash: 'ab'.repeat(31), raw: Buffer.from('x') }]))
+      .toThrow(/sha256/i)
+  })
+
   it('reads a block that starts partway into a buffer', () => {
     const first = encodeBlock([objectOf('first')])
     const second = encodeBlock([objectOf('second')])

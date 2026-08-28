@@ -47,15 +47,26 @@ function compress(raw: Buffer): { codec: number; payload: Buffer } {
   return { codec: BLOCK_CODEC_ZSTD, payload: zstdCompressSync(raw, { params }) }
 }
 
+/** A hash that is not exactly this fills less than its slot — see encodeBlock. */
+const SHA256_HEX = /^[0-9a-f]{64}$/
+
 export function encodeBlock(objects: readonly { hash: string; raw: Buffer }[]): Buffer {
   if (objects.length === 0 || objects.length > MAX_BLOCK_ENTRIES) {
     throw new Error(`block entry count out of range: ${objects.length}`)
   }
-  const table = Buffer.allocUnsafe(objects.length * ENTRY_BYTES)
+  // Zeroed, not allocUnsafe: every byte of this table is written to a file,
+  // and a slot only partly filled would publish whatever the allocation held.
+  const table = Buffer.alloc(objects.length * ENTRY_BYTES)
   const raws: Buffer[] = []
   let rawOffset = 0
   for (const [i, object] of objects.entries()) {
     const at = i * ENTRY_BYTES
+    // Buffer.from(hash, 'hex') stops at the first invalid character and copies
+    // a short buffer, so a malformed hash would silently write a valid-looking
+    // entry naming the wrong object.
+    if (!SHA256_HEX.test(object.hash)) {
+      throw new Error(`block entry hash is not a sha256 hex string: ${object.hash}`)
+    }
     Buffer.from(object.hash, 'hex').copy(table, at)
     table.writeUInt32BE(rawOffset, at + 32)
     table.writeUInt32BE(object.raw.length, at + 36)

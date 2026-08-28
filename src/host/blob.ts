@@ -337,9 +337,12 @@ export class BlobStore {
     try {
       frame = await readFile(this.pathOf(hash))
     } catch (error) {
-      // An absent loose object is a miss, not corruption: ask the packs
-      // before re-throwing exactly what a pack-less store would have thrown.
-      if ((error as NodeJS.ErrnoException | null)?.code === 'ENOENT') {
+      // An absent loose object is a miss, not corruption — and so is one the
+      // OS will not let us read right now (an AV scan, a backup, a sharing
+      // violation): the packed copy serves the record instead of degrading
+      // it. Ask the packs before re-throwing what a pack-less store would.
+      const code = (error as NodeJS.ErrnoException | null)?.code
+      if (code === 'ENOENT' || code === 'EACCES' || code === 'EBUSY' || code === 'EPERM') {
         const packed = await this.config.packs?.read(hash) ?? null
         if (packed !== null) {
           if (hashOfContent(packed) !== hash) throw new Error(`object content hash mismatch for ${hash}`)

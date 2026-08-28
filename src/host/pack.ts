@@ -15,10 +15,11 @@
 import { mkdir, open, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
+import { setImmediate as setImmediateSoon } from 'node:timers/promises'
 import {
   decodeBlock,
   decompressBlock,
-  encodeBlock,
+  encodeBlockAsync,
   encodeIndex,
   encodePackHeader,
   findInIndex,
@@ -40,9 +41,26 @@ export interface PackStoreConfig {
   directory: string
   blockCacheBytes?: number
   maxPackBytes?: number
+  /**
+   * Where a fault this store works around goes to be seen. Everything here
+   * degrades one pack rather than the lookup, which is right — and silent,
+   * which is not: a corrupt index would otherwise read as "not packed here"
+   * forever, with nothing on /health to say so.
+   */
+  onError?: (stage: string, error: unknown) => void
 }
 
-export interface AppendResult { id: string; packedBytes: number; entryCount: number }
+export interface AppendResult {
+  id: string
+  packedBytes: number
+  entryCount: number
+  /**
+   * Whether the index rewrite landed. False is not a failure of the append —
+   * the pack is durable and the index rebuilds from it — but the caller may
+   * want to surface it instead of trusting "both durable" silently.
+   */
+  indexWritten: boolean
+}
 
 export interface PackInfo { id: string; bytes: number; entryCount: number }
 
@@ -86,6 +104,11 @@ export class PackStore {
       return this.ids
     }
     const retired = new Set(names.filter(n => n.endsWith('.retired')).map(n => n.slice(0, -'.retired'.length)))
+    // Seals an earlier process wrote: those packs end in bytes that will not
+    // decode, and are appendable never again however many restarts pass.
+    for (const name of names) {
+      if (name.endsWith('.sealed')) this.sealed.add(name.slice(0, -'.sealed'.length))
+    }
     this.ids = names
       .filter(n => n.endsWith('.pack'))
       .map(n => n.slice(0, -'.pack'.length))
@@ -119,7 +142,14 @@ export class PackStore {
     if (index === null) {
       const pack = await readFile(packPath).catch(() => null)
       if (pack === null) return null
-      const { records } = scanPack(pack)
+      const { records, scannedBytes } = scanPack(pack)
+      // A tail that will not decode is a torn write. Appending after it would
+      // index blocks that every future rebuild silently drops — the walk stops
+      // at the tear — while the loose copies of those blocks are already gone.
+      // Sealing keeps the pack readable forever and sends appends elsewhere.
+      // packBytes still names the full length: the file never changes again,
+      // so the staleness check stays sound and rebuilds stay deterministic.
+      if (scannedBytes < pack.length) await this.sealTorn(id)
       index = encodeIndex(records, pack.length)
       await this.writeIndex(id, index)
     }
@@ -127,13 +157,24 @@ export class PackStore {
     return index
   }
 
-  private async writeIndex(id: string, index: Buffer): Promise<void> {
+  private async writeIndex(id: string, index: Buffer): Promise<boolean> {
     const temp = join(this.config.directory, `tmp-${randomUUID()}`)
     try {
-      await writeFile(temp, index)
+      const handle = await open(temp, 'w')
+      try {
+        await handle.writeFile(index)
+        // Sync the DATA before the rename publishes it: a rename alone journals
+        // the directory entry, and a header-intact body-truncated (or zero-
+        // tailed) index would pass the packBytes check forever.
+        await handle.sync()
+      } finally {
+        await handle.close()
+      }
       await rename(temp, join(this.config.directory, `${id}.idx`))
+      return true
     } catch {
       await rm(temp, { force: true }).catch(() => {})
+      return false
     }
   }
 
@@ -159,6 +200,15 @@ export class PackStore {
     }
     const handle = await open(join(this.config.directory, `${id}.pack`), 'r')
     try {
+      // The index is trusted data, but it is still disk bytes: an extent that
+      // runs past the file is a corrupt record, and allocating it first would
+      // hand a multi-GiB allocUnsafe to a pack that cannot satisfy it.
+      const { size } = await handle.stat()
+      if (record.blockOffset + record.blockLength > size) {
+        throw new Error(
+          `pack ${id} index extent past its end: block at ${record.blockOffset} needs ${record.blockLength} of ${size} bytes`,
+        )
+      }
       const buffer = Buffer.allocUnsafe(record.blockLength)
       const { bytesRead } = await handle.read(buffer, 0, record.blockLength, record.blockOffset)
       // A short read leaves the rest of an allocUnsafe buffer holding whatever
@@ -179,7 +229,13 @@ export class PackStore {
 
   private async locate(hash: string): Promise<{ id: string; record: IndexRecord } | null> {
     for (const id of await this.listIds()) {
-      const index = await this.indexOf(id)
+      // An index that will not load (an empty pack a crash left mid-create, a
+      // walk that will not parse) must degrade ITS pack, not every lookup —
+      // but not silently either, or the pack reads as "nothing here" forever.
+      const index = await this.indexOf(id).catch((error: unknown) => {
+        this.config.onError?.(`pack ${id} index`, error)
+        return null
+      })
       if (index === null) continue
       const record = findInIndex(index, hash)
       if (record !== null) return { id, record }
@@ -268,27 +324,38 @@ export class PackStore {
 
   async append(objects: readonly { hash: string; raw: Buffer }[], blockBytes: number): Promise<AppendResult> {
     await this.ensureDirectory()
-    const { id, bytes: startAt } = await this.activePack()
+    let active = await this.activePack()
+    let prior = active.bytes === PACK_HEADER_BYTES ? [] : await this.recordsOf(active.id)
+    // recordsOf may have rebuilt an index and SEALed the pack it read (a torn
+    // tail was found). Appending after undecodable bytes would index blocks a
+    // later rebuild drops while their loose copies are being deleted, so start
+    // over: each iteration seals one more pack, and a fresh pack never is.
+    while (this.sealed.has(active.id)) {
+      active = await this.activePack()
+      prior = active.bytes === PACK_HEADER_BYTES ? [] : await this.recordsOf(active.id)
+    }
+    const { id, bytes: startAt } = active
     const path = join(this.config.directory, `${id}.pack`)
-    // Read before the write, while the index on disk still matches the pack:
-    // afterwards it is stale by construction and loading it would rescan.
-    const prior = startAt === PACK_HEADER_BYTES ? [] : await this.recordsOf(id)
 
     const blocks: Buffer[] = []
     let group: { hash: string; raw: Buffer }[] = []
     let groupBytes = 0
-    const cut = (): void => {
+    const cut = async (): Promise<void> => {
       if (group.length === 0) return
-      blocks.push(encodeBlock(group))
+      blocks.push(await encodeBlockAsync(group))
       group = []
       groupBytes = 0
+      // A full budget's worth of blocks must not become one continuous event-
+      // loop stall: compression itself is on the thread pool, and this yield
+      // keeps even the sync fallback path serving requests between blocks.
+      await setImmediateSoon()
     }
     for (const object of objects) {
       group.push(object)
       groupBytes += object.raw.length
-      if (groupBytes >= blockBytes || group.length >= MAX_BLOCK_ENTRIES) cut()
+      if (groupBytes >= blockBytes || group.length >= MAX_BLOCK_ENTRIES) await cut()
     }
-    cut()
+    await cut()
 
     // Durability order is the invariant: pack bytes first and fsynced, index
     // second. A crash between them leaves an index the reader rebuilds; the
@@ -314,17 +381,26 @@ export class PackStore {
     }
     if (records === null) {
       const pack = await readFile(path)
-      records = scanPack(pack).records
+      const scanned = scanPack(pack)
+      if (scanned.scannedBytes < pack.length) await this.sealTorn(id)
+      records = scanned.records
       packBytes = pack.length
     }
     this.indexes.delete(id)
-    await this.writeIndex(id, encodeIndex(records, packBytes))
+    const indexWritten = await this.writeIndex(id, encodeIndex(records, packBytes))
     this.indexes.delete(id)
-    return { id, packedBytes: packBytes, entryCount: records.length }
+    return { id, packedBytes: packBytes, entryCount: records.length, indexWritten }
   }
 
   /** Every record an index holds, decoded — the base a fresh append extends. */
   private async recordsOf(id: string): Promise<IndexRecord[] | null> {
+    // The one caller a cached index may lie to: a torn tail (an ENOSPC
+    // partial write, say) grew the pack after the cache was built without
+    // the process dying, and appending after that tear is exactly what a
+    // later rebuild drops. The index FILE is the truth — it is rewritten on
+    // every append — so drop the cache and let indexOf reload or rebuild
+    // (which seals the pack when the walk stops short of the file's end).
+    this.indexes.delete(id)
     const index = await this.indexOf(id)
     if (index === null) return null
     const { recordCount } = readIndexHeader(index)
@@ -338,6 +414,30 @@ export class PackStore {
     this.sealed.add(id)
   }
 
+  /**
+   * Bar a torn pack from appends in this process AND every later one. A
+   * repack's seal lasts seconds, so memory is enough for it; a tear lasts
+   * forever, and memory is exactly what a restart forgets. Nothing would
+   * rediscover it either: the index this rebuild is about to write names the
+   * pack's full length, tear included, so the staleness check passes from
+   * here on and the pack is never rescanned. The marker is fsynced BEFORE
+   * that index exists, so no crash can leave one without the other.
+   */
+  private async sealTorn(id: string): Promise<void> {
+    this.sealed.add(id)
+    try {
+      const handle = await open(join(this.config.directory, `${id}.sealed`), 'w')
+      try {
+        await handle.sync()
+      } finally {
+        await handle.close()
+      }
+      await this.syncDirectory()
+    } catch (error) {
+      this.config.onError?.(`pack ${id} seal`, error)
+    }
+  }
+
   /** Mark a pack unreadable to this and every other process, atomically. */
   async retire(id: string): Promise<void> {
     await writeFile(join(this.config.directory, `${id}.retired`), '')
@@ -346,8 +446,11 @@ export class PackStore {
 
   /**
    * Delete retired packs, and the staging debris a crash between an index's
-   * write and its rename leaves behind. Best-effort by design: on Windows a
-   * reader may still hold the handle, and the next sweep will try again.
+   * write and its rename leaves behind. Both wait out the grace floor: debris
+   * may be a live write, and a fresh retire's replacement (the loose copies an
+   * unpack just wrote back, fsync-less) may not be durable yet. Best-effort by
+   * design: on Windows a reader may still hold the handle, and the next sweep
+   * will try again.
    *
    * The loose GC only descends into the object store's 2-hex buckets, which
    * is what keeps it away from this directory — so nothing but this reaps
@@ -372,9 +475,16 @@ export class PackStore {
       }
       if (!name.endsWith('.retired')) continue
       const id = name.slice(0, -'.retired'.length)
+      // The same grace floor as staging debris: an unpack retires a pack the
+      // same cycle it writes the loose copies back — fsync-less — and deleting
+      // the pack before those bytes land would leave neither copy durable.
+      const marker = await stat(join(this.config.directory, name)).catch(() => null)
+      if (marker !== null && now - marker.mtimeMs <= graceMs) continue
       const removed = await Promise.all([
         rm(join(this.config.directory, `${id}.pack`), { force: true }).then(() => true, () => false),
         rm(join(this.config.directory, `${id}.idx`), { force: true }).then(() => true, () => false),
+        // A torn pack that gets repacked away takes its seal marker with it.
+        rm(join(this.config.directory, `${id}.sealed`), { force: true }).then(() => true, () => false),
       ])
       if (removed.every(Boolean)) {
         await rm(join(this.config.directory, name), { force: true }).catch(() => {})

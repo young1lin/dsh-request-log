@@ -624,9 +624,11 @@ MFT, a file ≥ ~900 B costs a full 4 KiB cluster plus its ~520 B record, and 4,
 in the 700 B–4 KiB band held 6.14 MB but occupied 17.94 MB. 97 % of objects fit in one
 cluster whatever their size, so compressing harder cannot fix it; only fewer files can.
 Loose, that store's 15.34 MB of deflated content occupied 30.86 MB. And object order
-decides 36 % of the compression ratio: the same objects in 1 MiB blocks pack to 6.20 MB
+decides 36 % of the compression ratio: the same objects in 4 MiB blocks pack to 6.20 MB
 in chronological order versus 9.72 MB in hash order, because consecutive calls re-send
 nearly the same conversation — so packing and repacking MUST preserve chronological order.
+(The 1 MiB blocks the sweep actually cuts land at 7.51 MB on the same store — the swing
+is what matters, not the block size it was measured at.)
 
 ### 11.1 Layout
 
@@ -636,6 +638,7 @@ nearly the same conversation — so packing and repacking MUST preserve chronolo
         pack-<epochMs>-<rand>.pack    immutable; append-only while active
         pack-<epochMs>-<rand>.idx     sorted index, rebuildable from the .pack
         pack-<epochMs>-<rand>.retired marker: readers skip it, the sweep deletes it
+        pack-<epochMs>-<rand>.sealed  marker: torn tail, readable but never appended to
 
 `objects/packs/` is invisible to the loose GC and census: both filter root entries with
 `/^[0-9a-f]{2}$/`, which `packs` fails. That isolation means nothing else reaps in here,
@@ -694,6 +697,13 @@ objects. `packBytes` detects an index that predates a crash-interrupted append: 
 `.pack` is longer than `packBytes`, the tail blocks are missing from the index and the
 index is rebuilt from the pack.
 
+The header check is total, not just magic-and-version: the file must be exactly
+`16 + recordCount·48` bytes. A crash-truncated body whose 16-byte header survived would
+otherwise pass the `packBytes` comparison and binary-search slots that are not there —
+every lookup a silent miss, forever. Failing that check (or any other) simply routes the
+load into the rebuild path. The index temp file is fsynced before its rename, so the
+body that lands is whole; a rename alone journals only the directory entry.
+
 ### 11.4 Read path
 
 `BlobStore.get`, in order: LRU hit → loose file (today's path unchanged) → `PackStore.read`
@@ -709,6 +719,27 @@ index is current. Both matter because the miss path is the APPEND path: every ob
 has not seen before asks the packs first, and the answer is normally no. Conflating the
 two made a miss cost 6.30 ms against a 0.17 ms hit on the real store's 10.5 MB pack, and
 that figure grows with the store forever.
+
+Two fail-soft rules complete the read path. One unreadable pack (an index that will
+not load or rebuild — an empty file a crash left mid-create) degrades ITS pack, not
+the lookup: `locate` skips it and tries the rest, and reports it, since a pack that
+reads as "nothing here" would otherwise go unrepacked and unretired in silence. And a rebuild whose walk stops
+short of the file's length has found a TORN TAIL — half a block a crash between the
+write and the fsync left behind. The pack is then sealed: durable, readable to the
+tear, and never appended to again, because blocks written after the tear are exactly
+what every future rebuild would drop while their loose copies are already gone.
+Appends open a fresh pack, and the torn one is eventually repacked away like any
+mostly-dead pack (which takes the marker with it).
+
+The seal is a `.sealed` marker file, not a flag in memory, and it is fsynced — name and
+all — BEFORE the rebuilt index exists. In memory it would last exactly as long as the
+process that found the tear, and nothing would ever rediscover it: the index that
+rebuild writes names the pack's FULL length, tear included, so the staleness check
+passes from then on and the pack is never rescanned. A later process would append
+straight past the tear the first time that pack was the newest one again — which a
+repack retiring the packs that overtook it makes an ordinary event, not a rare one. The append path never trusts a cached index for the pack it is
+about to grow — the index FILE is re-read first — so even an in-process partial
+write (an ENOSPC torn tail) is caught the same way.
 
 ### 11.5 Write path
 
@@ -738,8 +769,12 @@ pieces, so this reproduces call order without a second walk. Measured on the rea
 expansion. Blocks fill to 1 MiB raw or
 4096 entries; the active pack is appended to until it would exceed 64 MiB; at most 64 MiB
 of raw content moves per cycle (`packBudgetBytes`, always at least one object so a cycle
-makes progress however tight the budget). Then, in this exact order: fsync the pack →
-rewrite the index → unlink the loose copies (invariant 2). Creating a pack fsyncs the
+makes progress however tight the budget). Block compression runs on the zlib thread
+pool with a yield between blocks — a full budget is a second or more of zstd-12, and
+the sweep runs inside the web server, so the event loop must keep serving while it
+packs. Then, in this exact order: fsync the pack → rewrite the index (its temp fsynced
+before the rename; a write that fails is reported on `/health` and the index rebuilds
+from the pack) → unlink the loose copies (invariant 2). Creating a pack fsyncs the
 DIRECTORY too: syncing a file promises its content survives a crash, not its name, and
 the loose copies of everything in it are about to be deleted. The index is rebuilt from
 the prior index plus a scan of the buffer just written — an append knows where its own
@@ -759,12 +794,17 @@ replacement, only retirement). Survivors stream through an 8 MiB chunk
 (`repackChunkBytes`) rather than being held at once: a 64 MiB pack decompresses to
 several hundred MB, and this runs inside the web server. Their presence is established
 first — an index lookup each, no bytes held — so a pack whose survivors cannot all be
-accounted for is left exactly as it is; a read that fails after that check leaves
-duplicates in the new pack and the old pack still serving, which is the right half to be
-wrong about. The old pack is sealed as an append target first (otherwise the
-survivors could land in the very pack about to be retired), then marked `.retired`;
-readers skip retired packs, and deleting their files is best-effort, retried on later
-sweeps — on Windows a reader may still hold the handle.
+accounted for is left exactly as it is; so is one whose entries could not even be
+listed (an index that neither loads nor rebuilds) — zero live entries is not all dead,
+and 0/0 must not sail past the ratio into a retirement nobody accounted for. A read
+that fails after the presence check leaves duplicates in the new pack and the old pack
+still serving, which is the right half to be wrong about. The old pack is sealed as an
+append target first (otherwise the survivors could land in the very pack about to be
+retired), then marked `.retired`; readers skip retired packs, and deleting their files
+is best-effort, retried on later sweeps — past the same one-hour grace floor as
+staging debris, and on Windows a reader may still hold the handle. A repack's seal is
+in memory only, unlike a torn pack's: it has to last seconds, not restarts, and the
+pack it bars is about to be retired anyway.
 
 Reachability lags a trim by one cycle — the mark reads each file BEFORE that cycle's
 trims — so the objects of a call the cap has just trimmed stay reachable until the next
@@ -780,7 +820,13 @@ retires a pack only once every object it holds is loose again. The unpack phase 
 ungated by `markComplete` — it consults no reachability set and only ever adds copies, so
 partial knowledge cannot lose data — and a pack whose objects could not all be read (or
 whose budget ran out mid-way) stays exactly as it is, since retiring it would delete
-bytes with no loose copy (invariant 2, from the other side).
+bytes with no loose copy (invariant 2, from the other side). One object that cannot be
+written back loose degrades ITSELF — the failure lands on `/health`, the rest of the
+pack still unpacks, and the pack holding it is never retired — instead of aborting the
+phase into a wedge the deterministic pack order would re-hit every cycle. The actual
+deletion of a retired pack waits out the same grace floor as staging debris: the loose
+copies an unpack just wrote are fsync-less by the loose store's own design, and the
+pack is the only durable copy until they land.
 
 ### 11.9 Configuration
 

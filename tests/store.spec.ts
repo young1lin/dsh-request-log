@@ -1428,6 +1428,45 @@ describe('sweep safety', () => {
     await store.sweep()
     expect(store.lastSweepStatus?.error).toBeDefined()
   })
+
+  it('stands the GC down when a tree node cannot be read, not just when a file cannot', async () => {
+    const directory = await tempDir()
+    const store = new CallStore(resolveStoreConfig({ directory }))
+    await store.append(recordOf({ id: 'a' }))
+    // Message pieces are named ONLY inside their tree node, never in the
+    // envelope line — so a node the mark cannot read is one whose pieces the
+    // GC would treat as garbage, cold as they are.
+    const past = new Date(Date.now() - 3 * 60 * 60 * 1000)
+    for (const row of await store.objectCensusForTest()) {
+      await utimes(join(directory, 'objects', row.hash.slice(0, 2), row.hash + '.drl'), past, past)
+    }
+    const text = await readFile(join(directory, 'sess-1.jsonl'), 'utf8')
+    const treeHash = /"tree":"([0-9a-f]{64})"/.exec(text)?.[1]
+    expect(treeHash).toBeDefined()
+
+    const original = BlobStore.prototype.get
+    BlobStore.prototype.get = async function (this: BlobStore, hash: string) {
+      if (hash === treeHash) {
+        // An AV scan holding the file, a failing disk: anything but absence.
+        const error = new Error('resource busy') as NodeJS.ErrnoException
+        error.code = 'EBUSY'
+        throw error
+      }
+      return await original.call(this, hash)
+    }
+    try {
+      await store.sweep()
+    } finally {
+      BlobStore.prototype.get = original
+    }
+
+    const status = store.lastSweepStatus
+    expect(status?.markComplete).toBe(false)
+    expect(status?.removedObjects).toBe(0)
+    expect(status?.packedObjects).toBe(0)
+    // Incomplete knowledge spared the branch: every object is still here.
+    expect(await store.objectCensusForTest()).not.toHaveLength(0)
+  })
 })
 
 describe('repack', () => {
@@ -1563,6 +1602,45 @@ describe('unpacking', () => {
     }
 
     expect(off.lastSweepStatus?.unpackedObjects).toBeGreaterThan(0)
+    const packFiles = (await readdir(join(directory, 'objects', 'packs'))).filter(n => n.endsWith('.pack'))
+    expect(packFiles).toHaveLength(1)
+  })
+
+  it('keeps unpacking past an object it cannot write back loose', async () => {
+    const directory = await tempDir()
+    const packed = new CallStore(resolveStoreConfig({ directory }))
+    await packed.append(recordOf({ id: 'a' }))
+    const past = new Date(Date.now() - 3 * 60 * 60 * 1000)
+    for (const row of await packed.objectCensusForTest()) {
+      await utimes(join(directory, 'objects', row.hash.slice(0, 2), row.hash + '.drl'), past, past)
+    }
+    await packed.sweep()
+
+    const off = new CallStore(resolveStoreConfig({ directory, pack: 'off' }))
+    const packs = (off as unknown as { packs: PackStore }).packs
+    const [info] = await packs.list()
+    const entries = await packs.entriesOf(info.id)
+    const target = entries[0]
+    // One object's write-back fails (a hash mismatch, say): the phase used to
+    // abort on it, and the deterministic pack order re-hit it every cycle —
+    // wedging the rollback for every pack behind it.
+    const original = BlobStore.prototype.putLoose
+    BlobStore.prototype.putLoose = async function (this: BlobStore, hash: string, raw: Buffer | string) {
+      if (hash === target) throw new Error('blob put rejected: hash/content mismatch')
+      return await original.call(this, hash, raw)
+    }
+    try {
+      await off.sweep()
+    } finally {
+      BlobStore.prototype.putLoose = original
+    }
+
+    // The others unpacked anyway...
+    expect(off.lastSweepStatus?.unpackedObjects).toBeGreaterThan(0)
+    expect(await off.objectCensusForTest()).not.toHaveLength(0)
+    // ...the failure is visible on /health, not silent...
+    expect(off.lastSweepStatus?.error).toContain('unpack object')
+    // ...and the pack holding the unwritable object is never retired.
     const packFiles = (await readdir(join(directory, 'objects', 'packs'))).filter(n => n.endsWith('.pack'))
     expect(packFiles).toHaveLength(1)
   })

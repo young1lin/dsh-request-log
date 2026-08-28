@@ -88,7 +88,7 @@ describe('PackStore reads', () => {
     await writeFile(join(directory, 'pack-1.idx'), encodeIndex(records, pack.length - 200))
 
     const store = new PackStore({ directory })
-    await expect(store.read(a.hash)).rejects.toThrow(/truncat/i)
+    await expect(store.read(a.hash)).rejects.toThrow(/extent past its end|truncat/i)
   })
 
   it('skips a retired pack', async () => {
@@ -212,15 +212,103 @@ describe('PackStore writes', () => {
     expect(await store.read(hashOfContent('second'))).toEqual(Buffer.from('second'))
   })
 
-  it('retires a pack so readers skip it, and reaps it afterwards', async () => {
+  it('retires a pack so readers skip it, and reaps it only past the grace floor', async () => {
     const directory = await tempDir()
     const store = new PackStore({ directory })
     const { id } = await store.append([objectOf('doomed')], 1024 * 1024)
 
     await store.retire(id)
     expect(await store.read(hashOfContent('doomed'))).toBeNull()
+    // A fresh retire survives the reap: an unpack retires a pack the same
+    // cycle it writes the loose copies back — fsync-less — and deleting the
+    // pack before those bytes land would leave neither copy durable.
+    expect(await store.reapRetired()).toBe(0)
+    expect((await readdir(directory)).filter(n => n.endsWith('.pack'))).toHaveLength(1)
+    // A torn pack carries a seal marker; repacking it away must not leave the
+    // marker behind for the life of the store.
+    await writeFile(join(directory, id + '.sealed'), '')
+    const past = new Date(Date.now() - 3 * 60 * 60 * 1000)
+    await utimes(join(directory, id + '.retired'), past, past)
     expect(await store.reapRetired()).toBe(1)
-    expect((await readdir(directory)).filter(n => n.endsWith('.pack'))).toHaveLength(0)
+    expect((await readdir(directory)).filter(n => n.startsWith(id))).toEqual([])
+  })
+
+  it('seals a pack with a torn tail, so later appends land elsewhere and survive rebuilds', async () => {
+    const directory = await tempDir()
+    const store = new PackStore({ directory })
+    const before = objectOf('packed before the crash')
+    const { id } = await store.append([before], 1024 * 1024)
+    // A crash between the append's write and its fsync left half a block —
+    // bytes no index will ever name — at the tail of the pack.
+    const handle = await open(join(directory, id + '.pack'), 'a')
+    await handle.writeFile(Buffer.alloc(37, 0xab))
+    await handle.close()
+    await rm(join(directory, id + '.idx'))
+
+    // Rebuilt indexes stop at the tear; the store must notice (scannedBytes)
+    // and never append after the garbage: blocks there would be dropped by
+    // every future rebuild while their loose copies are already deleted.
+    const after = objectOf('packed after the recovery')
+    const result = await store.append([after], 1024 * 1024)
+    expect(result.id).not.toBe(id)
+    const tornBytes = (await stat(join(directory, id + '.pack'))).size
+    await store.append([objectOf('yet more')], 1024 * 1024)
+    expect((await stat(join(directory, id + '.pack'))).size).toBe(tornBytes)
+
+    // Cold caches, every index rebuilt from the packs alone: everything
+    // readable, on both sides of the tear.
+    const cold = new PackStore({ directory })
+    expect(await cold.read(before.hash)).toEqual(before.raw)
+    expect(await cold.read(after.hash)).toEqual(after.raw)
+  })
+
+  it('remembers a sealed pack across a restart, not just in memory', async () => {
+    const directory = await tempDir()
+    const store = new PackStore({ directory })
+    const before = objectOf('packed before the crash')
+    const { id } = await store.append([before], 1024 * 1024)
+    const handle = await open(join(directory, id + '.pack'), 'a')
+    await handle.writeFile(Buffer.alloc(37, 0xab))
+    await handle.close()
+    await rm(join(directory, id + '.idx'))
+    // Recovery seals the torn pack and opens a fresh one — but the index it
+    // rebuilds names the pack's FULL length, tear included, so the staleness
+    // check passes from here on and nothing ever rescans it. An in-memory seal
+    // is forgotten at the next start; only a marker on disk carries it over.
+    const opened = await store.append([objectOf('packed after the recovery')], 1024 * 1024)
+    // Time passes: the pack that took over goes mostly dead and is repacked
+    // away, which makes the torn one the newest again.
+    await rm(join(directory, opened.id + '.pack'))
+    await rm(join(directory, opened.id + '.idx'), { force: true })
+
+    const restarted = new PackStore({ directory })
+    const tornBytes = (await stat(join(directory, id + '.pack'))).size
+    const late = objectOf('written by the next process')
+    const result = await restarted.append([late], 1024 * 1024)
+    expect(result.id).not.toBe(id)
+    expect((await stat(join(directory, id + '.pack'))).size).toBe(tornBytes)
+
+    // What the seal is FOR: bytes appended past a tear are dropped by every
+    // future rebuild, while their loose copies have already been unlinked.
+    await rm(join(directory, result.id + '.idx'))
+    const cold = new PackStore({ directory })
+    expect(await cold.read(late.hash)).toEqual(late.raw)
+    expect(await cold.read(before.hash)).toEqual(before.raw)
+  })
+
+  it('rebuilds an index whose body was truncated, instead of trusting its header', async () => {
+    const directory = await tempDir()
+    const a = objectOf('indexed object')
+    await writePack(directory, 'pack-1', [[a]])
+    // A crash left the 16-byte header (packBytes included) but cut the body:
+    // packBytes still matches the pack, so only a length check catches it.
+    const full = await readFile(join(directory, 'pack-1.idx'))
+    await writeFile(join(directory, 'pack-1.idx'), full.subarray(0, 16 + 24))
+
+    const store = new PackStore({ directory })
+    expect(await store.read(a.hash)).toEqual(a.raw)
+    // And the rewritten index is whole again, so the next cold load trusts it.
+    expect((await readFile(join(directory, 'pack-1.idx'))).length).toBe(full.length)
   })
 
   it('reaps the staging debris a crash leaves in the pack directory', async () => {

@@ -253,8 +253,8 @@ export function assignSteps(entries: CallIndexEntry[]): CallIndexEntry[] {
  * The order objects are packed in, and the reason packing is worth doing:
  * consecutive calls re-send nearly the same conversation, so neighbouring
  * objects are near-duplicates and compress together. Measured on a real
- * store, chronological order packs to 6.20 MB where hash order needs 9.72 MB
- * — a 36 % swing that repacking must not throw away.
+ * store in 4 MiB blocks, chronological order packs to 6.20 MB where hash
+ * order needs 9.72 MB — a 36 % swing that repacking must not throw away.
  */
 export function packingOrder(lines: readonly { at: number; hashes: readonly string[] }[]): string[] {
   const ordered = lines.map((line, i) => ({ line, i })).sort((a, b) => a.line.at - b.line.at || a.i - b.i)
@@ -409,7 +409,13 @@ export class CallStore {
     // Built unconditionally: `pack: 'off'` must stop writing packs, never
     // reading them, or turning the switch off would hide every already-packed
     // record behind a store that no longer knows how to serve it.
-    this.packs = new PackStore({ directory: join(objectsDir, 'packs') })
+    this.packs = new PackStore({
+      directory: join(objectsDir, 'packs'),
+      // A pack the store had to work around is a line on /health, not a shrug:
+      // outside a sweep there is nowhere to put it, and inside one it is
+      // exactly what explains a pack that went unrepacked or unretired.
+      onError: (stage, error) => this.sweepErrorSink?.(stage, error),
+    })
     this.packingEnabled = config.pack !== 'off'
     this.blobs = blobStore ?? new BlobStore({ directory: objectsDir, packs: this.packs })
   }
@@ -1404,11 +1410,23 @@ export class CallStore {
       if (visited.has(hash)) continue
       visited.add(hash)
       reachable.add(hash)
+      let raw: Buffer
+      try {
+        raw = await this.blobs.get(hash)
+      } catch (error) {
+        // Confirmed absent everywhere is a dead branch: stop marking down it.
+        // Anything else — a locked or unreadable file, a failing disk — is
+        // INCOMPLETE KNOWLEDGE, and this branch's pieces are named NOWHERE but
+        // inside its nodes: rethrow so the sweep stands the reclaiming phases
+        // down (markComplete: false) instead of GC'ing live data.
+        if ((error as NodeJS.ErrnoException | null)?.code === 'ENOENT') continue
+        throw error
+      }
       let node
       try {
-        node = decodeTree((await this.blobs.get(hash)).toString('utf8'))
+        node = decodeTree(raw.toString('utf8'))
       } catch {
-        continue // Unreadable or not a tree: nothing more to mark down here.
+        continue // Confirmed not a tree: nothing more to mark down here.
       }
       const entries = node.e.map(item => item.h)
       for (const item of entries) reachable.add(item)
@@ -1453,7 +1471,13 @@ export class CallStore {
     }
     if (objects.length === 0) return
 
-    await this.packs.append(objects, this.config.packBlockBytes ?? DEFAULT_PACK_BLOCK_BYTES)
+    const appended = await this.packs.append(objects, this.config.packBlockBytes ?? DEFAULT_PACK_BLOCK_BYTES)
+    // The pack is durable and the index rebuilds from it, but "both durable"
+    // is what the deletion below rests on — a silent index-write failure earns
+    // a line on /health, not a shrug.
+    if (!appended.indexWritten) {
+      this.sweepErrorSink?.('pack index', new Error(`index for pack ${appended.id} did not persist; it will be rebuilt from the pack`))
+    }
     // Only now: the blocks and an index naming them are both durable.
     for (const object of objects) {
       if (await this.blobs.dropLoose(object.hash)) status.packedObjects += 1
@@ -1473,7 +1497,12 @@ export class CallStore {
     const minBytes = this.config.repackMinBytes ?? DEFAULT_REPACK_MIN_BYTES
     for (const info of await this.packs.list()) {
       if (info.bytes < minBytes || info.entryCount === 0) continue
-      const hashes = await this.packs.entriesOf(info.id)
+      const hashes = await this.packs.entriesOf(info.id).catch(() => [] as string[])
+      // entriesOf fails soft to [] — its index would not load. That is not
+      // the empty pack the entryCount check above already skipped, and
+      // repacking "nothing" would compute 0/0 = NaN, sail past the ratio, and
+      // retire a pack full of objects nobody accounted for.
+      if (hashes.length === 0) continue
       const live = hashes.filter(hash => reachable.has(hash))
       if (live.length / hashes.length >= ratio) continue
 
@@ -1498,7 +1527,10 @@ export class CallStore {
       let unreadable = false
       const flush = async (): Promise<void> => {
         if (chunk.length === 0) return
-        await this.packs.append(chunk, blockBytes)
+        const appended = await this.packs.append(chunk, blockBytes)
+        if (!appended.indexWritten) {
+          this.sweepErrorSink?.('pack index', new Error(`index for pack ${appended.id} did not persist; it will be rebuilt from the pack`))
+        }
         chunk = []
         held = 0
       }
@@ -1530,7 +1562,12 @@ export class CallStore {
     const budget = this.config.packBudgetBytes ?? DEFAULT_PACK_BUDGET_BYTES
     let spent = 0
     for (const info of await this.packs.list()) {
-      const hashes = await this.packs.entriesOf(info.id)
+      const hashes = await this.packs.entriesOf(info.id).catch(() => [] as string[])
+      // A pack whose entries would not load is not an empty pack — which is
+      // why the count comes from the index HEADER, not from this list:
+      // retiring it would delete bytes nobody has even read. A genuinely
+      // empty one (entryCount 0) falls through and retires as cleanup.
+      if (hashes.length === 0 && info.entryCount > 0) continue
       let allLoose = true
       for (const hash of hashes) {
         if (spent >= budget) { allLoose = false; break }
@@ -1541,8 +1578,17 @@ export class CallStore {
           allLoose = false
           continue
         }
-        const result = await this.blobs.putLoose(hash, raw)
-        if (result.created) status.unpackedObjects += 1
+        try {
+          const result = await this.blobs.putLoose(hash, raw)
+          if (result.created) status.unpackedObjects += 1
+        } catch (error) {
+          // One object that cannot be re-loosed (a hash mismatch, say) must
+          // not wedge the whole rollback: the pack keeps serving it, and a
+          // pack holding anything unwritable is never retired.
+          this.sweepErrorSink?.('unpack object', error)
+          allLoose = false
+          continue
+        }
         spent += raw.length
       }
       if (allLoose) await this.packs.retire(info.id)

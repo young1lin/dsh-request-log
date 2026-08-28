@@ -46,6 +46,12 @@ export interface Config {
    * `v1` freezes the legacy behavior byte-for-byte (kill switch).
    */
   format?: 'v1' | 'auto'
+  /**
+   * Whether the sweep packs cold objects into solid blocks. `off` stops
+   * writing new packs; existing packs stay readable and are gradually
+   * unpacked again, so records already packed are never hidden.
+   */
+  pack?: 'auto' | 'off'
 }
 
 export const DEFAULTS: Required<Pick<Config, 'retentionDays' | 'maxCallsPerSession' | 'maxFileBytes'>> = {
@@ -68,6 +74,7 @@ export const Config = z.preprocess(
     maxFileBytes: z.number().int().min(1024 * 1024).default(DEFAULTS.maxFileBytes),
     trustedHosts: z.array(z.string().regex(TRUSTED_AUTHORITY)).default([]),
     format: z.enum(['v1', 'auto']).default('auto'),
+    pack: z.enum(['auto', 'off']).default('auto'),
   }).strict(),
 )
 
@@ -79,6 +86,7 @@ export function resolveStoreConfig(config: Config | undefined): StoreConfig {
     maxCallsPerSession: parsed.maxCallsPerSession,
     maxFileBytes: parsed.maxFileBytes,
     format: parsed.format,
+    pack: parsed.pack,
   }
 }
 

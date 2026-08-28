@@ -10,6 +10,7 @@ import { deflateRawSync, inflateRawSync } from 'node:zlib'
 import { afterEach, describe, expect, it } from 'vitest'
 import { assignSteps, CallStore, fileNameOf, packingOrder } from '../src/host/store.ts'
 import { BlobStore, CODEC_DEFLATE_RAW, decodeFrame, encodeFrame, hashOfContent } from '../src/host/blob.ts'
+import { PackStore } from '../src/host/pack.ts'
 import { TREE_SCHEMA, encodeTree, resolveTree } from '../src/host/tree.ts'
 import { resolveStoreConfig } from '../src/host/index.ts'
 import { RECORD_SCHEMA, RECORD_SCHEMA_V3, toIndexEntry } from '../src/shared/types'
@@ -753,9 +754,12 @@ describe('CallStore v2 persistence', () => {
     const store = new CallStore({ directory, retentionDays: 14, maxCallsPerSession: 100, maxFileBytes: 8 * 1024 * 1024 })
     await store.sweep()
 
+    // Every live piece survived the sweep — loose OR packed, never deleted.
+    // The sweep may have packed these cold objects, so the judge is a
+    // pack-aware reader over the same directory, not a loose-only stat.
+    const reader = new BlobStore({ directory: objects, packs: new PackStore({ directory: join(objects, 'packs') }) })
     for (const hash of [older, newer, rootHash, leafHash]) {
-      expect(await stat(join(objects, hash.slice(0, 2), hash + '.drl')).then(() => true, () => false))
-        .toBe(true)
+      expect(await reader.has(hash)).toBe(true)
     }
   })
 
@@ -1288,5 +1292,73 @@ describe('packingOrder', () => {
       { at: 5, hashes: ['p'] },
       { at: 5, hashes: ['q'] },
     ])).toEqual(['p', 'q'])
+  })
+})
+
+describe('sweep packing', () => {
+  const oldEnough = (directory: string, hashes: string[]) => Promise.all(hashes.map(hash => {
+    const past = new Date(Date.now() - 3 * 60 * 60 * 1000)
+    return utimes(join(directory, 'objects', hash.slice(0, 2), `${hash}.drl`), past, past)
+  }))
+
+  it('moves cold reachable objects into a pack and drops the loose copies', async () => {
+    const directory = await tempDir()
+    const store = new CallStore(resolveStoreConfig({ directory }))
+    await store.append(recordOf({ id: 'a' }))
+    await store.append(recordOf({ id: 'b', request: { messages: [{ role: 'user', content: [{ type: 'text', text: 'second' }] }] } }))
+
+    const objectsDir = join(directory, 'objects')
+    const loose = (await store.objectCensusForTest()).map(row => row.hash)
+    await oldEnough(directory, loose)
+
+    await store.sweep()
+
+    const packs = (await readdir(join(objectsDir, 'packs'))).filter(n => n.endsWith('.pack'))
+    expect(packs).toHaveLength(1)
+    // Loose copies are gone...
+    const remaining = await store.objectCensusForTest()
+    expect(remaining).toHaveLength(0)
+    // ...and every record still reads back byte for byte.
+    expect((await store.get('sess-1', 'a'))?.request.messages).toEqual(recordOf({ id: 'a' }).request.messages)
+    expect((await store.get('sess-1', 'b'))?.id).toBe('b')
+  })
+
+  it('leaves a fresh object loose, so a pending append cannot lose its body', async () => {
+    const directory = await tempDir()
+    const store = new CallStore(resolveStoreConfig({ directory }))
+    await store.append(recordOf({ id: 'fresh' }))
+
+    await store.sweep()
+
+    // Nothing packed: every object is younger than the grace floor.
+    expect(await store.objectCensusForTest()).not.toHaveLength(0)
+    const packDir = join(directory, 'objects', 'packs')
+    const packs = await readdir(packDir).catch(() => [])
+    expect(packs.filter(n => n.endsWith('.pack'))).toHaveLength(0)
+  })
+
+  it('bounds one cycle by the packing budget', async () => {
+    const directory = await tempDir()
+    const store = new CallStore({ ...resolveStoreConfig({ directory }), packBudgetBytes: 1 })
+    for (let i = 0; i < 4; i += 1) {
+      await store.append(recordOf({ id: `r${i}`, request: { messages: [{ role: 'user', content: [{ type: 'text', text: `body ${i} ${'z'.repeat(500)}` }] }] } }))
+    }
+    await oldEnough(directory, (await store.objectCensusForTest()).map(row => row.hash))
+
+    await store.sweep()
+    const status = store.lastSweepStatus
+    expect(status?.packedObjects).toBeGreaterThan(0)
+    // A 1-byte budget still makes progress, but does not drain the store.
+    expect(await store.objectCensusForTest()).not.toHaveLength(0)
+  })
+
+  it('packs nothing when pack is off', async () => {
+    const directory = await tempDir()
+    const store = new CallStore(resolveStoreConfig({ directory, pack: 'off' }))
+    await store.append(recordOf({ id: 'a' }))
+    await oldEnough(directory, (await store.objectCensusForTest()).map(row => row.hash))
+
+    await store.sweep()
+    expect(await readdir(join(directory, 'objects', 'packs')).catch(() => [])).toEqual([])
   })
 })

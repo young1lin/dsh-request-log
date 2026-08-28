@@ -38,10 +38,12 @@
  * runs the mark-sweep GC over the object store (reachable hashes extracted
  * from the live files it reads anyway, then expanded transitively through
  * tree chains; unreachable objects and staging debris past a grace floor
- * reclaimed) and migrates v1/v2 files newest-first up to a per-cycle byte
- * budget, deprioritizing files that failed to convert so one stubborn file
- * cannot hold the budget. All IO is fail-soft — a store error never breaks a
- * model call.
+ * reclaimed), packs the cold reachable objects into solid blocks in
+ * chronological order (neighbouring calls are near-duplicates and compress
+ * together) up to its own per-cycle budget, and migrates v1/v2 files
+ * newest-first up to a per-cycle byte budget, deprioritizing files that
+ * failed to convert so one stubborn file cannot hold the budget. All IO is
+ * fail-soft — a store error never breaks a model call.
  *
  * @module dsh-request-log/host/store
  */
@@ -50,7 +52,8 @@ import { appendFile, mkdir, open, readdir, readFile, rename, rm, stat, truncate,
 import { join } from 'node:path'
 import type { CallEnvelope, CallEnvelopeV3, CallIndexEntry, CallIndexResponse, CallRecord, RecordedMessage, RecordedRequest, RecordedResponse } from '../shared/types'
 import { RECORD_SCHEMA, RECORD_SCHEMA_V2, RECORD_SCHEMA_V3, entryFromEnvelope, envelopeSumOf, toIndexEntry } from '../shared/types'
-import { BlobStore, hashOfContent } from './blob'
+import { BlobStore, DEFAULT_GC_GRACE_MS, hashOfContent } from './blob'
+import { PackStore } from './pack'
 import { type TreeEntry, type TreeState, chooseTreeNode, decodeTree, encodeTree, isEntryHash, resolveTree } from './tree'
 
 export interface StoreConfig {
@@ -76,12 +79,32 @@ export interface StoreConfig {
    * sessions written after the upgrade.
    */
   migrationBudgetBytes?: number
+  /**
+   * Whether the sweep packs cold reachable objects into solid blocks. `off`
+   * stops writing NEW packs — existing packs stay readable (and are gradually
+   * unpacked again), so flipping the switch off never hides an already-packed
+   * record. Default 'auto'.
+   */
+  pack?: 'auto' | 'off'
+  /** Raw bytes per solid block the packer cuts. */
+  packBlockBytes?: number
+  /** Raw bytes one sweep cycle may move into packs. */
+  packBudgetBytes?: number
 }
 
 const DAY_MS = 24 * 60 * 60 * 1000
 
 /** Default per-cycle migration budget: a ~700 MB backlog converts in under a fortnight. */
 export const DEFAULT_MIGRATION_BUDGET_BYTES = 64 * 1024 * 1024
+
+/** Raw bytes per solid block: 1 MiB measured best on tail latency (p90 12.2 ms). */
+export const DEFAULT_PACK_BLOCK_BYTES = 1024 * 1024
+/** Raw bytes one sweep may move into packs, mirroring the migration budget. */
+export const DEFAULT_PACK_BUDGET_BYTES = 64 * 1024 * 1024
+/** Below this share of still-reachable entries, a pack is worth rewriting. */
+export const DEFAULT_REPACK_LIVE_RATIO = 0.5
+/** Rewriting anything smaller costs more IO than the space it reclaims. */
+export const DEFAULT_REPACK_MIN_BYTES = 8 * 1024 * 1024
 
 /** Win32 reserved device names: the OS ignores the extension, so "NUL.jsonl" would target the device. */
 const RESERVED_DEVICE_NAME = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\.|$)/i
@@ -154,7 +177,7 @@ function requestPieces(record: CallRecord): Piece[] {
 }
 
 /** Coarse sweep phases, published live while a cycle is in flight. */
-export type SweepPhase = 'retention' | 'gc' | 'migration' | 'done'
+export type SweepPhase = 'retention' | 'gc' | 'pack' | 'migration' | 'done'
 
 /**
  * The latest sweep cycle's observable outcome, published for /health. While
@@ -183,6 +206,10 @@ export interface SweepStatus {
   migratedFiles: number
   removedObjects: number
   removedTemp: number
+  /** Loose objects moved into packs by the pack phase. */
+  packedObjects: number
+  /** Raw loose bytes those packed objects represented. */
+  packedBytes: number
   /** Most recent swallowed stage failure, as "<stage>: <message>". */
   error?: string
 }
@@ -232,6 +259,22 @@ function completeLines(text: string): string[] {
   const lines = text.slice(0, end).split('\n')
   while (lines.length > 0 && lines[lines.length - 1].length === 0) lines.pop()
   return lines
+}
+
+/**
+ * A line's call start time, the chronological key the packer orders on. A
+ * line that will not say (foreign, damaged) yields 0: sorting it first only
+ * risks packing a still-live object early, which the grace floor already
+ * covers — the order is a compression hint, never a correctness input.
+ */
+function envelopeStartedAt(line: string): number {
+  try {
+    const timing = (JSON.parse(line) as { timing?: { startedAt?: unknown } }).timing
+    const at = timing?.startedAt
+    return typeof at === 'number' && Number.isFinite(at) ? at : 0
+  } catch {
+    return 0
+  }
 }
 
 /** Parse one JSONL line into a legacy v1 record of the schema this build understands. */
@@ -333,6 +376,10 @@ export class CallStore {
   /** The tree each session last wrote, so the next append can delta onto it. */
   private readonly treeStates = new Map<string, TreeState>()
   private readonly blobs: BlobStore
+  /** Solid-block packs beside the loose store; read even when packing is off. */
+  private readonly packs: PackStore
+  /** False only for `pack: 'off'`: the sweep stops WRITING packs, never reading. */
+  private readonly packingEnabled: boolean
   private mkdirPromise: Promise<void> | undefined
   private sweepStatus: SweepStatus | undefined
   /** Consecutive failed migration attempts per session; drives the retry order. */
@@ -341,7 +388,13 @@ export class CallStore {
   private sweepErrorSink: ((stage: string, error: unknown) => void) | undefined
 
   constructor(private readonly config: StoreConfig, blobStore?: BlobStore) {
-    this.blobs = blobStore ?? new BlobStore({ directory: join(config.directory, 'objects') })
+    const objectsDir = join(config.directory, 'objects')
+    // Built unconditionally: `pack: 'off'` must stop writing packs, never
+    // reading them, or turning the switch off would hide every already-packed
+    // record behind a store that no longer knows how to serve it.
+    this.packs = new PackStore({ directory: join(objectsDir, 'packs') })
+    this.packingEnabled = config.pack !== 'off'
+    this.blobs = blobStore ?? new BlobStore({ directory: objectsDir, packs: this.packs })
   }
 
   /**
@@ -360,6 +413,11 @@ export class CallStore {
   /** The latest sweep cycle's status — live while running, served by /health. */
   get lastSweepStatus(): SweepStatus | undefined {
     return this.sweepStatus
+  }
+
+  /** Loose object census — exposed so specs can age objects deterministically. */
+  objectCensusForTest(): Promise<{ hash: string; size: number; mtimeMs: number }[]> {
+    return this.blobs.looseCensus()
   }
 
   private pathOf(sessionId: string): string {
@@ -1083,6 +1141,8 @@ export class CallStore {
       migratedFiles: 0,
       removedObjects: 0,
       removedTemp: 0,
+      packedObjects: 0,
+      packedBytes: 0,
     }
     this.sweepStatus = status
     const swallowed = (stage: string, error: unknown): void => {
@@ -1109,6 +1169,8 @@ export class CallStore {
         : now - this.config.retentionDays * DAY_MS
       const reachable = new Set<string>()
       const treeRoots = new Set<string>()
+      /** One {at, hashes} row per envelope line, feeding the packer's order. */
+      const orderLines: { at: number; hashes: string[] }[] = []
       const migrationCandidates: { sessionId: string; path: string; mtimeMs: number; size: number }[] = []
       for (const name of names) {
         if (!name.endsWith('.jsonl')) continue
@@ -1127,13 +1189,20 @@ export class CallStore {
           // Line counting needs no parsing: the cap is about file growth, and
           // invalid lines are filtered by the read path regardless.
           const text = await readFile(path, 'utf8')
+          const lines = text.split('\n')
+          while (lines.length > 0 && lines[lines.length - 1].length === 0) lines.pop()
           // The GC mark phase rides reads this sweep performs anyway.
           if (this.v2Enabled) {
             for (const match of text.matchAll(REACHABLE_HASH)) reachable.add(match[0])
             for (const match of text.matchAll(REACHABLE_TREE)) treeRoots.add(match[1])
+            // The packer's chronological order rides it too: one row per
+            // envelope line, the same hashes the mark just swept out of it.
+            for (const line of lines) {
+              if (line.length === 0) continue
+              const hashes = [...line.matchAll(REACHABLE_HASH)].map(match => match[0])
+              if (hashes.length > 0) orderLines.push({ at: envelopeStartedAt(line), hashes })
+            }
           }
-          const lines = text.split('\n')
-          while (lines.length > 0 && lines[lines.length - 1].length === 0) lines.pop()
           const overLines = lines.length > this.config.maxCallsPerSession
           const overBytes = info.size > this.config.maxFileBytes
           if (!overLines && !overBytes) continue
@@ -1164,6 +1233,20 @@ export class CallStore {
         } catch (error) {
           // GC is best-effort; missed objects get reclaimed next cycle.
           swallowed('object gc', error)
+        }
+        // Chronological pack order from the rows the mark phase collected:
+        // neighbouring calls re-send nearly the same conversation, so packing
+        // in call order is what keeps neighbouring near-duplicates in one
+        // block where they compress together.
+        const order = packingOrder(orderLines)
+        if (this.packingEnabled) {
+          status.phase = 'pack'
+          try {
+            await this.packColdObjects(reachable, order, now, status)
+          } catch (error) {
+            // Packing is an optimization: a failure leaves everything loose.
+            swallowed('pack', error)
+          }
         }
         status.phase = 'migration'
         // Newest first: a fresh session has the most retention life ahead of it,
@@ -1255,6 +1338,49 @@ export class CallStore {
       for (const item of node.e) reachable.add(item.h)
       if (node.p !== undefined) pending.push(node.p)
     }
+  }
+
+  /**
+   * Move cold reachable loose objects into a pack, in chronological packing
+   * order, then drop the loose copies. Durability before deletion is the
+   * invariant: the loose files are unlinked only after {@link PackStore.append}
+   * resolved (blocks fsynced AND an index naming them rewritten), so a crash
+   * anywhere in here leaves at worst a duplicate, never a hole.
+   */
+  private async packColdObjects(
+    reachable: ReadonlySet<string>,
+    order: readonly string[],
+    now: number,
+    status: SweepStatus,
+  ): Promise<void> {
+    const rank = new Map(order.map((hash, i) => [hash, i]))
+    const grace = DEFAULT_GC_GRACE_MS
+    const candidates = (await this.blobs.looseCensus())
+      .filter(row => reachable.has(row.hash) && now - row.mtimeMs > grace)
+      .sort((a, b) => (rank.get(a.hash) ?? Number.MAX_SAFE_INTEGER) - (rank.get(b.hash) ?? Number.MAX_SAFE_INTEGER)
+        || (a.hash < b.hash ? -1 : 1))
+    if (candidates.length === 0) return
+
+    const budget = this.config.packBudgetBytes ?? DEFAULT_PACK_BUDGET_BYTES
+    const objects: { hash: string; raw: Buffer }[] = []
+    let spent = 0
+    for (const candidate of candidates) {
+      // At least one object always packs, however tight the budget: the cycle
+      // must make progress, and the budget bounds it — never starves it.
+      if (spent > 0 && spent >= budget) break
+      const raw = await this.blobs.get(candidate.hash).catch(() => null)
+      if (raw === null) continue
+      objects.push({ hash: candidate.hash, raw })
+      spent += raw.length
+    }
+    if (objects.length === 0) return
+
+    await this.packs.append(objects, this.config.packBlockBytes ?? DEFAULT_PACK_BLOCK_BYTES)
+    // Only now: the blocks and an index naming them are both durable.
+    for (const object of objects) {
+      if (await this.blobs.dropLoose(object.hash)) status.packedObjects += 1
+    }
+    status.packedBytes += spent
   }
 
   /**

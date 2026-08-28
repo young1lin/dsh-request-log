@@ -61,6 +61,17 @@ export class PackStore {
     this.indexes.clear()
   }
 
+  /**
+   * Forget only which packs exist, keeping every index already loaded. Packs
+   * are immutable, so a cached index stays correct for as long as its pack
+   * lives; a lookup that missed needs a fresh LISTING, never fresh indexes.
+   * Conflating the two is what would make a miss - every new object the append
+   * path writes - reload every index in the store.
+   */
+  private forgetListing(): void {
+    this.ids = undefined
+  }
+
   /** Pack ids present and not retired, oldest first (names sort by time). */
   private async listIds(): Promise<string[]> {
     if (this.ids !== undefined) return this.ids
@@ -90,20 +101,21 @@ export class PackStore {
     const cached = this.indexes.get(id)
     if (cached !== undefined) return cached
     const packPath = join(this.config.directory, `${id}.pack`)
-    let pack: Buffer
-    try {
-      pack = await readFile(packPath)
-    } catch {
-      return null
-    }
+    // Only the pack's LENGTH decides whether an index is current, and reading
+    // the pack to learn it would charge its whole size to every lookup that
+    // had to load an index.
+    const info = await stat(packPath).catch(() => null)
+    if (info === null) return null
     let index: Buffer | null = null
     try {
       const raw = await readFile(join(this.config.directory, `${id}.idx`))
-      if (readIndexHeader(raw).packBytes === pack.length) index = raw
+      if (readIndexHeader(raw).packBytes === info.size) index = raw
     } catch {
       index = null
     }
     if (index === null) {
+      const pack = await readFile(packPath).catch(() => null)
+      if (pack === null) return null
       const { records } = scanPack(pack)
       index = encodeIndex(records, pack.length)
       await this.writeIndex(id, index)
@@ -168,7 +180,7 @@ export class PackStore {
     let found = await this.locate(hash)
     if (found === null) {
       // A repack may have landed a new pack since the listing was cached.
-      this.invalidate()
+      this.forgetListing()
       found = await this.locate(hash)
       if (found === null) return null
     }
@@ -178,7 +190,7 @@ export class PackStore {
 
   async has(hash: string): Promise<boolean> {
     if ((await this.locate(hash)) !== null) return true
-    this.invalidate()
+    this.forgetListing()
     return (await this.locate(hash)) !== null
   }
 

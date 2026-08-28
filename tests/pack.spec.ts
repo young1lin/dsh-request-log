@@ -85,6 +85,22 @@ describe('PackStore reads', () => {
     expect(await store.list()).toEqual([])
   })
 
+  it('keeps a loaded index through a miss, instead of loading it all over again', async () => {
+    const directory = await tempDir()
+    const a = objectOf('kept')
+    await writePack(directory, 'pack-1', [[a]])
+
+    const store = new PackStore({ directory })
+    expect(await store.has(a.hash)).toBe(true) // loads and caches the index
+    // From here only the in-memory index can answer: the file is gone.
+    await rm(join(directory, 'pack-1.idx'))
+    expect(await store.has(hashOfContent('absent'))).toBe(false)
+    expect(await store.has(a.hash)).toBe(true)
+    // A miss that discarded the loaded index would have rebuilt it from the
+    // pack here - reading every pack byte on the append path's every new object.
+    await expect(stat(join(directory, 'pack-1.idx'))).rejects.toThrow()
+  })
+
   it('finds a pack that appeared after the first listing', async () => {
     const directory = await tempDir()
     await writePack(directory, 'pack-1', [[objectOf('first')]])

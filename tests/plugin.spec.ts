@@ -49,6 +49,17 @@ describe('Config schema', () => {
     expect(Config.parse({ retentionDays: 3650 }).retentionDays).toBe(3650)
   })
 
+  it("takes 'never' as the way to say permanent, and only that word", () => {
+    // dsh itself never deletes a session log; a store that follows it needs a
+    // value that says so, not a 10-year number that quietly expires one day.
+    expect(Config.parse({ retentionDays: 'never' }).retentionDays).toBe('never')
+    expect(resolveStoreConfig({ retentionDays: 'never' }).retentionDays).toBe('never')
+    // 0 stays a hard error: "keep nothing" and "keep everything" must not be
+    // one keystroke apart.
+    expect(() => Config.parse({ retentionDays: 0 })).toThrow()
+    expect(() => Config.parse({ retentionDays: 'forever' })).toThrow()
+  })
+
   it('accepts host and host:port authorities, refusing anything with a path or scheme', () => {
     expect(Config.parse({ trustedHosts: ['dev.box', '10.0.0.4:3080', '[::1]:80'] }).trustedHosts)
       .toEqual(['dev.box', '10.0.0.4:3080', '[::1]:80'])

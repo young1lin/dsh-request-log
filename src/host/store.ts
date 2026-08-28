@@ -33,7 +33,8 @@
  * the trims). `format: 'v1'` freezes the legacy behavior byte-for-byte.
  *
  * Retention: files older than `retentionDays` are deleted on boot and on a
- * daily sweep; oversized ones trimmed to the newest records. The sweep also
+ * daily sweep (`'never'` keeps every file, whatever its age); oversized ones
+ * trimmed to the newest records. The sweep also
  * runs the mark-sweep GC over the object store (reachable hashes extracted
  * from the live files it reads anyway, then expanded transitively through
  * tree chains; unreachable objects and staging debris past a grace floor
@@ -56,7 +57,7 @@ export interface StoreConfig {
   /** Root directory holding the per-session JSONL files. */
   directory: string
   /** Delete session files whose last write is older than this many days. */
-  retentionDays: number
+  retentionDays: number | 'never'
   /** Per-session cap on kept call records (newest kept). */
   maxCallsPerSession: number
   /** Per-session cap on LOGICAL stored bytes (oldest records trimmed first). */
@@ -1080,7 +1081,11 @@ export class CallStore {
         status.phase = 'done'
         return { deletedFiles: 0, trimmedFiles: 0, migratedFiles: 0 }
       }
-      const cutoff = now - this.config.retentionDays * DAY_MS
+      // 'never' floors the cutoff below every possible mtime, so the branch
+      // below is dead rather than accidentally-false on a NaN comparison.
+      const cutoff = this.config.retentionDays === 'never'
+        ? Number.NEGATIVE_INFINITY
+        : now - this.config.retentionDays * DAY_MS
       const reachable = new Set<string>()
       const treeRoots = new Set<string>()
       const migrationCandidates: { sessionId: string; path: string; mtimeMs: number; size: number }[] = []

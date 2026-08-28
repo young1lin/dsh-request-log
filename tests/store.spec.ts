@@ -11,6 +11,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { assignSteps, CallStore, fileNameOf } from '../src/host/store.ts'
 import { BlobStore, CODEC_DEFLATE_RAW, decodeFrame, encodeFrame, hashOfContent } from '../src/host/blob.ts'
 import { TREE_SCHEMA, encodeTree, resolveTree } from '../src/host/tree.ts'
+import { resolveStoreConfig } from '../src/host/index.ts'
 import { RECORD_SCHEMA, RECORD_SCHEMA_V3, toIndexEntry } from '../src/shared/types'
 import type { CallRecord } from '../src/shared/types'
 
@@ -1228,5 +1229,36 @@ describe('sweep status observability', () => {
 
     // Second cycle: the file that failed last time yields its turn.
     expect((await readFile(convertible, 'utf8')).startsWith('{"v":3')).toBe(true)
+  })
+})
+
+describe('permanent retention', () => {
+  it("keeps a session file forever when retention is 'never'", async () => {
+    const directory = await tempDir()
+    // Through the real config path: 'never' has to survive parsing, not just
+    // the store's own field.
+    const store = new CallStore(resolveStoreConfig({ directory, retentionDays: 'never' }))
+    await store.append(recordOf({ id: 'ancient', sessionId: 'old-sess' }))
+    // Older than the 3650-day ceiling a number could ever express.
+    const stale = new Date(Date.now() - 4_000 * 24 * 60 * 60 * 1000)
+    await utimes(join(directory, 'old-sess.jsonl'), stale, stale)
+
+    const { deletedFiles } = await store.sweep()
+    expect(deletedFiles).toBe(0)
+    expect((await readdir(directory)).filter(name => name.endsWith('.jsonl'))).toEqual(['old-sess.jsonl'])
+    // A kept file's objects must stay reachable: the GC marks from the files
+    // retention spared, so sparing a file and reaping its bodies would be
+    // worse than deleting it outright.
+    expect((await store.get('old-sess', 'ancient'))?.id).toBe('ancient')
+  })
+
+  it('still deletes past a numeric window, so disabling is explicit', async () => {
+    const directory = await tempDir()
+    const store = new CallStore(resolveStoreConfig({ directory, retentionDays: 1 }))
+    await store.append(recordOf({ id: 'old', sessionId: 'old-sess' }))
+    const stale = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000)
+    await utimes(join(directory, 'old-sess.jsonl'), stale, stale)
+
+    expect((await store.sweep()).deletedFiles).toBe(1)
   })
 })

@@ -23,7 +23,7 @@ The wire views are reconstructed from the exact capture, mirroring the mapping d
 - **Usage statistics — 折线图** — a switchable chart panel above the ledger plots every loaded call: cache-hit rate per step (fixed 0–100 % axis), token volumes (in / cache-hit / cache-write / out; a cumulative mode on by default renders as stacked bars of running totals — one column per step, Cursor-dashboard style — and a per-step stacking toggle covers the line view), latency phases (total vs TTFT), output speed; hover for exact values, error/aborted calls draw gaps instead of fake zeros, auxiliary calls stay off the axis (badge counts them). The open state and active metric ride the same per-session memory.
 - **Timing** — start time, TTFB (first chunk), and total duration per call.
 - **Usage** — input/output/cache-read/cache-write tokens exactly as the provider reported them.
-- **Durable** — one JSONL file per session under `$DSH_HOME/request-log/`, with retention (default 14 days), a per-session call cap (default 2000), and a per-session byte cap (default 128 MiB, counting each line plus the object bytes that append added; oldest records trimmed first).
+- **Durable** — one JSONL file per session under `$DSH_HOME/request-log/`, with retention (default 14 days, or `never` to keep everything the way dsh keeps its own session logs), a per-session call cap (default 2000), and a per-session byte cap (default 128 MiB, counting each line plus the object bytes that append added; oldest records trimmed first).
 - **Fail-soft** — capture and storage failures never break a model call; a partially-written line is repaired on the next append; the read API is optional (a headless composition simply skips it).
 - **Fenced** — the read API serves the loopback host (plus any `trustedHosts` you configure) only; DNS-rebinding and cross-site requests are refused before any read.
 
@@ -68,7 +68,7 @@ The loader row's `config:` block (cordis.patch.yml) accepts:
 | field | default | meaning |
 | --- | --- | --- |
 | `directory` | `$DSH_HOME/request-log` | where the JSONL files live |
-| `retentionDays` | `14` | delete session files untouched this long |
+| `retentionDays` | `14` | delete session files untouched this long, in days (1–3650). `never` keeps every file forever — dsh's own session logs are never deleted, so this is what following the host looks like. `0` is refused: keeping nothing and keeping everything must not be one keystroke apart |
 | `maxCallsPerSession` | `2000` | per-session cap (newest kept) |
 | `maxFileBytes` | `134217728` | per-session cap on envelope-line bytes plus the compressed object bytes each append *materialized* — a piece already on disk bills nothing, so a retry bills 0 and shared pieces bill to whichever session wrote them first. Budget it as marginal **content**, not as disk: real occupancy runs ~3–4× higher (cluster rounding, see Storage above). Oldest records are trimmed first, and the raw `.jsonl` is held under the same number by a separate file-size guard |
 | `format` | `auto` | record format for new writes: `auto` = v3 deduplicating tree envelopes (+ lazy migration of old files), `v1` = legacy full-body JSONL |

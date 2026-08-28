@@ -25,8 +25,11 @@ export const VERSION = '0.1.0'
 export interface Config {
   /** Root directory for the per-session JSONL files. */
   directory?: string
-  /** Delete session files untouched for this many days. */
-  retentionDays?: number
+  /**
+   * Delete session files untouched for this many days, or `'never'` to keep
+   * them forever — what dsh's own session logs do.
+   */
+  retentionDays?: number | 'never'
   /** Per-session cap on kept call records (newest kept). */
   maxCallsPerSession?: number
   /** Per-session byte cap on each JSONL file (oldest records trimmed first). */
@@ -57,7 +60,10 @@ export const Config = z.preprocess(
   v => v ?? {},
   z.object({
     directory: z.string().min(1).optional(),
-    retentionDays: z.number().int().min(1).max(3650).default(DEFAULTS.retentionDays),
+    // 'never' is a word, not 0: "keep nothing" and "keep everything" must not
+    // be one keystroke apart, and a 3650-day stand-in would quietly expire.
+    retentionDays: z.union([z.literal('never'), z.number().int().min(1).max(3650)])
+      .default(DEFAULTS.retentionDays),
     maxCallsPerSession: z.number().int().min(1).default(DEFAULTS.maxCallsPerSession),
     maxFileBytes: z.number().int().min(1024 * 1024).default(DEFAULTS.maxFileBytes),
     trustedHosts: z.array(z.string().regex(TRUSTED_AUTHORITY)).default([]),

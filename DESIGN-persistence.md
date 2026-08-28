@@ -638,7 +638,17 @@ nearly the same conversation — so packing and repacking MUST preserve chronolo
         pack-<epochMs>-<rand>.retired marker: readers skip it, the sweep deletes it
 
 `objects/packs/` is invisible to the loose GC and census: both filter root entries with
-`/^[0-9a-f]{2}$/`, which `packs` fails.
+`/^[0-9a-f]{2}$/`, which `packs` fails. That isolation means nothing else reaps in here,
+so `reapRetired` also clears `tmp-` staging debris past the same one-hour grace floor —
+otherwise a crash between an index's write and its rename would leave a file that
+accumulates for the life of the store.
+
+**One writer.** The loose store is multi-process safe by construction: content-addressed
+writes are idempotent and commit by rename. Packs are not — appending is `open(path,'a')`
+plus a write, and two processes doing it at once would interleave into a torn block that
+`scanPack` then silently stops at. The plugin runs inside one `dsh web` process per store
+directory, which is the assumption this rests on. Reads are safe from any number of
+processes; only the sweep writes.
 
 ### 11.2 Pack file format
 
@@ -689,10 +699,16 @@ index is rebuilt from the pack.
 `BlobStore.get`, in order: LRU hit → loose file (today's path unchanged) → `PackStore.read`
 (binary-search each loaded index, read the block, decompress — the block LRU is bounded at
 16 MB — slice `[rawOffset, rawOffset+rawLength)`, verify the content hash, cache) → a miss
-invalidates the pack listing once (a repack may have landed a new pack since it was
-cached) and retries before throwing. A stale cached index is safe: it points into a pack
-that still exists until retirement completes, and immutable packs return correct bytes
-forever.
+forgets the pack LISTING once (a repack may have landed a new pack since it was cached)
+and retries before throwing. A stale cached index is safe: it points into a pack that
+still exists until retirement completes, and immutable packs return correct bytes forever.
+
+A miss must forget the listing and NOT the loaded indexes, and loading an index must not
+read the pack it describes — only `stat` it, since only the length decides whether the
+index is current. Both matter because the miss path is the APPEND path: every object `put`
+has not seen before asks the packs first, and the answer is normally no. Conflating the
+two made a miss cost 6.30 ms against a 0.17 ms hit on the real store's 10.5 MB pack, and
+that figure grows with the store forever.
 
 ### 11.5 Write path
 
@@ -709,12 +725,28 @@ resumes without recounting.
 Candidates are loose objects that are reachable and older than the GC grace floor — the
 same window that protects an object whose envelope line has not landed yet. They are
 ordered by first appearance in the chronological envelope scan the sweep already performs
-(`packingOrder`); anything unreferenced goes last, by hash. Blocks fill to 1 MiB raw or
+(`packingOrder`); anything unreferenced goes last, by hash.
+
+An envelope line names only its tree root and its response body. A call's message pieces
+are named INSIDE its tree node, so ranking the line's own hashes ranks a third of the
+bytes and leaves the rest tied for last — sorted by hash, the ordering this section says
+costs 36 %. `markTreeChains` therefore reports each node's own entry hashes as it walks,
+and the sweep expands every line's tree hash into the pieces THAT node introduced. First
+occurrence wins in `packingOrder`, and a node's own entries are exactly its call's new
+pieces, so this reproduces call order without a second walk. Measured on the real store:
+10.55 MB of pack bytes when only the line's hashes were ranked, 7.51 MB with the
+expansion. Blocks fill to 1 MiB raw or
 4096 entries; the active pack is appended to until it would exceed 64 MiB; at most 64 MiB
 of raw content moves per cycle (`packBudgetBytes`, always at least one object so a cycle
 makes progress however tight the budget). Then, in this exact order: fsync the pack →
-rewrite the index → unlink the loose copies (invariant 2). The whole phase — like the GC
-and the repack — runs only when the mark completed (invariant 1).
+rewrite the index → unlink the loose copies (invariant 2). Creating a pack fsyncs the
+DIRECTORY too: syncing a file promises its content survives a crash, not its name, and
+the loose copies of everything in it are about to be deleted. The index is rebuilt from
+the prior index plus a scan of the buffer just written — an append knows where its own
+blocks landed, and reading a 64 MiB pack back to reindex one block would size the phase
+by the pack. The pack itself is still the authority whenever the file did not end up the
+length the append implies, or the prior index would not load. The whole phase — like the
+GC and the repack — runs only when the mark completed (invariant 1).
 
 ### 11.7 Repack (sweep phase, after packing)
 
@@ -723,8 +755,13 @@ reachable entries fall below half (`repackLiveRatio`) and which holds at least 8
 (`repackMinBytes`) is read back in STORED order — order is what the compression ratio
 rests on, and a repack that reordered would inflate the store it was called to shrink —
 and its live objects are appended into a fresh pack (an all-dead pack needs no
-replacement, only retirement). A pack whose survivors cannot all be read back is left
-exactly as it is. The old pack is sealed as an append target first (otherwise the
+replacement, only retirement). Survivors stream through an 8 MiB chunk
+(`repackChunkBytes`) rather than being held at once: a 64 MiB pack decompresses to
+several hundred MB, and this runs inside the web server. Their presence is established
+first — an index lookup each, no bytes held — so a pack whose survivors cannot all be
+accounted for is left exactly as it is; a read that fails after that check leaves
+duplicates in the new pack and the old pack still serving, which is the right half to be
+wrong about. The old pack is sealed as an append target first (otherwise the
 survivors could land in the very pack about to be retired), then marked `.retired`;
 readers skip retired packs, and deleting their files is best-effort, retried on later
 sweeps — on Windows a reader may still hold the handle.

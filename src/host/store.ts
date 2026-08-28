@@ -1241,8 +1241,9 @@ export class CallStore {
       }
       if (this.v2Enabled) {
         status.phase = 'gc'
+        let treePieces = new Map<string, string[]>()
         try {
-          await this.markTreeChains(treeRoots, reachable)
+          treePieces = await this.markTreeChains(treeRoots, reachable)
         } catch (error) {
           swallowed('tree mark', error)
           markComplete = false
@@ -1264,7 +1265,19 @@ export class CallStore {
         // neighbouring calls re-send nearly the same conversation, so packing
         // in call order is what keeps neighbouring near-duplicates in one
         // block where they compress together.
-        const order = packingOrder(orderLines)
+        //
+        // An envelope line names only its tree and its response body; the
+        // message pieces - two thirds of the bytes - are named inside the tree
+        // node. Expanding each tree hash into the pieces THAT node introduced
+        // is what ranks them: first-occurrence wins in packingOrder, and a
+        // node's own entries are exactly the pieces its call added.
+        const order = packingOrder(orderLines.map(line => ({
+          at: line.at,
+          hashes: line.hashes.flatMap(hash => {
+            const pieces = treePieces.get(hash)
+            return pieces === undefined ? [hash] : [...pieces, hash]
+          }),
+        })))
         if (this.packingEnabled) {
           // Packing on a partial reachable set is a deletion in disguise —
           // the loose copy goes away — so the GC's guard covers it too.
@@ -1369,10 +1382,19 @@ export class CallStore {
    * its parent, and its entries to `reachable`. A node that cannot be read
    * or parsed stops that branch: GC then only risks sparing objects, never
    * deleting live ones.
+   *
+   * Resolves to each visited node's own entry hashes, in node order. That is
+   * the packer's ranking input: a call's message pieces are named INSIDE its
+   * tree node and never in the envelope line, so without this they would all
+   * tie for last and fall back to hash order.
    */
-  private async markTreeChains(roots: ReadonlySet<string>, reachable: Set<string>): Promise<void> {
+  private async markTreeChains(
+    roots: ReadonlySet<string>,
+    reachable: Set<string>,
+  ): Promise<Map<string, string[]>> {
     const pending = [...roots]
     const visited = new Set<string>()
+    const entriesOfNode = new Map<string, string[]>()
     while (pending.length > 0) {
       const hash = pending.pop() as string
       if (visited.has(hash)) continue
@@ -1384,9 +1406,12 @@ export class CallStore {
       } catch {
         continue // Unreadable or not a tree: nothing more to mark down here.
       }
-      for (const item of node.e) reachable.add(item.h)
+      const entries = node.e.map(item => item.h)
+      for (const item of entries) reachable.add(item)
+      entriesOfNode.set(hash, entries)
       if (node.p !== undefined) pending.push(node.p)
     }
+    return entriesOfNode
   }
 
   /**

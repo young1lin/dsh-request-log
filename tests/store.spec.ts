@@ -1323,6 +1323,37 @@ describe('sweep packing', () => {
     expect((await store.get('sess-1', 'b'))?.id).toBe('b')
   })
 
+  it('packs message pieces in call order, not in hash order', async () => {
+    const directory = await tempDir()
+    const store = new CallStore(resolveStoreConfig({ directory }))
+    // A growing conversation: each call re-sends the history and adds one
+    // message. The pieces live inside the tree nodes, never in the envelope
+    // line - so an order built from the line text alone never ranks them.
+    const messages: { role: 'user'; content: { type: 'text'; text: string }[] }[] = []
+    for (let i = 0; i < 5; i += 1) {
+      messages.push({ role: 'user', content: [{ type: 'text', text: `piece-marker-${i} ${'w'.repeat(200)}` }] })
+      await store.append(recordOf({
+        id: `call-${i}`,
+        timing: { startedAt: 1_000 + i },
+        request: { messages: [...messages] },
+      }))
+    }
+    await oldEnough(directory, (await store.objectCensusForTest()).map(row => row.hash))
+
+    await store.sweep()
+
+    const packs = new PackStore({ directory: join(directory, 'objects', 'packs') })
+    const [info] = await packs.list()
+    const stored = await packs.entriesOf(info.id)
+    const bodies = await Promise.all(stored.map(hash => packs.read(hash)))
+    const positionOf = (marker: string) => bodies.findIndex(body => body?.includes(marker) === true)
+
+    const positions = [0, 1, 2, 3, 4].map(i => positionOf(`piece-marker-${i}`))
+    expect(positions).not.toContain(-1)
+    // Chronological order is what 36 % of the compression ratio rests on.
+    expect(positions).toEqual([...positions].sort((a, b) => a - b))
+  })
+
   it('leaves a fresh object loose, so a pending append cannot lose its body', async () => {
     const directory = await tempDir()
     const store = new CallStore(resolveStoreConfig({ directory }))

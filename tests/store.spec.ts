@@ -1398,3 +1398,59 @@ describe('sweep safety', () => {
     expect(store.lastSweepStatus?.error).toBeDefined()
   })
 })
+
+describe('repack', () => {
+  it('rewrites a pack whose objects are mostly unreachable, keeping the live ones', async () => {
+    const directory = await tempDir()
+    const store = new CallStore({
+      ...resolveStoreConfig({ directory }),
+      repackMinBytes: 1,
+      maxCallsPerSession: 1,
+    })
+    // Two calls sharing a system prompt, then the cap trims the first away:
+    // its own objects go unreachable while the shared piece stays live.
+    const shared = 'a system prompt both calls resend'
+    await store.append(recordOf({ id: 'first', request: { system: shared, messages: [{ role: 'user', content: [{ type: 'text', text: 'a'.repeat(4000) }] }] } }))
+    const past = new Date(Date.now() - 3 * 60 * 60 * 1000)
+    for (const row of await store.objectCensusForTest()) {
+      await utimes(join(directory, 'objects', row.hash.slice(0, 2), `${row.hash}.drl`), past, past)
+    }
+    await store.sweep()                       // packs everything, shared piece included
+    await store.append(recordOf({
+      id: 'second',
+      request: { system: shared, messages: [{ role: 'user', content: [{ type: 'text', text: 'second body' }] }] },
+      // Its own response too: sharing two pieces with the dead call would
+      // hold the pack at exactly the live-ratio threshold.
+      response: { blocks: [{ type: 'text', text: 'second response' }], usage: { inputTokens: 3, outputTokens: 4 }, finish: { kind: 'stop' }, chunkCount: 2 },
+    }))
+    await store.sweep()                       // trims 'first' out of the file
+    await store.sweep()                       // the marks no longer name 'first': repack
+
+    const status = store.lastSweepStatus
+    expect(status?.repackedPacks).toBeGreaterThan(0)
+    // The survivor of the rewrite still reads back through the new pack: had
+    // it been appended into the pack being retired, the reap would have
+    // deleted it with the pack. The reopened store has cold caches — the
+    // writing store's LRU would mask the loss.
+    const second = await store.get('sess-1', 'second')
+    expect(second?.id).toBe('second')
+    expect(second?.request.system).toBe(shared)
+    const reopened = new CallStore(resolveStoreConfig({ directory }))
+    expect((await reopened.get('sess-1', 'second'))?.request.system).toBe(shared)
+  })
+
+  it('keeps a healthy pack untouched', async () => {
+    const directory = await tempDir()
+    const store = new CallStore({ ...resolveStoreConfig({ directory }), repackMinBytes: 1 })
+    await store.append(recordOf({ id: 'alive' }))
+    const past = new Date(Date.now() - 3 * 60 * 60 * 1000)
+    for (const row of await store.objectCensusForTest()) {
+      await utimes(join(directory, 'objects', row.hash.slice(0, 2), `${row.hash}.drl`), past, past)
+    }
+    await store.sweep()
+    const before = await readdir(join(directory, 'objects', 'packs'))
+    await store.sweep()
+    expect(store.lastSweepStatus?.repackedPacks).toBe(0)
+    expect(await readdir(join(directory, 'objects', 'packs'))).toEqual(before)
+  })
+})

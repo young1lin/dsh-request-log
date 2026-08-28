@@ -49,6 +49,8 @@ export class PackStore {
   private readonly blocks = new Map<string, Buffer>()
   private blockBytes = 0
   private readonly blockBudget: number
+  /** Packs barred from receiving appends (they are being replaced). */
+  private readonly sealed = new Set<string>()
 
   constructor(private readonly config: PackStoreConfig) {
     this.blockBudget = config.blockCacheBytes ?? DEFAULT_BLOCK_CACHE_BYTES
@@ -209,7 +211,7 @@ export class PackStore {
   /** The pack to append to: the newest one still under the size ceiling. */
   private async activePack(): Promise<{ id: string; bytes: number }> {
     const ids = await this.listIds()
-    const newest = ids[ids.length - 1]
+    const newest = ids.filter(id => !this.sealed.has(id)).at(-1)
     if (newest !== undefined) {
       const info = await stat(join(this.config.directory, `${newest}.pack`)).catch(() => null)
       if (info !== null && info.size < (this.config.maxPackBytes ?? DEFAULT_MAX_PACK_BYTES)) {
@@ -259,6 +261,11 @@ export class PackStore {
     await this.writeIndex(id, encodeIndex(records, pack.length))
     this.indexes.delete(id)
     return { id, packedBytes: pack.length, entryCount: records.length }
+  }
+
+  /** Bar a pack from receiving appends (it is being replaced). */
+  seal(id: string): void {
+    this.sealed.add(id)
   }
 
   /** Mark a pack unreadable to this and every other process, atomically. */

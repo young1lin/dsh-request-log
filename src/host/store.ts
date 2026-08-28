@@ -90,6 +90,10 @@ export interface StoreConfig {
   packBlockBytes?: number
   /** Raw bytes one sweep cycle may move into packs. */
   packBudgetBytes?: number
+  /** Below this share of still-reachable entries, a pack is worth rewriting. */
+  repackLiveRatio?: number
+  /** Rewriting anything smaller costs more IO than the space it reclaims. */
+  repackMinBytes?: number
 }
 
 const DAY_MS = 24 * 60 * 60 * 1000
@@ -177,7 +181,7 @@ function requestPieces(record: CallRecord): Piece[] {
 }
 
 /** Coarse sweep phases, published live while a cycle is in flight. */
-export type SweepPhase = 'retention' | 'gc' | 'pack' | 'migration' | 'done'
+export type SweepPhase = 'retention' | 'gc' | 'pack' | 'repack' | 'migration' | 'done'
 
 /**
  * The latest sweep cycle's observable outcome, published for /health. While
@@ -210,6 +214,8 @@ export interface SweepStatus {
   packedObjects: number
   /** Raw loose bytes those packed objects represented. */
   packedBytes: number
+  /** Mostly-dead packs rewritten: survivors moved on, the old file retired. */
+  repackedPacks: number
   /**
    * Whether the mark phase read every session file to the end. False means
    * the reachable set is partial, so the reclaiming phases stood down.
@@ -1148,6 +1154,7 @@ export class CallStore {
       removedTemp: 0,
       packedObjects: 0,
       packedBytes: 0,
+      repackedPacks: 0,
       markComplete: true,
     }
     this.sweepStatus = status
@@ -1262,6 +1269,13 @@ export class CallStore {
           } catch (error) {
             // Packing is an optimization: a failure leaves everything loose.
             swallowed('pack', error)
+          }
+          status.phase = 'repack'
+          try {
+            await this.repackDeadPacks(reachable, status)
+          } catch (error) {
+            // A failed repack leaves the old pack serving every read.
+            swallowed('repack', error)
           }
         }
         status.phase = 'migration'
@@ -1398,6 +1412,39 @@ export class CallStore {
       if (await this.blobs.dropLoose(object.hash)) status.packedObjects += 1
     }
     status.packedBytes += spent
+  }
+
+  /**
+   * Packs are immutable, so space inside one is reclaimed by writing a new
+   * pack holding only what is still reachable and retiring the old file.
+   * Stored order is preserved on purpose: it is what the compression ratio
+   * rests on, and a repack that reordered would inflate the store it was
+   * called to shrink.
+   */
+  private async repackDeadPacks(reachable: ReadonlySet<string>, status: SweepStatus): Promise<void> {
+    const ratio = this.config.repackLiveRatio ?? DEFAULT_REPACK_LIVE_RATIO
+    const minBytes = this.config.repackMinBytes ?? DEFAULT_REPACK_MIN_BYTES
+    for (const info of await this.packs.list()) {
+      if (info.bytes < minBytes || info.entryCount === 0) continue
+      const hashes = await this.packs.entriesOf(info.id)
+      const live = hashes.filter(hash => reachable.has(hash))
+      if (live.length / hashes.length >= ratio) continue
+
+      const objects: { hash: string; raw: Buffer }[] = []
+      for (const hash of live) {
+        const raw = await this.blobs.get(hash).catch(() => null)
+        if (raw !== null) objects.push({ hash, raw })
+      }
+      // Could not read them all: leave the pack exactly as it is.
+      if (objects.length !== live.length) continue
+      // Seal FIRST: without it the survivors could be appended to the very
+      // pack about to be retired, and the retire would take them with it.
+      this.packs.seal(info.id)
+      if (objects.length > 0) await this.packs.append(objects, this.config.packBlockBytes ?? DEFAULT_PACK_BLOCK_BYTES)
+      await this.packs.retire(info.id)
+      status.repackedPacks += 1
+    }
+    await this.packs.reapRetired()
   }
 
   /**

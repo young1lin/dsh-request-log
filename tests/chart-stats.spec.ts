@@ -4,7 +4,7 @@
  */
 
 import { describe, expect, it } from 'vitest'
-import { buildChartModel, stackSerieses } from '../src/client/chart-stats'
+import { buildChartModel, cumulateSerieses, stackSerieses } from '../src/client/chart-stats'
 import type { CallIndexEntry } from '../src/shared/types'
 
 function entryOf(overrides: Partial<CallIndexEntry> & { id: string }): CallIndexEntry {
@@ -127,10 +127,54 @@ describe('stackSerieses', () => {
     expect(byKey.get('out')!.points.map(p => p.y)).toEqual([38, 107])
   })
 
+
   it('keeps a whole-slot gap when NO usage exists at that x', () => {
     const group = tokenGroup()
     for (const series of group.series) series.points.push({ x: 3, y: null })
     const stacked = stackSerieses(group)
     for (const series of stacked) expect(series.points[2]!.y).toBeNull()
+  })
+})
+
+describe('cumulateSerieses', () => {
+  function tokenGroup() {
+    // step 1: in 10 / cacheRead 20 / cacheWrite 5 / out 3
+    // step 2: in 100 / out 7   step 3: ERROR (no usage at all).
+    return buildChartModel([
+      entryOf({ id: 'a', step: 1, usage: usage(10, 20, 5, 3) }),
+      entryOf({ id: 'b', step: 2, usage: usage(100, 0, undefined, 7) }),
+      entryOf({ id: 'err', step: 3, status: 'error' }),
+    ], 'step').groups.find(group => group.key === 'tokens')!
+  }
+
+  it('turns each series into a running total across steps', () => {
+    const byKey = new Map(cumulateSerieses(tokenGroup()).map(s => [s.key, s]))
+    expect(byKey.get('in')!.points.map(p => p.y)).toEqual([10, 110, 110])
+    expect(byKey.get('out')!.points.map(p => p.y)).toEqual([3, 10, 10])
+  })
+
+  it('carries the total forward over a usage-less slot instead of drawing a gap', () => {
+    // Step 3 errored: nothing was added, so the running total genuinely stands.
+    const inputs = cumulateSerieses(tokenGroup()).find(s => s.key === 'in')!
+    expect(inputs.points[2]!.y).toBe(110)
+  })
+
+  it('keeps LEADING slots gap — no invented zero start', () => {
+    const group = buildChartModel([
+      entryOf({ id: 'err', step: 1, status: 'error' }),
+      entryOf({ id: 'ok', step: 2, usage: usage(10) }),
+    ], 'step').groups.find(g => g.key === 'tokens')!
+    const inputs = cumulateSerieses(group).find(s => s.key === 'in')!
+    expect(inputs.points.map(p => p.y)).toEqual([null, 10])
+  })
+
+  it('stacks on top of cumulated layers into a grand cumulative total', () => {
+    const cumulated = cumulateSerieses(tokenGroup())
+    const stacked = stackSerieses({ ...tokenGroup(), series: cumulated })
+    const byKey = new Map(stacked.map(s => [s.key, s]))
+    // The out layer tops at the grand cumulative total: 38 = 10+20+5+3,
+    // 145 = (10+100)+(20+0)+(5+0)+(3+7), then flat 145 over the error slot.
+    expect(byKey.get('out')!.points.map(p => p.y)).toEqual([38, 145, 145])
+    expect(byKey.get('in')!.points.map(p => p.y)).toEqual([10, 110, 110])
   })
 })

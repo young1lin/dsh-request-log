@@ -635,6 +635,26 @@
 .rl-dot.rl-ls-neutral, .rl-mark.rl-ls-neutral, .rl-focus.rl-ls-neutral { color: var(--dsw-alias-label-primary); }
 .rl-mark.rl-ls-brand, .rl-focus.rl-ls-brand { color: var(--dsw-alias-brand-primary, var(--dsw-alias-label-secondary)); }
 
+/* Cumulative stacked bars: one column per step, segments per token kind. */
+.rl-bar {
+  stroke: none;
+  fill: currentColor;
+  fill-opacity: 0.82;
+  shape-rendering: crispEdges;
+}
+.rl-bar.rl-ls-brand { color: var(--dsw-alias-brand-primary, var(--dsw-alias-label-secondary)); }
+.rl-bar.rl-ls-success { color: var(--dsw-alias-state-success-primary); }
+.rl-bar.rl-ls-warn { color: var(--dsw-alias-state-warn-primary); }
+.rl-bar.rl-ls-error { color: var(--dsw-alias-state-error-primary); }
+.rl-bar.rl-ls-neutral { color: var(--dsw-alias-label-primary); }
+
+/* Wide translucent wash over the hovered column (bars have no dot tops). */
+.rl-bar-hover {
+  fill: var(--dsw-alias-label-foreground);
+  opacity: 0.07;
+  pointer-events: none;
+}
+
 .rl-overlay { pointer-events: all; cursor: crosshair; }
 
 .rl-crosshair {
@@ -691,6 +711,13 @@
 .rl-tip-value {
   color: var(--dsw-alias-label-primary);
   font-variant-numeric: tabular-nums;
+}
+
+/* Cumulative mode: what the hovered step itself added. */
+.rl-tip-delta {
+  color: var(--dsw-alias-label-tertiary);
+  font-variant-numeric: tabular-nums;
+  font-size: 10px;
 }
 
 .rl-tip-note {

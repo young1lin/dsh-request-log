@@ -43,11 +43,13 @@ export interface SelectedCall {
   step?: number
 }
 
-/** 统计 panel reading position: open?, active metric group, token stacking. */
+/** 统计 panel reading position: open?, active metric group, token cumulative/stacking. */
 export interface ChartsPrefs {
   open: boolean
   group: MetricGroupKey
   stacks: boolean
+  /** Token group: running-total (Cursor-dashboard style) mode. */
+  cumulative: boolean
 }
 
 export interface ViewMemory {
@@ -78,7 +80,7 @@ export function freshViewMemory(): ViewMemory {
     limit: PAGE_SIZE,
     auto: true,
     detail: { side: 'request', format: null },
-    charts: { open: true, group: 'hitrate', stacks: false },
+    charts: { open: true, group: 'hitrate', stacks: false, cumulative: true },
   }
 }
 
@@ -164,6 +166,7 @@ function coerceMemory(raw: unknown): ViewMemory | null {
       ? groupRaw as MetricGroupKey
       : fresh.charts.group,
     stacks: typeof chartsRaw.stacks === 'boolean' ? chartsRaw.stacks : fresh.charts.stacks,
+    cumulative: typeof chartsRaw.cumulative === 'boolean' ? chartsRaw.cumulative : fresh.charts.cumulative,
   }
 
   return {

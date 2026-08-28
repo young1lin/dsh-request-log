@@ -43,7 +43,7 @@ describe('fresh defaults', () => {
       limit: PAGE_SIZE,
       auto: true,
       detail: { side: 'request', format: null },
-      charts: { open: true, group: 'hitrate', stacks: false },
+      charts: { open: true, group: 'hitrate', stacks: false, cumulative: true },
     })
   })
 })
@@ -58,7 +58,7 @@ describe('in-page round-trip', () => {
       limit: PAGE_SIZE * 2,
       auto: false,
       detail: { side: 'response', format: 'openai-responses' },
-      charts: { open: true, group: 'hitrate', stacks: false },
+      charts: { open: true, group: 'hitrate', stacks: false, cumulative: true },
     })
     expect(loadViewMemory('s2')).toEqual(freshViewMemory())
   })
@@ -146,7 +146,7 @@ describe('sessionStorage write-through', () => {
       limit: PAGE_SIZE,
       auto: true,
       detail: { side: 'request', format: null },
-      charts: { open: true, group: 'hitrate', stacks: false },
+      charts: { open: true, group: 'hitrate', stacks: false, cumulative: true },
     })
   })
 
@@ -154,18 +154,18 @@ describe('sessionStorage write-through', () => {
     const store = fakeStorage()
     vi.stubGlobal('sessionStorage', store)
     store.setItem(KEY, JSON.stringify({
-      charts: { open: false, group: 'tokens', stacks: 3 },
+      charts: { open: false, group: 'tokens', stacks: 3, cumulative: 'nope' },
     }))
     const loaded = loadViewMemory('s1')
-    expect(loaded.charts).toEqual({ open: false, group: 'tokens', stacks: false })
+    expect(loaded.charts).toEqual({ open: false, group: 'tokens', stacks: false, cumulative: true })
     store.setItem('dsh-request-log:view:s2', JSON.stringify({
       charts: { open: true, group: 'galaxy' },
     }))
     // An uncached session id reads through to storage; s1 stays in-page.
-    expect(loadViewMemory('s2').charts).toEqual({ open: true, group: 'hitrate', stacks: false })
+    expect(loadViewMemory('s2').charts).toEqual({ open: true, group: 'hitrate', stacks: false, cumulative: true })
     // A partial patch rides the merge without dropping untouched fields.
-    updateViewMemory('s1', { charts: { group: 'latency', open: false, stacks: false } })
-    expect(loadViewMemory('s1').charts).toEqual({ open: false, group: 'latency', stacks: false })
+    updateViewMemory('s1', { charts: { group: 'latency', open: false, stacks: false, cumulative: false } })
+    expect(loadViewMemory('s1').charts).toEqual({ open: false, group: 'latency', stacks: false, cumulative: false })
   })
 
   it('drops a selection whose id is not a string', () => {

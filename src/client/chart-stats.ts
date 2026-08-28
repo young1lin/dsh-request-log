@@ -46,8 +46,10 @@ export interface MetricGroup {
   unit: 'percent' | 'tokens' | 'ms' | 'tokps'
   /** Hit-rate group: fixed [0,100] axis, ticks every 25, never auto-scaled. */
   percentAxis?: boolean
-  /** Token group: legend chips may stack the lines cumulatively. */
+  /** Token group: legend chips may stack the lines per slot (see stackSerieses). */
   stackOrder?: string[]
+  /** Token group: offers the cumulative (running-total) mode — see cumulateSerieses. */
+  cumulable?: boolean
   series: MetricSeries[]
 }
 
@@ -90,6 +92,7 @@ const TOKENS_GROUP: MetricGroup = {
   labelKey: 'groupTokens',
   unit: 'tokens',
   stackOrder: ['in', 'cacheRead', 'cacheWrite', 'out'],
+  cumulable: true,
   series: [
     { key: 'in', labelKey: 'colIn', colorRole: 'brand', points: [] },
     { key: 'cacheRead', labelKey: 'colCacheRead', colorRole: 'success', points: [] },
@@ -242,9 +245,11 @@ export function buildChartModel(calls: readonly CallIndexEntry[], xMode: XMode, 
 }
 
 /**
- * Cumulative stacking of the token group: order follows the group's
- * stackOrder; missing fields count as 0 while a whole x with NO usage stays
- * a stacked gap (every layer null there).
+ * Per-slot stacking of the token group: at each x the layers pile up in
+ * stackOrder (in + cacheRead + cacheWrite + out), missing fields counting as
+ * 0, while a whole x with NO usage stays a stacked gap (every layer null
+ * there). This stacks WITHIN a slot — it never accumulates across xs; for
+ * that see cumulateSerieses.
  */
 export function stackSerieses(group: MetricGroup): MetricSeries[] {
   const order = group.stackOrder ?? group.series.map(s => s.key)
@@ -278,4 +283,29 @@ export function stackSerieses(group: MetricGroup): MetricSeries[] {
       y: Number.isFinite(value) ? value : null,
     })),
   }))
+}
+
+/**
+ * Cumulative (running-total) mode — the Cursor-dashboard form: each point
+ * becomes the sum of every value up to that slot, so the lines only climb.
+ *
+ * Semantics:
+ *  - a slot WITH usage adds to the running total;
+ *  - a slot WITHOUT usage (error / aborted / in-flight) CARRIES THE PREVIOUS
+ *    TOTAL FORWARD — nothing was added, so the total genuinely stands; this
+ *    is not a fabricated value the way a fake zero would be, and the
+ *    per-step charts keep drawing real gaps there;
+ *  - slots before the FIRST finite value stay gaps — no invented zero start.
+ */
+export function cumulateSerieses(group: MetricGroup): MetricSeries[] {
+  return group.series.map(series => {
+    let total: number | null = null
+    return {
+      ...series,
+      points: series.points.map(point => {
+        if (point.y !== null && Number.isFinite(point.y)) total = (total ?? 0) + point.y
+        return { x: point.x, y: total === null ? null : total, ...(point.approx === true ? { approx: true } : {}) }
+      }),
+    }
+  })
 }

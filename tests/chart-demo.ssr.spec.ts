@@ -100,6 +100,7 @@ const dict: Dict = {
     toggle: 'Charts', toggleHint: '',
     groupHitRate: 'Hit rate', groupTokens: 'Tokens', groupLatency: 'Latency', groupSpeed: 'Speed',
     stacks: 'Stacked', stacksHint: '',
+    cumulative: 'Cumulative', cumulativeHint: '',
     emptyTitle: 'Nothing to plot yet', emptyHint: '', allNull: '',
     speedApproxHint: 'Approximate.',
     excludedShort: '{count} aux',
@@ -153,11 +154,13 @@ describe('stats panel screenshot fixtures', () => {
   it('renders every metric group to .tmp/*.html', () => {
     mkdirSync('.tmp', { recursive: true })
     const variants: { name: string; prefs: import('../src/client/persist').ChartsPrefs }[] = [
-      { name: 'hitrate', prefs: { open: true, group: 'hitrate', stacks: false } },
-      { name: 'tokens-lines', prefs: { open: true, group: 'tokens', stacks: false } },
-      { name: 'tokens-stacked', prefs: { open: true, group: 'tokens', stacks: true } },
-      { name: 'latency', prefs: { open: true, group: 'latency', stacks: false } },
-      { name: 'speed', prefs: { open: true, group: 'speed', stacks: false } },
+      { name: 'hitrate', prefs: { open: true, group: 'hitrate', stacks: false, cumulative: true } },
+      { name: 'tokens-lines', prefs: { open: true, group: 'tokens', stacks: false, cumulative: false } },
+      { name: 'tokens-cumulative', prefs: { open: true, group: 'tokens', stacks: false, cumulative: true } },
+      { name: 'tokens-cumulative-stacked', prefs: { open: true, group: 'tokens', stacks: true, cumulative: true } },
+      { name: 'tokens-stacked', prefs: { open: true, group: 'tokens', stacks: true, cumulative: false } },
+      { name: 'latency', prefs: { open: true, group: 'latency', stacks: false, cumulative: true } },
+      { name: 'speed', prefs: { open: true, group: 'speed', stacks: false, cumulative: true } },
     ]
     for (const variant of variants) {
       const html = page(variant.name, renderToStaticMarkup(

@@ -87,6 +87,9 @@ export interface ChartsDict {
   /** Token-group stack toggle + its tooltip. */
   stacks: string
   stacksHint: string
+  /** Token-group cumulative (running-total) toggle + its tooltip. */
+  cumulative: string
+  cumulativeHint: string
   /** Shown when no plotted value exists anywhere. */
   emptyTitle: string
   emptyHint: string

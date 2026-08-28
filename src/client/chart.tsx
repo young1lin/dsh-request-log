@@ -1,6 +1,8 @@
 /**
- * The 统计 panel: switchable SVG line charts over the loaded ledger window —
- * per-call cache-hit rate, token volumes, latency phases, output speed.
+ * The 统计 panel: switchable SVG charts over the loaded ledger window —
+ * per-call cache-hit rate, token volumes, latency phases, output speed. The
+ * token group's cumulative mode renders as STACKED BARS of running totals
+ * (one column per step, Cursor-dashboard style); everything else is lines.
  *
  * Pure geometry lives in ./chart-scale, pure shaping in ./chart-stats; this
  * module is the only React-touching piece. One metric-group tab strip drives
@@ -14,7 +16,9 @@
  *  - pointer events land on ONE transparent overlay rect, never on paths;
  *  - >200-point series decimate for DRAWING only (LTTB keeps endpoints and
  *    original extremes; tooltips read full-resolution values);
- *  - a lone non-null value renders as its own dot.
+ *  - a lone non-null value renders as its own dot;
+ *  - cumulative bars bucket to ≤ ~1 column per pixel, each column keeping
+ *    its bucket's tallest slot, so hovering still snaps to exact values.
  *
  * @module dsh-request-log/client/chart
  */
@@ -24,6 +28,7 @@ import type { CallIndexEntry } from '../shared/types'
 import { formatDuration, formatTime, formatTokens } from './data'
 import {
   buildChartModel,
+  cumulateSerieses,
   stackSerieses,
   type MetricGroup,
   type MetricGroupKey,
@@ -170,11 +175,27 @@ export function StatsPanel(props: {
   const [hover, setHover] = React.useState<HoverState | null>(null)
   const clearHover = React.useCallback((): void => setHover(null), [])
 
-  // --- resolved series (stacking honored) ----------------------------------
-  const stacking = props.prefs.stacks && group.stackOrder !== undefined
-  const stacked = stacking ? stackSerieses(group) : group.series
-  const visible: MetricSeries[] =
-    stacked.length <= 1 ? stacked : stacked.filter(series => !hidden.has(series.key))
+  // --- resolved series (cumulative bars / stacked lines) -------------------
+  // Cumulative mode (token group) renders as STACKED BARS of running totals
+  // — the Cursor-dashboard form: one column per step, its top at the
+  // cumulative usage so far, color segments breaking that down by token
+  // kind. Line stacking applies only OUTSIDE cumulative mode.
+  const cumulative = props.prefs.cumulative && group.cumulable === true
+  const based = cumulative ? cumulateSerieses(group) : group.series
+  const stacking = !cumulative && props.prefs.stacks && group.stackOrder !== undefined
+  // Bars re-stack the VISIBLE series only, so a hidden legend chip truly
+  // removes its segment from every column (stacked lines keep the legacy
+  // hide-the-line-only semantics).
+  const barSource = cumulative ? based.filter(series => !hidden.has(series.key)) : based
+  const stacked = stacking || cumulative
+    ? stackSerieses({ ...group, series: barSource })
+    : barSource
+  const visible: MetricSeries[] = cumulative
+    ? stacked
+    : stacked.length <= 1 ? stacked : stacked.filter(series => !hidden.has(series.key))
+  // Tooltip rows read PER-SERIES values — own cumulative totals in bar mode,
+  // stacked layer tops when stacking lines (legacy semantics).
+  const tipSource = cumulative ? barSource : visible
 
   // --- layout ---------------------------------------------------------------
   const plotW = Math.max(width - 74, 120)
@@ -211,13 +232,33 @@ export function StatsPanel(props: {
   const sx = linear(xDomain, [x0, x1])
   const sy = linear(yDomain, [y1, y0])
 
-  // Drawing-only decimation past ~200 points per series.
+  // Drawing-only decimation: lines LTTB past ~200 points; bars bucket to
+  // at most one column per ~pixel, keeping the bucket's TALLEST (last
+  // non-null) slot so a hover snap reads exact full-resolution values.
   const decimateTo = Math.max(80, Math.round(plotW / 2))
-  const rendered = visible.map(series => ({
+  const rendered = cumulative ? [] : visible.map(series => ({
     series,
     points: series.points.length > 200 ? lttbDecimate(series.points, decimateTo) : series.points,
   }))
-  const hoverXs = rendered[0]?.points.map(p => p.x) ?? []
+  const barDrawn: { x: number; idx: number }[] = []
+  if (cumulative) {
+    const maxBars = Math.max(40, Math.floor(plotW))
+    const step = Math.max(1, Math.ceil(reference.length / maxBars))
+    for (let i = 0; i < reference.length; i += step) {
+      const end = Math.min(i + step, reference.length)
+      let pick = -1
+      for (let j = i; j < end; j += 1) {
+        if (based.some(series => {
+          const y = series.points[j]?.y
+          return y !== null && y !== undefined
+        })) pick = j
+      }
+      if (pick >= 0) barDrawn.push({ x: reference[pick]!.x, idx: pick })
+    }
+  }
+  const hoverXs: number[] = cumulative
+    ? barDrawn.map(column => column.x)
+    : rendered[0]?.points.map(p => p.x) ?? []
 
   const onMove = React.useCallback((event: { clientX?: number }): void => {
     if (hoverXs.length === 0 || typeof event.clientX !== 'number') return
@@ -225,8 +266,14 @@ export function StatsPanel(props: {
     if (svg === null) return
     const rect = svg.getBoundingClientRect()
     const index = nearestIndex(hoverXs, event.clientX - rect.left)
-    setHover(index < 0 ? null : { index })
-  }, [hoverXs])
+    if (index < 0) {
+      setHover(null)
+      return
+    }
+    // Bars carry their exact full-resolution slot index; lines keep the
+    // drawn-set ordinal the tooltip code below has always consumed.
+    setHover({ index: cumulative ? barDrawn[index]!.idx : index })
+  }, [hoverXs, cumulative, barDrawn])
 
   // Elements -----------------------------------------------------------------
   const gridlines = yTicks.map(v =>
@@ -265,6 +312,36 @@ export function StatsPanel(props: {
   })
 
   const shapes: React.ReactElement[] = []
+  if (cumulative) {
+    // Column geometry: width from drawn-column spacing, clamped to [1, 22].
+    const spacing = barDrawn.length > 1
+      ? (sx(barDrawn[barDrawn.length - 1]!.x) - sx(barDrawn[0]!.x)) / (barDrawn.length - 1)
+      : 0
+    const barW = barDrawn.length === 1
+      ? 22
+      : Math.max(1, Math.min(22, Math.floor(spacing * 0.7)))
+    for (const column of barDrawn) {
+      const cx = sx(column.x)
+      const bx = Math.max(x0, Math.min(cx - barW / 2, x1 - barW))
+      let prev = 0
+      for (const layer of visible) {
+        const y = layer.points[column.idx]?.y
+        if (y === null || y === undefined || !Number.isFinite(y)) continue
+        const topPx = sy(y)
+        const basePx = sy(prev)
+        // Sub-half-pixel segments still advance `prev` so the bands above
+        // sit at their true heights; they just draw nothing themselves.
+        if (basePx - topPx >= 0.5) {
+          shapes.push(h('rect', {
+            key: layer.key + '-bar-' + String(column.idx),
+            className: 'rl-bar rl-ls-' + layer.colorRole,
+            x: bx, y: topPx, width: barW, height: basePx - topPx,
+          }))
+        }
+        prev = y
+      }
+    }
+  }
   for (const { series, points } of rendered) {
     const runs = splitRuns(points)
     const markers = points.length <= 40
@@ -302,21 +379,35 @@ export function StatsPanel(props: {
   }
 
   // Crosshair, focus dots, tooltip -------------------------------------------
-  const tipRows: { label: string; cls: string; text: string; approx?: boolean }[] = []
+  const tipRows: { label: string; cls: string; text: string; delta?: string; approx?: boolean }[] = []
   const focusDots: React.ReactElement[] = []
   if (hover !== null) {
-    for (const series of visible) {
+    for (const series of tipSource) {
       const p = series.points[hover.index]
       if (p === undefined || p.y === null || !Number.isFinite(p.y)) continue
-      focusDots.push(h('circle', {
-        key: 'fd-' + series.key,
-        className: 'rl-focus rl-ls-' + series.colorRole,
-        cx: sx(p.x), cy: sy(p.y), r: 3.5,
-      }))
+      // Cumulative mode: the plotted value is the running total — also show
+      // what THIS step added (prev slot's total subtracted out).
+      let delta: string | undefined
+      if (cumulative && hover.index > 0) {
+        const prev = series.points[hover.index - 1]
+        if (prev !== undefined && prev.y !== null && Number.isFinite(prev.y)) {
+          const step = p.y - prev.y
+          if (step > 0) delta = '+' + formatTokens(step)
+        }
+      }
+      // Bars highlight the whole hovered column instead of dot tops.
+      if (!cumulative) {
+        focusDots.push(h('circle', {
+          key: 'fd-' + series.key,
+          className: 'rl-focus rl-ls-' + series.colorRole,
+          cx: sx(p.x), cy: sy(p.y), r: 3.5,
+        }))
+      }
       tipRows.push({
         label: seriesLabel(dict, series.key),
         cls: 'rl-ls-' + series.colorRole,
         text: formatValue(group, p.y, true),
+        delta,
         approx: p.approx === true,
       })
     }
@@ -346,7 +437,8 @@ export function StatsPanel(props: {
                 h('span', { className: 'rl-tip-swatch ' + row.cls }),
                 h('span', { className: 'rl-tip-label' }, row.label),
                 h('span', { className: 'rl-tip-value' },
-                  (row.approx === true ? '\u2248 ' : '') + row.text))),
+                  (row.approx === true ? '\u2248 ' : '') + row.text),
+                row.delta === undefined ? null : h('span', { className: 'rl-tip-delta' }, row.delta))),
             ...tipRows.some(row => row.approx === true)
               ? [h('div', { key: 'approx-hint', className: 'rl-tip-note' }, charts.speedApproxHint)]
               : [],
@@ -366,13 +458,19 @@ export function StatsPanel(props: {
         group.series.map(series =>
           h('button', {
             key: series.key,
-            className: 'rl-chip' + (visible.includes(series) ? ' rl-chip-on' : ''),
+            className: 'rl-chip' + (!hidden.has(series.key) ? ' rl-chip-on' : ''),
             onClick: () => toggleHidden(series.key),
           },
             h('span', { className: 'rl-tip-swatch rl-ls-' + series.colorRole }),
             seriesLabel(dict, series.key))))
     : null
-  const stacksToggle = group.stackOrder === undefined ? null : h('button', {
+  const cumulativeToggle = group.cumulable !== true ? null : h('button', {
+    className: 'rl-btn' + (cumulative ? ' rl-btn-on' : ''),
+    title: charts.cumulativeHint,
+    onClick: () => props.onPrefs({ cumulative: !props.prefs.cumulative }),
+  }, charts.cumulative)
+  // Stacking is implicit in the bar form — the toggle only exists for lines.
+  const stacksToggle = group.stackOrder === undefined || cumulative ? null : h('button', {
     className: 'rl-btn' + (stacking ? ' rl-btn-on' : ''),
     title: charts.stacksHint,
     onClick: () => props.onPrefs({ stacks: !props.prefs.stacks }),
@@ -397,6 +495,21 @@ export function StatsPanel(props: {
     y1: y0, y2: y1,
   }))
   if (focusDots.length > 0) bodyChildren.push(h('g', { key: 'focus' }, ...focusDots))
+  if (cumulative && hover !== null && xsAll.length > 0 && barDrawn.length > 0) {
+    // Wide translucent wash over the hovered column — bars have no dot tops.
+    const slotX = sx(xsAll[Math.min(hover.index, xsAll.length - 1)]!)
+    const washW = Math.min(Math.max(barDrawn.length > 1
+      ? (sx(barDrawn[barDrawn.length - 1]!.x) - sx(barDrawn[0]!.x)) / (barDrawn.length - 1) * 1.6
+      : 26, 12), x1 - x0)
+    bodyChildren.push(h('rect', {
+      key: 'barhi',
+      className: 'rl-bar-hover',
+      x: Math.max(x0, slotX - washW / 2),
+      y: y0,
+      width: Math.min(washW, x1 - x0),
+      height: y1 - y0,
+    }))
+  }
   bodyChildren.push(h('rect', {
     key: 'overlay',
     className: 'rl-overlay',
@@ -419,6 +532,7 @@ export function StatsPanel(props: {
       h('span', { className: 'rl-chart-tabs-group' }, ...tabs),
       h('span', { className: 'rl-chart-tabs-space' }),
       legend,
+      cumulativeToggle,
       stacksToggle,
       note),
     h('div', { className: 'rl-chart-body', ref: bodyRef },

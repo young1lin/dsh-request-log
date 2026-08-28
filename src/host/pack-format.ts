@@ -100,3 +100,73 @@ export function decompressBlock(block: DecodedBlock): Buffer {
   }).zstdDecompressSync
   return zstdDecompressSync(block.payload)
 }
+
+export const IDX_MAGIC = Buffer.from('DRI1', 'ascii')
+export const IDX_VERSION = 1
+export const IDX_HEADER_BYTES = 16
+export const IDX_RECORD_BYTES = 48
+
+export interface IndexRecord {
+  hash: string
+  blockOffset: number
+  blockLength: number
+  rawOffset: number
+  rawLength: number
+}
+
+/**
+ * The index is searched as BYTES, never deserialized: a pack holding 128k
+ * objects costs one 6 MB buffer instead of 128k JS objects, and a lookup is a
+ * binary search over fixed 48-byte slots.
+ */
+export function encodeIndex(records: readonly IndexRecord[], packBytes: number): Buffer {
+  const sorted = [...records].sort((a, b) => (a.hash < b.hash ? -1 : a.hash > b.hash ? 1 : 0))
+  const buffer = Buffer.alloc(IDX_HEADER_BYTES + sorted.length * IDX_RECORD_BYTES)
+  IDX_MAGIC.copy(buffer, 0)
+  buffer.writeUInt8(IDX_VERSION, 4)
+  buffer.writeUInt32BE(sorted.length, 8)
+  buffer.writeUInt32BE(packBytes, 12)
+  for (const [i, record] of sorted.entries()) {
+    const at = IDX_HEADER_BYTES + i * IDX_RECORD_BYTES
+    Buffer.from(record.hash, 'hex').copy(buffer, at)
+    buffer.writeUInt32BE(record.blockOffset, at + 32)
+    buffer.writeUInt32BE(record.blockLength, at + 36)
+    buffer.writeUInt32BE(record.rawOffset, at + 40)
+    buffer.writeUInt32BE(record.rawLength, at + 44)
+  }
+  return buffer
+}
+
+export function readIndexHeader(buffer: Buffer): { recordCount: number; packBytes: number } {
+  if (buffer.length < IDX_HEADER_BYTES) throw new Error('index shorter than its header')
+  if (!buffer.subarray(0, 4).equals(IDX_MAGIC)) throw new Error('index magic mismatch')
+  if (buffer.readUInt8(4) !== IDX_VERSION) throw new Error(`unknown index version ${buffer.readUInt8(4)}`)
+  return { recordCount: buffer.readUInt32BE(8), packBytes: buffer.readUInt32BE(12) }
+}
+
+export function indexRecordAt(buffer: Buffer, i: number): IndexRecord {
+  const at = IDX_HEADER_BYTES + i * IDX_RECORD_BYTES
+  return {
+    hash: buffer.subarray(at, at + 32).toString('hex'),
+    blockOffset: buffer.readUInt32BE(at + 32),
+    blockLength: buffer.readUInt32BE(at + 36),
+    rawOffset: buffer.readUInt32BE(at + 40),
+    rawLength: buffer.readUInt32BE(at + 44),
+  }
+}
+
+export function findInIndex(buffer: Buffer, hash: string): IndexRecord | null {
+  const { recordCount } = readIndexHeader(buffer)
+  const needle = Buffer.from(hash, 'hex')
+  let low = 0
+  let high = recordCount - 1
+  while (low <= high) {
+    const mid = (low + high) >> 1
+    const at = IDX_HEADER_BYTES + mid * IDX_RECORD_BYTES
+    const cmp = Buffer.compare(buffer.subarray(at, at + 32), needle)
+    if (cmp === 0) return indexRecordAt(buffer, mid)
+    if (cmp < 0) low = mid + 1
+    else high = mid - 1
+  }
+  return null
+}

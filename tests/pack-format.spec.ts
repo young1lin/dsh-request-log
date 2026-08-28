@@ -6,6 +6,11 @@ import {
   decodeBlock,
   decompressBlock,
   encodeBlock,
+  encodeIndex,
+  findInIndex,
+  indexRecordAt,
+  readIndexHeader,
+  type IndexRecord,
   zstdAvailable,
 } from '../src/host/pack-format.ts'
 
@@ -51,5 +56,36 @@ describe('block codec', () => {
     const joined = Buffer.concat([first, second])
     const decoded = decodeBlock(joined, first.length)
     expect(decompressBlock(decoded).toString('utf8')).toBe('second')
+  })
+})
+
+describe('index codec', () => {
+  const recordOf = (hash: string, blockOffset: number): IndexRecord =>
+    ({ hash, blockOffset, blockLength: 100, rawOffset: 7, rawLength: 9 })
+
+  it('sorts records by hash so lookup can binary-search 48-byte slots', () => {
+    const hashes = ['ff', 'a0', '01', '7e'].map(prefix => hashOfContent(prefix))
+    const index = encodeIndex(hashes.map((hash, i) => recordOf(hash, i * 100)), 4096)
+
+    expect(readIndexHeader(index)).toEqual({ recordCount: 4, packBytes: 4096 })
+    const ordered = [0, 1, 2, 3].map(i => indexRecordAt(index, i).hash)
+    expect(ordered).toEqual([...ordered].sort())
+    for (const hash of hashes) expect(findInIndex(index, hash)?.hash).toBe(hash)
+  })
+
+  it('returns null for a hash it does not hold, at both ends and in the middle', () => {
+    const index = encodeIndex([recordOf(hashOfContent('b'), 0), recordOf(hashOfContent('d'), 1)], 10)
+    for (const missing of ['a', 'c', 'e']) expect(findInIndex(index, hashOfContent(missing))).toBeNull()
+  })
+
+  it('carries every field through unchanged', () => {
+    const hash = hashOfContent('one')
+    const index = encodeIndex([{ hash, blockOffset: 16, blockLength: 4096, rawOffset: 1234, rawLength: 77 }], 5000)
+    expect(findInIndex(index, hash)).toEqual({ hash, blockOffset: 16, blockLength: 4096, rawOffset: 1234, rawLength: 77 })
+  })
+
+  it('rejects a buffer that is not an index at all', () => {
+    expect(() => readIndexHeader(Buffer.alloc(16))).toThrow(/magic/i)
+    expect(() => readIndexHeader(Buffer.alloc(4))).toThrow()
   })
 })

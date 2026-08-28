@@ -1,6 +1,6 @@
 // tests/pack.spec.ts
 /** PackStore specs: reading, index rebuilding, and retirement. */
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -94,5 +94,65 @@ describe('PackStore reads', () => {
     const late = objectOf('written by a later repack')
     await writePack(directory, 'pack-2', [[late]])
     expect(await store.read(late.hash)).toEqual(late.raw)
+  })
+})
+
+describe('PackStore writes', () => {
+  it('makes the objects readable and the index durable before it resolves', async () => {
+    const directory = await tempDir()
+    const store = new PackStore({ directory })
+    const objects = [objectOf('one'), objectOf('two'), objectOf('three')]
+
+    const result = await store.append(objects, 1024 * 1024)
+    expect(result.entryCount).toBe(3)
+
+    // A fresh store — no warm caches — sees them.
+    const cold = new PackStore({ directory })
+    for (const object of objects) expect(await cold.read(object.hash)).toEqual(object.raw)
+    const idx = await stat(join(directory, `${result.id}.idx`))
+    expect(idx.size).toBeGreaterThan(16)
+  })
+
+  it('cuts blocks at the requested size instead of one block per pack', async () => {
+    const directory = await tempDir()
+    const store = new PackStore({ directory })
+    // Four 4 KB objects with a 6 KB block budget => more than one block.
+    const objects = [0, 1, 2, 3].map(i => objectOf(String(i) + 'y'.repeat(4000)))
+    const { id } = await store.append(objects, 6000)
+
+    const pack = await readFile(join(directory, `${id}.pack`))
+    const { records } = scanPack(pack)
+    expect(new Set(records.map(r => r.blockOffset)).size).toBeGreaterThan(1)
+    for (const object of objects) expect(await store.read(object.hash)).toEqual(object.raw)
+  })
+
+  it('keeps the stored order, which is what the compression ratio depends on', async () => {
+    const directory = await tempDir()
+    const store = new PackStore({ directory })
+    const objects = ['a', 'b', 'c', 'd'].map(objectOf)
+    const { id } = await store.append(objects, 1024 * 1024)
+    expect(await store.entriesOf(id)).toEqual(objects.map(o => o.hash))
+  })
+
+  it('appends to the same pack on a second call', async () => {
+    const directory = await tempDir()
+    const store = new PackStore({ directory })
+    const first = await store.append([objectOf('first')], 1024 * 1024)
+    const second = await store.append([objectOf('second')], 1024 * 1024)
+    expect(second.id).toBe(first.id)
+    expect((await readdir(directory)).filter(n => n.endsWith('.pack'))).toHaveLength(1)
+    expect(await store.read(hashOfContent('first'))).toEqual(Buffer.from('first'))
+    expect(await store.read(hashOfContent('second'))).toEqual(Buffer.from('second'))
+  })
+
+  it('retires a pack so readers skip it, and reaps it afterwards', async () => {
+    const directory = await tempDir()
+    const store = new PackStore({ directory })
+    const { id } = await store.append([objectOf('doomed')], 1024 * 1024)
+
+    await store.retire(id)
+    expect(await store.read(hashOfContent('doomed'))).toBeNull()
+    expect(await store.reapRetired()).toBe(1)
+    expect((await readdir(directory)).filter(n => n.endsWith('.pack'))).toHaveLength(0)
   })
 })

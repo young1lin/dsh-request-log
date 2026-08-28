@@ -12,26 +12,34 @@
  * @module dsh-request-log/host/pack
  */
 
-import { open, readdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
+import { mkdir, open, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import {
   decodeBlock,
   decompressBlock,
+  encodeBlock,
   encodeIndex,
+  encodePackHeader,
   findInIndex,
   indexRecordAt,
+  MAX_BLOCK_ENTRIES,
+  PACK_HEADER_BYTES,
   readIndexHeader,
   scanPack,
   type IndexRecord,
 } from './pack-format'
 
 export const DEFAULT_BLOCK_CACHE_BYTES = 16 * 1024 * 1024
+export const DEFAULT_MAX_PACK_BYTES = 64 * 1024 * 1024
 
 export interface PackStoreConfig {
   directory: string
   blockCacheBytes?: number
+  maxPackBytes?: number
 }
+
+export interface AppendResult { id: string; packedBytes: number; entryCount: number }
 
 export interface PackInfo { id: string; bytes: number; entryCount: number }
 
@@ -192,5 +200,98 @@ export class PackStore {
     for (let i = 0; i < recordCount; i += 1) records.push(indexRecordAt(index, i))
     records.sort((a, b) => a.blockOffset - b.blockOffset || a.rawOffset - b.rawOffset)
     return records.map(record => record.hash)
+  }
+
+  private async ensureDirectory(): Promise<void> {
+    await mkdir(this.config.directory, { recursive: true })
+  }
+
+  /** The pack to append to: the newest one still under the size ceiling. */
+  private async activePack(): Promise<{ id: string; bytes: number }> {
+    const ids = await this.listIds()
+    const newest = ids[ids.length - 1]
+    if (newest !== undefined) {
+      const info = await stat(join(this.config.directory, `${newest}.pack`)).catch(() => null)
+      if (info !== null && info.size < (this.config.maxPackBytes ?? DEFAULT_MAX_PACK_BYTES)) {
+        return { id: newest, bytes: info.size }
+      }
+    }
+    const id = `pack-${Date.now().toString(36)}-${randomUUID().slice(0, 8)}`
+    await writeFile(join(this.config.directory, `${id}.pack`), encodePackHeader(), { flag: 'wx' })
+    this.ids = undefined
+    return { id, bytes: PACK_HEADER_BYTES }
+  }
+
+  async append(objects: readonly { hash: string; raw: Buffer }[], blockBytes: number): Promise<AppendResult> {
+    await this.ensureDirectory()
+    const { id } = await this.activePack()
+    const path = join(this.config.directory, `${id}.pack`)
+
+    const blocks: Buffer[] = []
+    let group: { hash: string; raw: Buffer }[] = []
+    let groupBytes = 0
+    const cut = (): void => {
+      if (group.length === 0) return
+      blocks.push(encodeBlock(group))
+      group = []
+      groupBytes = 0
+    }
+    for (const object of objects) {
+      group.push(object)
+      groupBytes += object.raw.length
+      if (groupBytes >= blockBytes || group.length >= MAX_BLOCK_ENTRIES) cut()
+    }
+    cut()
+
+    // Durability order is the invariant: pack bytes first and fsynced, index
+    // second. A crash between them leaves an index the reader rebuilds; the
+    // reverse would leave an index pointing at bytes that never landed.
+    const handle = await open(path, 'a')
+    try {
+      await handle.writeFile(Buffer.concat(blocks))
+      await handle.sync()
+    } finally {
+      await handle.close()
+    }
+    this.indexes.delete(id)
+    const pack = await readFile(path)
+    const { records } = scanPack(pack)
+    await this.writeIndex(id, encodeIndex(records, pack.length))
+    this.indexes.delete(id)
+    return { id, packedBytes: pack.length, entryCount: records.length }
+  }
+
+  /** Mark a pack unreadable to this and every other process, atomically. */
+  async retire(id: string): Promise<void> {
+    await writeFile(join(this.config.directory, `${id}.retired`), '')
+    this.invalidate()
+  }
+
+  /**
+   * Delete retired packs. Best-effort by design: on Windows a reader may still
+   * hold the handle, and the next sweep will try again.
+   */
+  async reapRetired(): Promise<number> {
+    let names: string[]
+    try {
+      names = await readdir(this.config.directory)
+    } catch {
+      return 0
+    }
+    let reaped = 0
+    for (const name of names) {
+      if (!name.endsWith('.retired')) continue
+      const id = name.slice(0, -'.retired'.length)
+      const removed = await Promise.all([
+        rm(join(this.config.directory, `${id}.pack`), { force: true }).then(() => true, () => false),
+        rm(join(this.config.directory, `${id}.idx`), { force: true }).then(() => true, () => false),
+      ])
+      if (removed.every(Boolean)) {
+        await rm(join(this.config.directory, name), { force: true }).catch(() => {})
+        reaped += 1
+      }
+    }
+    if (reaped > 0) this.invalidate()
+    return reaped
   }
 }

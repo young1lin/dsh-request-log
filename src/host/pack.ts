@@ -26,6 +26,7 @@ import {
   MAX_BLOCK_ENTRIES,
   PACK_HEADER_BYTES,
   readIndexHeader,
+  scanBlocks,
   scanPack,
   type IndexRecord,
 } from './pack-format'
@@ -240,14 +241,36 @@ export class PackStore {
     }
     const id = `pack-${Date.now().toString(36)}-${randomUUID().slice(0, 8)}`
     await writeFile(join(this.config.directory, `${id}.pack`), encodePackHeader(), { flag: 'wx' })
+    await this.syncDirectory()
     this.ids = undefined
     return { id, bytes: PACK_HEADER_BYTES }
   }
 
+  /**
+   * Flush the directory entry itself. Syncing the file promises its CONTENT
+   * survives a crash, not its NAME — and a pack the sweep is about to delete
+   * loose copies for must exist by name afterwards. Not every platform lets a
+   * directory be opened; where it cannot, its metadata journal is the promise.
+   */
+  private async syncDirectory(): Promise<void> {
+    const handle = await open(this.config.directory, 'r').catch(() => null)
+    if (handle === null) return
+    try {
+      await handle.sync()
+    } catch {
+      // Directory fsync unsupported here; nothing else to try.
+    } finally {
+      await handle.close()
+    }
+  }
+
   async append(objects: readonly { hash: string; raw: Buffer }[], blockBytes: number): Promise<AppendResult> {
     await this.ensureDirectory()
-    const { id } = await this.activePack()
+    const { id, bytes: startAt } = await this.activePack()
     const path = join(this.config.directory, `${id}.pack`)
+    // Read before the write, while the index on disk still matches the pack:
+    // afterwards it is stale by construction and loading it would rescan.
+    const prior = startAt === PACK_HEADER_BYTES ? [] : await this.recordsOf(id)
 
     const blocks: Buffer[] = []
     let group: { hash: string; raw: Buffer }[] = []
@@ -268,19 +291,44 @@ export class PackStore {
     // Durability order is the invariant: pack bytes first and fsynced, index
     // second. A crash between them leaves an index the reader rebuilds; the
     // reverse would leave an index pointing at bytes that never landed.
+    const appended = Buffer.concat(blocks)
     const handle = await open(path, 'a')
+    let packBytes: number
     try {
-      await handle.writeFile(Buffer.concat(blocks))
+      await handle.writeFile(appended)
       await handle.sync()
+      packBytes = (await handle.stat()).size
     } finally {
       await handle.close()
     }
+
+    // The prior index plus the blocks just written IS the whole index, as long
+    // as the pack ended up exactly as long as this append implies. When it did
+    // not - an index that would not load, or a file some other writer grew -
+    // the pack itself is the authority and gets read back in full.
+    let records: IndexRecord[] | null = null
+    if (prior !== null && packBytes === startAt + appended.length) {
+      records = [...prior, ...scanBlocks(appended, startAt).records]
+    }
+    if (records === null) {
+      const pack = await readFile(path)
+      records = scanPack(pack).records
+      packBytes = pack.length
+    }
     this.indexes.delete(id)
-    const pack = await readFile(path)
-    const { records } = scanPack(pack)
-    await this.writeIndex(id, encodeIndex(records, pack.length))
+    await this.writeIndex(id, encodeIndex(records, packBytes))
     this.indexes.delete(id)
-    return { id, packedBytes: pack.length, entryCount: records.length }
+    return { id, packedBytes: packBytes, entryCount: records.length }
+  }
+
+  /** Every record an index holds, decoded — the base a fresh append extends. */
+  private async recordsOf(id: string): Promise<IndexRecord[] | null> {
+    const index = await this.indexOf(id)
+    if (index === null) return null
+    const { recordCount } = readIndexHeader(index)
+    const records: IndexRecord[] = []
+    for (let i = 0; i < recordCount; i += 1) records.push(indexRecordAt(index, i))
+    return records
   }
 
   /** Bar a pack from receiving appends (it is being replaced). */

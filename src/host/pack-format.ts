@@ -203,8 +203,18 @@ export function readPackHeader(buffer: Buffer): void {
  */
 export function scanPack(buffer: Buffer): { records: IndexRecord[]; scannedBytes: number } {
   readPackHeader(buffer)
+  const { records, scannedBytes } = scanBlocks(buffer.subarray(PACK_HEADER_BYTES), PACK_HEADER_BYTES)
+  return { records, scannedBytes: PACK_HEADER_BYTES + scannedBytes }
+}
+
+/**
+ * The same walk over a bare run of blocks that will live at `baseOffset` in
+ * a pack. An append knows exactly where its own blocks landed, so it can
+ * index them without reading back the pack they were added to.
+ */
+export function scanBlocks(buffer: Buffer, baseOffset: number): { records: IndexRecord[]; scannedBytes: number } {
   const records: IndexRecord[] = []
-  let at = PACK_HEADER_BYTES
+  let at = 0
   while (at < buffer.length) {
     let block: DecodedBlock
     try {
@@ -215,7 +225,7 @@ export function scanPack(buffer: Buffer): { records: IndexRecord[]; scannedBytes
     for (const entry of block.entries) {
       records.push({
         hash: entry.hash,
-        blockOffset: at,
+        blockOffset: baseOffset + at,
         blockLength: block.totalLength,
         rawOffset: entry.rawOffset,
         rawLength: entry.rawLength,

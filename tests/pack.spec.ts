@@ -1,6 +1,6 @@
 // tests/pack.spec.ts
 /** PackStore specs: reading, index rebuilding, and retirement. */
-import { mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises'
+import { mkdtemp, open, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises'
 import { randomBytes } from 'node:crypto'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -157,6 +157,40 @@ describe('PackStore writes', () => {
     const { records } = scanPack(pack)
     expect(new Set(records.map(r => r.blockOffset)).size).toBeGreaterThan(1)
     for (const object of objects) expect(await store.read(object.hash)).toEqual(object.raw)
+  })
+
+  it('indexes both appends when a pack receives more than one', async () => {
+    const directory = await tempDir()
+    const store = new PackStore({ directory })
+    const first = [objectOf('first-a'), objectOf('first-b')]
+    const second = [objectOf('second-a'), objectOf('second-b')]
+    const one = await store.append(first, 1024 * 1024)
+    const two = await store.append(second, 1024 * 1024)
+    expect(two.id).toBe(one.id)
+    expect(two.entryCount).toBe(4)
+
+    const cold = new PackStore({ directory })
+    for (const object of [...first, ...second]) expect(await cold.read(object.hash)).toEqual(object.raw)
+  })
+
+  it('indexes blocks a crashed append left behind, alongside its own', async () => {
+    const directory = await tempDir()
+    const store = new PackStore({ directory })
+    const mine = objectOf('written through the store')
+    const { id } = await store.append([mine], 1024 * 1024)
+    // A block that landed in the pack without its index — what a crash between
+    // the fsync and the index rewrite leaves. The next append must not drop it.
+    const orphan = objectOf('landed before the crash')
+    const handle = await open(join(directory, `${id}.pack`), 'a')
+    await handle.writeFile(encodeBlock([orphan]))
+    await handle.close()
+
+    const later = objectOf('after the crash')
+    const result = await store.append([later], 1024 * 1024)
+    expect(result.entryCount).toBe(3)
+
+    const cold = new PackStore({ directory })
+    for (const object of [mine, orphan, later]) expect(await cold.read(object.hash)).toEqual(object.raw)
   })
 
   it('keeps the stored order, which is what the compression ratio depends on', async () => {

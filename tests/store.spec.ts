@@ -1470,6 +1470,37 @@ describe('repack', () => {
     expect((await reopened.get('sess-1', 'second'))?.request.system).toBe(shared)
   })
 
+  it('rewrites in bounded chunks without dropping a survivor', async () => {
+    const directory = await tempDir()
+    const store = new CallStore({
+      ...resolveStoreConfig({ directory }),
+      repackMinBytes: 1,
+      // One object per flush: a repack must never need the whole pack in RAM.
+      repackChunkBytes: 1,
+      maxCallsPerSession: 1,
+    })
+    const shared = 'a system prompt both calls resend'
+    await store.append(recordOf({ id: 'first', request: { system: shared, messages: [{ role: 'user', content: [{ type: 'text', text: 'a'.repeat(4000) }] }] } }))
+    const past = new Date(Date.now() - 3 * 60 * 60 * 1000)
+    for (const row of await store.objectCensusForTest()) {
+      await utimes(join(directory, 'objects', row.hash.slice(0, 2), `${row.hash}.drl`), past, past)
+    }
+    await store.sweep()
+    await store.append(recordOf({
+      id: 'second',
+      request: { system: shared, messages: [{ role: 'user', content: [{ type: 'text', text: 'second body' }] }] },
+      response: { blocks: [{ type: 'text', text: 'second response' }], usage: { inputTokens: 3, outputTokens: 4 }, finish: { kind: 'stop' }, chunkCount: 2 },
+    }))
+    await store.sweep()
+    await store.sweep()
+
+    expect(store.lastSweepStatus?.repackedPacks).toBeGreaterThan(0)
+    const reopened = new CallStore(resolveStoreConfig({ directory }))
+    const second = await reopened.get('sess-1', 'second')
+    expect(second?.request.system).toBe(shared)
+    expect(second?.request.messages?.[0]?.content).toEqual([{ type: 'text', text: 'second body' }])
+  })
+
   it('keeps a healthy pack untouched', async () => {
     const directory = await tempDir()
     const store = new CallStore({ ...resolveStoreConfig({ directory }), repackMinBytes: 1 })

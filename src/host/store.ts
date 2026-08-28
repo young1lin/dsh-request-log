@@ -92,6 +92,8 @@ export interface StoreConfig {
   packBudgetBytes?: number
   /** Below this share of still-reachable entries, a pack is worth rewriting. */
   repackLiveRatio?: number
+  /** Raw bytes one repack holds in memory before flushing them to the pack. */
+  repackChunkBytes?: number
   /** Rewriting anything smaller costs more IO than the space it reclaims. */
   repackMinBytes?: number
 }
@@ -109,6 +111,8 @@ export const DEFAULT_PACK_BUDGET_BYTES = 64 * 1024 * 1024
 export const DEFAULT_REPACK_LIVE_RATIO = 0.5
 /** Rewriting anything smaller costs more IO than the space it reclaims. */
 export const DEFAULT_REPACK_MIN_BYTES = 8 * 1024 * 1024
+/** Raw bytes a repack holds at once: a pack's survivors can be far larger. */
+export const DEFAULT_REPACK_CHUNK_BYTES = 8 * 1024 * 1024
 
 /** Win32 reserved device names: the OS ignores the extension, so "NUL.jsonl" would target the device. */
 const RESERVED_DEVICE_NAME = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\.|$)/i
@@ -1473,17 +1477,43 @@ export class CallStore {
       const live = hashes.filter(hash => reachable.has(hash))
       if (live.length / hashes.length >= ratio) continue
 
-      const objects: { hash: string; raw: Buffer }[] = []
+      // Presence first, bytes later. A 64 MiB pack decompresses to several
+      // hundred MB, so holding every survivor at once to learn whether they
+      // are all there would size this phase by the pack rather than by a
+      // budget - and the answer costs only an index lookup each.
+      let allPresent = true
       for (const hash of live) {
-        const raw = await this.blobs.get(hash).catch(() => null)
-        if (raw !== null) objects.push({ hash, raw })
+        if (!(await this.blobs.has(hash))) { allPresent = false; break }
       }
-      // Could not read them all: leave the pack exactly as it is.
-      if (objects.length !== live.length) continue
+      // Could not account for them all: leave the pack exactly as it is.
+      if (!allPresent) continue
       // Seal FIRST: without it the survivors could be appended to the very
       // pack about to be retired, and the retire would take them with it.
       this.packs.seal(info.id)
-      if (objects.length > 0) await this.packs.append(objects, this.config.packBlockBytes ?? DEFAULT_PACK_BLOCK_BYTES)
+
+      const blockBytes = this.config.packBlockBytes ?? DEFAULT_PACK_BLOCK_BYTES
+      const chunkBytes = this.config.repackChunkBytes ?? DEFAULT_REPACK_CHUNK_BYTES
+      let chunk: { hash: string; raw: Buffer }[] = []
+      let held = 0
+      let unreadable = false
+      const flush = async (): Promise<void> => {
+        if (chunk.length === 0) return
+        await this.packs.append(chunk, blockBytes)
+        chunk = []
+        held = 0
+      }
+      for (const hash of live) {
+        const raw = await this.blobs.get(hash).catch(() => null)
+        if (raw === null) { unreadable = true; break }
+        chunk.push({ hash, raw })
+        held += raw.length
+        if (held >= chunkBytes) await flush()
+      }
+      // A survivor that vanished between the check and the read: the copies
+      // already appended are duplicates, which the next cycle reclaims. The
+      // old pack keeps serving, which is the half that must not be guessed at.
+      if (unreadable) continue
+      await flush()
       await this.packs.retire(info.id)
       status.repackedPacks += 1
     }

@@ -33,6 +33,8 @@ import {
 
 export const DEFAULT_BLOCK_CACHE_BYTES = 16 * 1024 * 1024
 export const DEFAULT_MAX_PACK_BYTES = 64 * 1024 * 1024
+/** Staging debris younger than this may still be someone's live write. */
+export const DEFAULT_PACK_DEBRIS_GRACE_MS = 60 * 60 * 1000
 
 export interface PackStoreConfig {
   directory: string
@@ -343,10 +345,15 @@ export class PackStore {
   }
 
   /**
-   * Delete retired packs. Best-effort by design: on Windows a reader may still
-   * hold the handle, and the next sweep will try again.
+   * Delete retired packs, and the staging debris a crash between an index's
+   * write and its rename leaves behind. Best-effort by design: on Windows a
+   * reader may still hold the handle, and the next sweep will try again.
+   *
+   * The loose GC only descends into the object store's 2-hex buckets, which
+   * is what keeps it away from this directory — so nothing but this reaps
+   * here, and debris would otherwise accumulate for the life of the store.
    */
-  async reapRetired(): Promise<number> {
+  async reapRetired(now: number = Date.now(), graceMs: number = DEFAULT_PACK_DEBRIS_GRACE_MS): Promise<number> {
     let names: string[]
     try {
       names = await readdir(this.config.directory)
@@ -355,6 +362,14 @@ export class PackStore {
     }
     let reaped = 0
     for (const name of names) {
+      if (name.startsWith('tmp-')) {
+        // Younger than the floor: it may be an index being written right now.
+        const info = await stat(join(this.config.directory, name)).catch(() => null)
+        if (info !== null && now - info.mtimeMs > graceMs) {
+          await rm(join(this.config.directory, name), { force: true }).catch(() => {})
+        }
+        continue
+      }
       if (!name.endsWith('.retired')) continue
       const id = name.slice(0, -'.retired'.length)
       const removed = await Promise.all([

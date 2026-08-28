@@ -1295,7 +1295,7 @@ export class CallStore {
             }
             status.phase = 'repack'
             try {
-              await this.repackDeadPacks(reachable, status)
+              await this.repackDeadPacks(reachable, now, status)
             } catch (error) {
               // A failed repack leaves the old pack serving every read.
               swallowed('repack', error)
@@ -1307,7 +1307,7 @@ export class CallStore {
           // rollback door stays open even on a store whose mark phase fails.
           status.phase = 'unpack'
           try {
-            await this.unpackObjects(status)
+            await this.unpackObjects(now, status)
           } catch (error) {
             // A failed unpack leaves the packs serving every read.
             swallowed('unpack', error)
@@ -1468,7 +1468,7 @@ export class CallStore {
    * rests on, and a repack that reordered would inflate the store it was
    * called to shrink.
    */
-  private async repackDeadPacks(reachable: ReadonlySet<string>, status: SweepStatus): Promise<void> {
+  private async repackDeadPacks(reachable: ReadonlySet<string>, now: number, status: SweepStatus): Promise<void> {
     const ratio = this.config.repackLiveRatio ?? DEFAULT_REPACK_LIVE_RATIO
     const minBytes = this.config.repackMinBytes ?? DEFAULT_REPACK_MIN_BYTES
     for (const info of await this.packs.list()) {
@@ -1517,7 +1517,7 @@ export class CallStore {
       await this.packs.retire(info.id)
       status.repackedPacks += 1
     }
-    await this.packs.reapRetired()
+    await this.packs.reapRetired(now)
   }
 
   /**
@@ -1526,7 +1526,7 @@ export class CallStore {
    * build that would see every packed record as unavailable, so this exists
    * before anyone needs it, not after.
    */
-  private async unpackObjects(status: SweepStatus): Promise<void> {
+  private async unpackObjects(now: number, status: SweepStatus): Promise<void> {
     const budget = this.config.packBudgetBytes ?? DEFAULT_PACK_BUDGET_BYTES
     let spent = 0
     for (const info of await this.packs.list()) {
@@ -1547,7 +1547,7 @@ export class CallStore {
       }
       if (allLoose) await this.packs.retire(info.id)
     }
-    await this.packs.reapRetired()
+    await this.packs.reapRetired(now)
   }
 
   /**

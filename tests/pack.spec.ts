@@ -1,6 +1,6 @@
 // tests/pack.spec.ts
 /** PackStore specs: reading, index rebuilding, and retirement. */
-import { mkdtemp, open, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises'
+import { mkdtemp, open, readFile, readdir, rm, stat, utimes, writeFile } from 'node:fs/promises'
 import { randomBytes } from 'node:crypto'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -221,5 +221,25 @@ describe('PackStore writes', () => {
     expect(await store.read(hashOfContent('doomed'))).toBeNull()
     expect(await store.reapRetired()).toBe(1)
     expect((await readdir(directory)).filter(n => n.endsWith('.pack'))).toHaveLength(0)
+  })
+
+  it('reaps the staging debris a crash leaves in the pack directory', async () => {
+    const directory = await tempDir()
+    const store = new PackStore({ directory })
+    await store.append([objectOf('kept')], 1024 * 1024)
+    // A temp index a crash left between its write and its rename. The loose
+    // GC only descends into 2-hex buckets, so nothing else looks in here.
+    const stale = join(directory, 'tmp-from-a-crash')
+    await writeFile(stale, 'half an index')
+    const past = new Date(Date.now() - 3 * 60 * 60 * 1000)
+    await utimes(stale, past, past)
+    const fresh = join(directory, 'tmp-being-written-now')
+    await writeFile(fresh, 'in flight')
+
+    await store.reapRetired()
+
+    await expect(stat(stale)).rejects.toThrow()
+    // A temp file younger than the grace floor may be another writer's.
+    expect((await stat(fresh)).size).toBeGreaterThan(0)
   })
 })

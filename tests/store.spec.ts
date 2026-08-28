@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { deflateRawSync, inflateRawSync } from 'node:zlib'
 import { afterEach, describe, expect, it } from 'vitest'
-import { assignSteps, CallStore, fileNameOf } from '../src/host/store.ts'
+import { assignSteps, CallStore, fileNameOf, packingOrder } from '../src/host/store.ts'
 import { BlobStore, CODEC_DEFLATE_RAW, decodeFrame, encodeFrame, hashOfContent } from '../src/host/blob.ts'
 import { TREE_SCHEMA, encodeTree, resolveTree } from '../src/host/tree.ts'
 import { resolveStoreConfig } from '../src/host/index.ts'
@@ -1260,5 +1260,33 @@ describe('permanent retention', () => {
     await utimes(join(directory, 'old-sess.jsonl'), stale, stale)
 
     expect((await store.sweep()).deletedFiles).toBe(1)
+  })
+})
+
+describe('packingOrder', () => {
+  it('orders objects by the call that first referenced them', () => {
+    const order = packingOrder([
+      { at: 200, hashes: ['c', 'd'] },
+      { at: 100, hashes: ['a', 'b'] },
+      { at: 300, hashes: ['b', 'e'] },
+    ])
+    // Sorted by time first: a,b (t=100), then c,d (t=200), then e (t=300).
+    expect(order).toEqual(['a', 'b', 'c', 'd', 'e'])
+  })
+
+  it('keeps a re-referenced object at its FIRST position, not its last', () => {
+    // Retries and unchanged history re-name the same pieces every call; moving
+    // them would scatter a conversation across blocks and cost compression.
+    expect(packingOrder([
+      { at: 1, hashes: ['x', 'y'] },
+      { at: 2, hashes: ['x', 'z'] },
+    ])).toEqual(['x', 'y', 'z'])
+  })
+
+  it('is stable for calls sharing a timestamp', () => {
+    expect(packingOrder([
+      { at: 5, hashes: ['p'] },
+      { at: 5, hashes: ['q'] },
+    ])).toEqual(['p', 'q'])
   })
 })

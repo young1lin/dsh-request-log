@@ -19,6 +19,7 @@ import {
   hashOfContent,
   codecFor,
 } from '../src/host/blob.ts'
+import { PackStore } from '../src/host/pack.ts'
 
 const dirs: string[] = []
 
@@ -334,5 +335,67 @@ describe('BlobStore', () => {
     expect(codecFor(edge.length, maxChunkBytes)).toBe(CODEC_DEFLATE_RAW)
     await store.put(edgeHash, edge)
     expect((await store.get(edgeHash)).equals(edge)).toBe(true)
+  })
+})
+
+describe('loose and packed objects together', () => {
+  it('reads an object that only exists in a pack', async () => {
+    const directory = await tempDir()
+    const packs = new PackStore({ directory: join(directory, 'packs') })
+    const store = new BlobStore({ directory, packs })
+    const payload = '{"packed":true}'
+    const hash = hashOfContent(payload)
+    await packs.append([{ hash, raw: Buffer.from(payload) }], 1024 * 1024)
+
+    expect(await store.has(hash)).toBe(true)
+    expect((await store.get(hash)).toString('utf8')).toBe(payload)
+  })
+
+  it('does not re-materialize a packed object as a loose file', async () => {
+    const directory = await tempDir()
+    const packs = new PackStore({ directory: join(directory, 'packs') })
+    const store = new BlobStore({ directory, packs })
+    const payload = '{"already":"packed"}'
+    const hash = hashOfContent(payload)
+    await packs.append([{ hash, raw: Buffer.from(payload) }], 1024 * 1024)
+
+    const result = await store.put(hash, payload)
+    expect(result.created).toBe(false)
+    // Nothing new on disk: the bucket for this hash must not exist.
+    await expect(stat(join(directory, hash.slice(0, 2), `${hash}.drl`))).rejects.toThrow()
+  })
+
+  it('prefers the loose copy while both exist', async () => {
+    const directory = await tempDir()
+    const packs = new PackStore({ directory: join(directory, 'packs') })
+    const store = new BlobStore({ directory, packs })
+    const payload = 'both places'
+    const hash = hashOfContent(payload)
+    await store.put(hash, payload)
+    await packs.append([{ hash, raw: Buffer.from(payload) }], 1024 * 1024)
+    expect((await store.get(hash)).toString('utf8')).toBe(payload)
+  })
+
+  it('refuses packed bytes whose hash does not match, without touching the pack', async () => {
+    const directory = await tempDir()
+    const packsDir = join(directory, 'packs')
+    const packs = new PackStore({ directory: packsDir })
+    const store = new BlobStore({ directory, packs })
+    const lie = hashOfContent('the truth')
+    await packs.append([{ hash: lie, raw: Buffer.from('a different body') }], 1024 * 1024)
+
+    await expect(store.get(lie)).rejects.toThrow(/hash mismatch/i)
+    // The pack survives: one bad object degrades one record, not the store.
+    expect((await readdir(packsDir)).filter(n => n.endsWith('.pack'))).toHaveLength(1)
+  })
+
+  it('censuses loose objects with the size and mtime the packer needs', async () => {
+    const directory = await tempDir()
+    const store = new BlobStore({ directory })
+    await store.put(hashOfContent('one'), 'one')
+    await store.put(hashOfContent('two'), 'two')
+    const census = await store.looseCensus()
+    expect(census).toHaveLength(2)
+    expect(census.every(row => row.size > 0 && row.mtimeMs > 0)).toBe(true)
   })
 })

@@ -10,7 +10,9 @@
  * mark-sweep over the reachable-hash set extracted from live session files,
  * with an mtime grace floor so appends racing a sweep never lose data - a
  * deduplicated re-reference touches that mtime back over the floor, since it
- * writes nothing that would refresh it on its own.
+ * writes nothing that would refresh it on its own. With a pack store
+ * attached, every loose miss falls through to it, and a packed object is
+ * never re-materialized loose.
  *
  * @module dsh-request-log/host/blob
  */
@@ -20,6 +22,7 @@ import { mkdir, readdir, readFile, rename, rm, stat, utimes, writeFile } from 'n
 import { join } from 'node:path'
 import { promisify } from 'node:util'
 import { deflateRaw as deflateRawCb, inflateRaw as inflateRawCb } from 'node:zlib'
+import type { PackStore } from './pack'
 
 /**
  * Compression runs off the event loop: the host process streams model
@@ -60,6 +63,8 @@ export interface BlobStoreConfig {
   maxChunkBytes?: number
   deflateLevel?: number
   touchAfterMs?: number
+  /** Packs consulted after every loose miss; a packed object is never re-loosed. */
+  packs?: PackStore
 }
 
 /**
@@ -204,7 +209,8 @@ export class BlobStore {
   }
 
   async has(hash: string): Promise<boolean> {
-    return (await this.infoOf(hash)) !== null
+    if ((await this.infoOf(hash)) !== null) return true
+    return (await this.config.packs?.has(hash)) === true
   }
 
   /**
@@ -255,6 +261,9 @@ export class BlobStore {
       await this.touchIfStale(hash, existing.mtimeMs)
       return { z: existing.z, created: false }
     }
+    // A packed object is already durable; re-writing it loose would undo the
+    // sweep's work and bill bytes the store did not materialize.
+    if (await this.config.packs?.has(hash)) return { z: 0, created: false }
     const codec = codecFor(buf.length, this.maxChunkBytes)
     let payload: Buffer
     if (codec === CODEC_IDENTITY) {
@@ -287,9 +296,13 @@ export class BlobStore {
 
   /**
    * Read one object, verify its frame magic + content hash, inflate, and
-   * serve from the LRU next time. Any corruption (magic, codec, hash
-   * mismatch, oversized declared payload) throws - wrong data is impossible;
-   * missing data degrades at the CALLER (fail-soft slots), never here.
+   * serve from the LRU next time. A loose miss falls through to the pack
+   * store, whose bytes are hash-verified the same way - but a pack hash
+   * mismatch throws WITHOUT deleting anything, because packs are shared and
+   * one bad object must degrade one record, not the pack. Any corruption
+   * (magic, codec, hash mismatch, oversized declared payload) throws - wrong
+   * data is impossible; missing data degrades at the CALLER (fail-soft
+   * slots), never here.
    *
    * Corruption also DELETES the object: put() short-circuits on a stat, so a
    * damaged file the right length would otherwise freeze every future append
@@ -298,7 +311,22 @@ export class BlobStore {
   async get(hash: string): Promise<Buffer> {
     const cached = this.lru.get(hash)
     if (cached !== undefined) return cached
-    const frame = await readFile(this.pathOf(hash))
+    let frame: Buffer
+    try {
+      frame = await readFile(this.pathOf(hash))
+    } catch (error) {
+      // An absent loose object is a miss, not corruption: ask the packs
+      // before re-throwing exactly what a pack-less store would have thrown.
+      if ((error as NodeJS.ErrnoException | null)?.code === 'ENOENT') {
+        const packed = await this.config.packs?.read(hash) ?? null
+        if (packed !== null) {
+          if (hashOfContent(packed) !== hash) throw new Error(`object content hash mismatch for ${hash}`)
+          this.lru.put(hash, packed)
+          return packed
+        }
+      }
+      throw error
+    }
     let raw: Buffer
     try {
       const { codec, payload } = decodeFrame(frame)
@@ -452,5 +480,37 @@ export class BlobStore {
       }
     }
     return { objects, bytes }
+  }
+
+  /** Every loose object with the size and mtime the packer selects on. */
+  async looseCensus(): Promise<{ hash: string; size: number; mtimeMs: number }[]> {
+    const rows: { hash: string; size: number; mtimeMs: number }[] = []
+    let rootEntries: string[]
+    try {
+      rootEntries = await readdir(this.config.directory)
+    } catch {
+      return rows
+    }
+    for (const name of rootEntries) {
+      if (!/^[0-9a-f]{2}$/.test(name)) continue
+      let files: string[]
+      try {
+        files = await readdir(join(this.config.directory, name))
+      } catch {
+        continue
+      }
+      for (const file of files) {
+        if (!file.endsWith('.drl')) continue
+        const info = await stat(join(this.config.directory, name, file)).catch(() => null)
+        if (info === null) continue
+        rows.push({ hash: file.slice(0, -'.drl'.length), size: info.size, mtimeMs: info.mtimeMs })
+      }
+    }
+    return rows
+  }
+
+  /** Drop the loose copy of an object that now lives in a pack. */
+  async dropLoose(hash: string): Promise<boolean> {
+    return rm(this.pathOf(hash), { force: true }).then(() => true, () => false)
   }
 }

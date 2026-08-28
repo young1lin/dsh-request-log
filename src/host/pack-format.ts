@@ -170,3 +170,47 @@ export function findInIndex(buffer: Buffer, hash: string): IndexRecord | null {
   }
   return null
 }
+
+export function encodePackHeader(): Buffer {
+  const header = Buffer.alloc(PACK_HEADER_BYTES)
+  PACK_MAGIC.copy(header, 0)
+  header.writeUInt8(PACK_VERSION, 4)
+  return header
+}
+
+export function readPackHeader(buffer: Buffer): void {
+  if (buffer.length < PACK_HEADER_BYTES) throw new Error('pack shorter than its header')
+  if (!buffer.subarray(0, 4).equals(PACK_MAGIC)) throw new Error('pack magic mismatch')
+  if (buffer.readUInt8(4) !== PACK_VERSION) throw new Error(`unknown pack version ${buffer.readUInt8(4)}`)
+}
+
+/**
+ * Rebuild what an index would hold by walking the blocks themselves. A torn
+ * tail — the half-written block a crash left behind — ends the walk without
+ * discarding the blocks before it: those objects are intact and may already
+ * have had their loose copies deleted.
+ */
+export function scanPack(buffer: Buffer): { records: IndexRecord[]; scannedBytes: number } {
+  readPackHeader(buffer)
+  const records: IndexRecord[] = []
+  let at = PACK_HEADER_BYTES
+  while (at < buffer.length) {
+    let block: DecodedBlock
+    try {
+      block = decodeBlock(buffer, at)
+    } catch {
+      break
+    }
+    for (const entry of block.entries) {
+      records.push({
+        hash: entry.hash,
+        blockOffset: at,
+        blockLength: block.totalLength,
+        rawOffset: entry.rawOffset,
+        rawLength: entry.rawLength,
+      })
+    }
+    at += block.totalLength
+  }
+  return { records, scannedBytes: at }
+}

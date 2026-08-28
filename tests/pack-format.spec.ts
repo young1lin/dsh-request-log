@@ -7,9 +7,12 @@ import {
   decompressBlock,
   encodeBlock,
   encodeIndex,
+  encodePackHeader,
   findInIndex,
   indexRecordAt,
+  readPackHeader,
   readIndexHeader,
+  scanPack,
   type IndexRecord,
   zstdAvailable,
 } from '../src/host/pack-format.ts'
@@ -87,5 +90,43 @@ describe('index codec', () => {
   it('rejects a buffer that is not an index at all', () => {
     expect(() => readIndexHeader(Buffer.alloc(16))).toThrow(/magic/i)
     expect(() => readIndexHeader(Buffer.alloc(4))).toThrow()
+  })
+})
+
+describe('pack scan', () => {
+  const packOf = (...groups: { hash: string; raw: Buffer }[][]) =>
+    Buffer.concat([encodePackHeader(), ...groups.map(group => encodeBlock(group))])
+
+  it('recovers every entry with the offsets a reader needs', () => {
+    const a = objectOf('alpha')
+    const b = objectOf('beta')
+    const c = objectOf('gamma')
+    const pack = packOf([a, b], [c])
+    const { records, scannedBytes } = scanPack(pack)
+
+    expect(scannedBytes).toBe(pack.length)
+    expect(records.map(r => r.hash).sort()).toEqual([a.hash, b.hash, c.hash].sort())
+    const record = records.find(r => r.hash === c.hash)!
+    const block = decodeBlock(pack, record.blockOffset)
+    const raw = decompressBlock(block)
+    expect(raw.subarray(record.rawOffset, record.rawOffset + record.rawLength)).toEqual(c.raw)
+  })
+
+  it('keeps the intact prefix when the tail was torn by a crash', () => {
+    const a = objectOf('kept')
+    const b = objectOf('lost')
+    const pack = packOf([a], [b])
+    const torn = pack.subarray(0, pack.length - 5)
+
+    const { records, scannedBytes } = scanPack(torn)
+    // The first block survives; the half-written one is simply not there.
+    expect(records.map(r => r.hash)).toEqual([a.hash])
+    expect(scannedBytes).toBeLessThan(torn.length)
+    expect(scannedBytes).toBeGreaterThan(0)
+  })
+
+  it('refuses a file that is not a pack', () => {
+    expect(() => readPackHeader(Buffer.from('NOPE............', 'ascii'))).toThrow(/magic/i)
+    expect(() => scanPack(Buffer.alloc(4))).toThrow()
   })
 })

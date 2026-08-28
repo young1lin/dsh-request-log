@@ -600,3 +600,155 @@ One reported finding was not a defect: `migrationBudgetBytes` lives on the inter
 `StoreConfig`, not on the plugin's `Config` schema, and is not exported from the package
 entry — no user-reachable path sets it.
 
+## 11. v4: the object pack store
+
+Shipped from docs/superpowers/plans/2026-08-28-object-pack-store.md. This section adds a
+second home for §3's objects — solid-block pack files beside the loose store — without
+changing the write path or any crash guarantee: `put` still writes loose objects, and a
+pack only ever receives objects the sweep has already verified are reachable and cold.
+
+Two invariants govern everything below, and outrank every optimization:
+
+1. **Incomplete knowledge ⇒ no deletion.** The reachable set is built by reading every
+   session file; if ANY error occurred while building it, the cycle skips the object GC,
+   the pack phase, and the repack phase (`markComplete: false` on `/health`). Partial
+   knowledge marks live data as garbage.
+2. **Durability before deletion.** A loose object is unlinked only after both its pack
+   block and an index naming it are durable. An old pack is retired only after the
+   replacement pack and its index are durable. Duplicated data is free to fix on the next
+   cycle; deleted data is not.
+
+Why packs exist, measured on a real 3-day store (2,570 calls, 11,279 objects, 36.64 MB of
+raw content): NTFS allocation is a step function — a file ≤ ~700 B lives resident in the
+MFT, a file ≥ ~900 B costs a full 4 KiB cluster plus its ~520 B record, and 4,074 objects
+in the 700 B–4 KiB band held 6.14 MB but occupied 17.94 MB. 97 % of objects fit in one
+cluster whatever their size, so compressing harder cannot fix it; only fewer files can.
+Loose, that store's 15.34 MB of deflated content occupied 30.86 MB. And object order
+decides 36 % of the compression ratio: the same objects in 1 MiB blocks pack to 6.20 MB
+in chronological order versus 9.72 MB in hash order, because consecutive calls re-send
+nearly the same conversation — so packing and repacking MUST preserve chronological order.
+
+### 11.1 Layout
+
+    <store>/objects/
+      <xx>/<sha256>.drl          loose objects — unchanged, still the only write path
+      packs/
+        pack-<epochMs>-<rand>.pack    immutable; append-only while active
+        pack-<epochMs>-<rand>.idx     sorted index, rebuildable from the .pack
+        pack-<epochMs>-<rand>.retired marker: readers skip it, the sweep deletes it
+
+`objects/packs/` is invisible to the loose GC and census: both filter root entries with
+`/^[0-9a-f]{2}$/`, which `packs` fails.
+
+### 11.2 Pack file format
+
+    header (16 bytes)
+      0..3    "DRP1"
+      4       version = 1
+      5..15   reserved, zero
+
+    then a sequence of blocks, each:
+      u32be   payloadLength
+      u8      codec            1 = deflateRaw (level 9), 2 = zstd (level 12)
+      u16be   entryCount       (1..4096)
+      entryCount × 40 bytes:
+        32    hash, raw bytes (the sha256, not hex)
+        u32be rawOffset        offset of this object inside the DECOMPRESSED block
+        u32be rawLength
+      payloadLength bytes      the compressed concatenation of the objects, in table order
+
+Blocks are self-describing: the entry table sits uncompressed in the block header, which
+is exactly what makes an index rebuildable from the pack alone. The block codec is chosen
+per build — zstd 12 when the Node runtime exposes `zstdCompressSync`, deflateRaw 9
+otherwise — and is independent of the loose store's per-object deflate.
+
+### 11.3 Index file format
+
+    header (16 bytes)
+      0..3    "DRI1"
+      4       version = 1
+      5..7    reserved, zero
+      8..11   u32be recordCount
+      12..15  u32be packBytes    size of the .pack when this index was written
+
+    then recordCount × 48 bytes, sorted ascending by hash:
+      32      hash, raw bytes
+      u32be   blockOffset        offset of the block header in the .pack
+      u32be   blockLength        total block length including its header
+      u32be   rawOffset
+      u32be   rawLength
+
+The index is never deserialized into objects: it is held as a `Buffer` and searched with a
+binary search over 48-byte records — a 128k-object pack costs 6 MB of RAM, not 128k JS
+objects. `packBytes` detects an index that predates a crash-interrupted append: if the
+`.pack` is longer than `packBytes`, the tail blocks are missing from the index and the
+index is rebuilt from the pack.
+
+### 11.4 Read path
+
+`BlobStore.get`, in order: LRU hit → loose file (today's path unchanged) → `PackStore.read`
+(binary-search each loaded index, read the block, decompress — the block LRU is bounded at
+16 MB — slice `[rawOffset, rawOffset+rawLength)`, verify the content hash, cache) → a miss
+invalidates the pack listing once (a repack may have landed a new pack since it was
+cached) and retries before throwing. A stale cached index is safe: it points into a pack
+that still exists until retirement completes, and immutable packs return correct bytes
+forever.
+
+### 11.5 Write path
+
+Unchanged. `put` still writes loose objects, so every atomicity guarantee of the append
+chain survives. `put` gains one lookup: a hash already in a pack returns `{ z: 0, created:
+false }` without writing and without `utimes` — a packed object has no mtime to refresh
+and is not GC'd by mtime. `putLoose` is the one door around that check, used only by
+unpacking: it verifies the content hash before writing (its bytes come straight out of a
+pack) and short-circuits when a loose copy already exists, so a budget-interrupted unpack
+resumes without recounting.
+
+### 11.6 Packing (sweep phase, after GC)
+
+Candidates are loose objects that are reachable and older than the GC grace floor — the
+same window that protects an object whose envelope line has not landed yet. They are
+ordered by first appearance in the chronological envelope scan the sweep already performs
+(`packingOrder`); anything unreferenced goes last, by hash. Blocks fill to 1 MiB raw or
+4096 entries; the active pack is appended to until it would exceed 64 MiB; at most 64 MiB
+of raw content moves per cycle (`packBudgetBytes`, always at least one object so a cycle
+makes progress however tight the budget). Then, in this exact order: fsync the pack →
+rewrite the index → unlink the loose copies (invariant 2). The whole phase — like the GC
+and the repack — runs only when the mark completed (invariant 1).
+
+### 11.7 Repack (sweep phase, after packing)
+
+Packs are immutable, so space inside one is reclaimed by rewriting: a pack whose
+reachable entries fall below half (`repackLiveRatio`) and which holds at least 8 MiB
+(`repackMinBytes`) is read back in STORED order — order is what the compression ratio
+rests on, and a repack that reordered would inflate the store it was called to shrink —
+and its live objects are appended into a fresh pack (an all-dead pack needs no
+replacement, only retirement). A pack whose survivors cannot all be read back is left
+exactly as it is. The old pack is sealed as an append target first (otherwise the
+survivors could land in the very pack about to be retired), then marked `.retired`;
+readers skip retired packs, and deleting their files is best-effort, retried on later
+sweeps — on Windows a reader may still hold the handle.
+
+Reachability lags a trim by one cycle — the mark reads each file BEFORE that cycle's
+trims — so the objects of a call the cap has just trimmed stay reachable until the next
+sweep, and a pack emptied by a trim is rewritten by a LATER sweep, never the one that
+did the trimming.
+
+### 11.8 Unpacking — the rollback door
+
+`pack: 'off'` must not merely stop packing; it must undo it, or the format is a one-way
+door for anyone downgrading to a build that cannot read packs. With packing off, each
+sweep moves up to `packBudgetBytes` of packed objects back to loose (via `putLoose`) and
+retires a pack only once every object it holds is loose again. The unpack phase runs
+ungated by `markComplete` — it consults no reachability set and only ever adds copies, so
+partial knowledge cannot lose data — and a pack whose objects could not all be read (or
+whose budget ran out mid-way) stays exactly as it is, since retiring it would delete
+bytes with no loose copy (invariant 2, from the other side).
+
+### 11.9 Configuration
+
+Public (`Config`, zod, README): `pack: 'auto' | 'off'`, default `'auto'`; `'off'` stops
+creating packs and gradually unpacks existing ones (§11.8). The knobs `packBlockBytes`,
+`packBudgetBytes`, `repackLiveRatio` and `repackMinBytes` live on the internal
+`StoreConfig` and are not user-reachable.
+

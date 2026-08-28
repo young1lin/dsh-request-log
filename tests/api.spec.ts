@@ -182,6 +182,23 @@ describe('read API', () => {
     dispose()
   })
 
+  it('reports the packing counters on /health', async () => {
+    const store = await seededStore()
+    await store.sweep()
+    const { handler, dispose } = await makeHandler(store)
+
+    const health = await handle(handler, 'GET', '/dsh-request-log/health')
+    expect(health.status).toBe(200)
+    const body = health.body as { sweep?: Record<string, unknown> }
+    // markComplete false would mean the cycle reclaimed on partial knowledge.
+    expect(body.sweep).toMatchObject({
+      markComplete: true,
+      packedObjects: expect.any(Number),
+      repackedPacks: expect.any(Number),
+    })
+    dispose()
+  })
+
   it('omits the sweep field before the first cycle — the never-ran signal', async () => {
     const { handler, dispose } = await makeHandler(await seededStore())
     const health = await handle(handler, 'GET', '/dsh-request-log/health')

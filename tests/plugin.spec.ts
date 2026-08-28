@@ -71,6 +71,15 @@ describe('Config schema', () => {
     expect(Config.parse({ format: 'v1' }).format).toBe('v1')
     expect(() => Config.parse({ format: 'v3' })).toThrow()
   })
+
+  it('takes the pack switch and nothing else', () => {
+    // 'off' is the rollback door: it must also gradually unpack existing
+    // packs, so the switch can never strand records a build cannot read.
+    expect(Config.parse({ pack: 'off' }).pack).toBe('off')
+    expect(Config.parse({}).pack).toBe('auto')
+    expect(() => Config.parse({ pack: 'yes' })).toThrow()
+    expect(resolveStoreConfig({ pack: 'off' }).pack).toBe('off')
+  })
 })
 
 describe('resolveStoreConfig', () => {

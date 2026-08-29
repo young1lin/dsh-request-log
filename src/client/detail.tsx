@@ -7,7 +7,7 @@
  * call) rides a clearly-marked annotation and the chain banner.
  */
 
-import { React, h } from './react'
+import { ErrorBoundary, React, h } from './react'
 import { countToolCalls, type CallRecord } from '../shared/types'
 import { WIRE_PROTOCOLS, detectProtocol, renderWire, responsesChainOf } from '../wire'
 import { ApiError, fetchCall, formatDateTime, formatDuration, formatPct, formatToolDispatches, formatTokens, formatTokPerSec } from './data'
@@ -167,7 +167,18 @@ export function makeCallDetail(source: DictSource): (props: {
           ? record.request
           : { status: record.status, timing: record.timing, response: record.response }
       }
-      return renderWire(record, effectiveFormat, side, { previous })
+      try {
+        return renderWire(record, effectiveFormat, side, { previous })
+      } catch (cause) {
+        // A wire projection must never blank the tab: a malformed capture
+        // degrades to the neutral body with the failure marked on it.
+        return {
+          _renderError: `wire rendering failed (${cause instanceof Error ? cause.message : String(cause)}) — showing the neutral capture`,
+          ...side === 'request'
+            ? { request: record.request }
+            : { status: record.status, timing: record.timing, response: record.response },
+        }
+      }
     }, [record, side, effectiveFormat, previous])
     const textRef = React.useRef(payload)
     textRef.current = payload
@@ -201,6 +212,7 @@ export function makeCallDetail(source: DictSource): (props: {
       itemsCount: d.jsonItems,
       keysCount: d.jsonKeys,
       nodeBudget: d.jsonNodeBudget,
+      depthBudget: d.jsonDepthBudget,
     }
     const usage = record.response?.usage
     const timing = timingOf(record)
@@ -327,15 +339,24 @@ export function makeCallDetail(source: DictSource): (props: {
         ? interp(d.chainOn, { sent: chain.sentItems, skipped: chain.skippedItems })
         : interp(d.chainOff, { items: chain.sentItems })),
       h('div', { className: 'rl-json' },
+        // Crash net: whatever escapes the tree's own guards (a shape the
+        // renderer did not expect) degrades to a retryable message — the
+        // summary cards and Copy JSON above stay usable. Keyed with the
+        // tree below so a side/format switch gets a fresh boundary.
+        h(ErrorBoundary, {
+          key: record.id + ':' + side + ':' + String(format) + ':' + String(previous?.id),
+          fallback: (error: unknown, reset: () => void): React.ReactElement => h('div', { className: 'rl-empty' },
+            h('div', {}, d.renderError + ': ' + String(error)),
+            h('button', { className: 'rl-btn', onClick: reset }, d.renderRetry)),
+        },
         // Keyed per call+side+format: a format switch rebuilds the tree so
         // per-node overrides can never leak onto a different node that
         // happens to sit at the same path in another rendering.
         h(JsonTree, {
-          key: record.id + ':' + side + ':' + String(format) + ':' + String(previous?.id),
           value: payload,
           mode: treeMode,
           labels: jsonLabels,
-        })))
+        }))))
   }
 
   return CallDetail

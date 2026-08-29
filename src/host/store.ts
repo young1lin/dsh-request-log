@@ -512,8 +512,16 @@ export class CallStore {
   /** Temp-in-same-dir rewrite then rename: atomic on Win32 (same volume). */
   private async atomicWriteText(path: string, text: string): Promise<void> {
     const temp = `${path}.tmp`
-    await writeFile(temp, text, 'utf8')
-    await rename(temp, path)
+    try {
+      await writeFile(temp, text, 'utf8')
+      await rename(temp, path)
+    } finally {
+      // A failed rename (e.g. the destination held open by a reader on
+      // Windows) must not strand the staging file forever — the sweep only
+      // ever scans *.jsonl, so nothing else would clean it. Mirrors the
+      // staging discipline of blob.ts and pack.ts.
+      await rm(temp, { force: true }).catch(() => {})
+    }
   }
 
   /** Recount logical attributed bytes straight from file text (cold path). */

@@ -118,7 +118,8 @@ const dict: Dict = {
     jsonCollapse: '', jsonExpand: '', jsonChars: '', jsonViewAsJson: '', jsonViewAsText: '',
     jsonViewAsJsonTitle: '', jsonViewAsTextTitle: '', jsonCollapseStringTitle: '',
     jsonOpenString: '', jsonOpenStringTitle: '', jsonChip: '', jsonTruncated: '',
-    jsonItems: '', jsonKeys: '', jsonNodeBudget: '',
+    jsonItems: '', jsonKeys: '', jsonNodeBudget: '', jsonDepthBudget: '',
+    renderError: '', renderRetry: '',
   },
 }
 

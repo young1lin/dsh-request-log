@@ -167,7 +167,10 @@ export default defineConfig([
     // engines is node>=20; es2024 syntax would ship untranspilable on 20.x/21 runtimes.
     target: 'es2023',
     fixedExtension: false,
-    dts: true,
+    // sourcemap: false — with the default the .d.ts ships a dangling
+    // `//# sourceMappingURL=index.d.ts.map` while the map itself is never
+    // emitted nor listed in files (the client entry already does this).
+    dts: { sourcemap: false },
     minify: true,
     // Symmetric with the client bundle: stack traces resolve past the minifier.
     sourcemap: true,

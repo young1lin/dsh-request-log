@@ -58,7 +58,24 @@ function toolInputOf(block: RecordedBlock): Record<string, unknown> {
 
 function requestBlocksOf(message: RecordedMessage): AnthropicContent[] {
   const blocks: AnthropicContent[] = []
-  for (const block of message.content) {
+  // Defense against a malformed record (hand-edited JSONL, an upstream
+  // shape change): content must degrade to a MARKED block, never throw —
+  // and a bare string must not be iterated into per-character junk.
+  const content: unknown = message.content
+  if (typeof content === 'string') {
+    return [
+      { type: 'opaque', blockType: 'content', _note: 'message.content was a string — rendered as one text block' },
+      { type: 'text', text: content },
+    ]
+  }
+  if (!Array.isArray(content)) {
+    return [{
+      type: 'opaque',
+      blockType: 'content',
+      _note: `message.content was ${content === null ? 'null' : typeof content} — nothing to render`,
+    }]
+  }
+  for (const block of content as RecordedBlock[]) {
     switch (block.type) {
       case 'text':
         blocks.push({ type: 'text', text: textOf(block) })
@@ -153,7 +170,10 @@ export function renderAnthropicResponse(record: CallRecord): Record<string, unkn
   // Single pass in the recorded block order: thinking / text / tool_use can
   // interleave on the real wire, and the record preserves that order.
   const content: AnthropicContent[] = []
-  for (const block of record.response?.blocks ?? []) {
+  // Same malformed-record defense as the request side: only a real array
+  // of blocks renders; anything else degrades to an empty content array.
+  const blocks: unknown = record.response?.blocks
+  for (const block of Array.isArray(blocks) ? blocks as RecordedBlock[] : []) {
     if (block.type === 'reasoning') {
       content.push({ type: 'thinking', thinking: textOf(block), _note: SIGNATURE_NOTE })
     } else if (block.type === 'text') {

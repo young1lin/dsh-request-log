@@ -72,4 +72,15 @@ describe('JsonTree', () => {
     expect(markup).not.toContain('node budget exceeded')
     expect(markup).toContain('&quot;hi&quot;')
   })
+
+  it('stops recursing past the depth cap instead of blowing the stack', () => {
+    // ~600 nested levels: without the cap the recursive renderer (and
+    // react-dom/server's own recursive walk, measured to overflow below
+    // 300 rendered levels in dev mode) dies long before markup lands.
+    let deep: unknown = { leaf: true }
+    for (let i = 0; i < 300; i += 1) deep = { nested: [deep] }
+    const markup = render(deep, 'expanded')
+    expect(markup).toContain('depth limit')
+    expect(markup.length).toBeLessThan(100_000)
+  })
 })

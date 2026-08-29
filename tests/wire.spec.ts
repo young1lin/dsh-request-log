@@ -6,7 +6,7 @@
  */
 
 import { describe, expect, it } from 'vitest'
-import type { CallRecord } from '../src/shared/types'
+import type { CallRecord, RecordedBlock } from '../src/shared/types'
 import { RECORD_SCHEMA } from '../src/shared/types'
 import { renderAnthropicRequest, renderAnthropicResponse } from '../src/wire/anthropic.ts'
 import { renderOpenAiChatRequest, renderOpenAiChatResponse } from '../src/wire/openai-chat.ts'
@@ -504,6 +504,41 @@ describe('responses chaining', () => {
     // 4 messages expand to 5 wire items (assistant rows fan out).
     expect(info.sentItems).toBe(5)
     expect(info.skippedItems).toBe(0)
+  })
+})
+
+describe('wire renderers survive malformed message content', () => {
+  const malformed = (content: unknown): CallRecord => ({
+    ...record,
+    request: {
+      ...record.request,
+      messages: [{ id: 'mx', role: 'user', content: content as RecordedBlock[] }],
+    },
+  })
+
+  it('anthropic renders string content as one marked text block, not per-character junk', () => {
+    const exchange = renderAnthropicRequest(malformed('raw string'))
+    const first = (exchange.body.messages as { content: Record<string, unknown>[] }[])[0]
+    expect(first.content).toHaveLength(2)
+    expect(first.content[0]).toEqual(expect.objectContaining({ type: 'opaque', blockType: 'content' }))
+    expect((first.content[0]._note as string)).toContain('string')
+    expect(first.content[1]).toEqual({ type: 'text', text: 'raw string' })
+  })
+
+  it('anthropic renders non-array non-string content as one marked opaque block', () => {
+    const exchange = renderAnthropicRequest(malformed({ nope: true }))
+    const first = (exchange.body.messages as { content: Record<string, unknown>[] }[])[0]
+    expect(first.content).toHaveLength(1)
+    expect(first.content[0]).toEqual(expect.objectContaining({ type: 'opaque', blockType: 'content' }))
+  })
+
+  it('anthropic response tolerates non-array blocks', () => {
+    const bad: CallRecord = {
+      ...record,
+      response: { ...record.response, blocks: 'junk' as unknown as RecordedBlock[] } as CallRecord['response'],
+    }
+    const body = renderAnthropicResponse(bad)
+    expect(body.content).toEqual([])
   })
 })
 

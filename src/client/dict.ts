@@ -72,6 +72,12 @@ export interface DetailDict {
   jsonItems: string
   jsonKeys: string
   jsonNodeBudget: string
+  /** Depth-cap hint of the JSON tree; {count} = the depth cap. */
+  jsonDepthBudget: string
+  /** Title shown when a render crash was caught by the boundary. */
+  renderError: string
+  /** Retry button of the render-crash fallback. */
+  renderRetry: string
 }
 
 /** 统计 panel strings: metric-group tabs, states, legend helpers. */

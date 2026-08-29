@@ -9,7 +9,7 @@
  * the ledger on remount.
  */
 
-import { React, h } from './react'
+import { ErrorBoundary, React, h } from './react'
 import type { CallIndexEntry } from '../shared/types'
 import { ApiError, fetchCalls, formatDateTime, formatDuration, formatPct, formatTime, formatToolDispatches, formatTokens, formatTokPerSec } from './data'
 import { makeCallDetail } from './detail'
@@ -411,6 +411,13 @@ export function makeRequestLogView(source: DictSource): (props: { sessionId?: st
     // sit above the conditional returns: it is a hook like the rest.
     const readyCalls = state.kind === 'ready' ? state.calls : NO_CALLS
     const prevIds = React.useMemo(() => prevIdsOf(readyCalls), [readyCalls])
+    // Openers must resolve predecessors through the LATEST map: prevIds is
+    // rebuilt whenever the loaded window grows (Load older), and an opener
+    // cached before that growth would otherwise keep reading the stale map
+    // it closed over — a row whose predecessor just paged in would open as
+    // "full input" instead of chained.
+    const prevIdsRef = React.useRef(prevIds)
+    prevIdsRef.current = prevIds
     // Memoized row openers keyed by call id: React.memo(CallRow) only pays
     // off when the onOpen prop is ALSO stable across the 3s poll re-renders.
     const openersRef = React.useRef(new Map<string, () => void>())
@@ -425,7 +432,8 @@ export function makeRequestLogView(source: DictSource): (props: { sessionId?: st
       const existing = openers.get(call.id)
       if (existing !== undefined) return existing
       const opener = (): void => {
-        const prevId = prevIds.get(call.id)
+        // Read through the ref, NOT a captured memo value: see prevIdsRef.
+        const prevId = prevIdsRef.current.get(call.id)
         openCall({
           id: call.id,
           ...prevId === undefined ? {} : { prevId },
@@ -440,16 +448,25 @@ export function makeRequestLogView(source: DictSource): (props: { sessionId?: st
       // Keyed per call: switching calls REMOUNTS the detail, so no state
       // (the chained-previous fetch above all) can leak from one call into
       // the next. Reading position survives via initialPrefs / memory.
-      return h(CallDetail, {
+      // The boundary keys with the call too, so a poison record's crash
+      // never sticks to the next call the reader opens.
+      return h(ErrorBoundary, {
         key: selected.id,
-        sessionId,
-        callId: selected.id,
-        ...selected.prevId === undefined ? {} : { prevId: selected.prevId },
-        ...selected.step === undefined ? {} : { step: selected.step },
-        initialPrefs: prefsRef.current,
-        onPrefsChange,
-        onBack: backToList,
-      })
+        fallback: (error: unknown, reset: () => void): React.ReactElement => h('div', { className: 'rl-root' },
+          h('div', { className: 'rl-empty' },
+            h('div', {}, dict.error + ': ' + String(error)),
+            h('button', { className: 'rl-btn', onClick: reset }, dict.retry))),
+      },
+        h(CallDetail, {
+          key: selected.id,
+          sessionId,
+          callId: selected.id,
+          ...selected.prevId === undefined ? {} : { prevId: selected.prevId },
+          ...selected.step === undefined ? {} : { step: selected.step },
+          initialPrefs: prefsRef.current,
+          onPrefsChange,
+          onBack: backToList,
+        }))
     }
 
     if (state.kind === 'loading') {

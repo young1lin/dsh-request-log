@@ -136,6 +136,9 @@ const DICT_EN: ViewDict = {
     jsonItems: '{count} items',
     jsonKeys: '{count} keys',
     jsonNodeBudget: '… node budget exceeded, collapse other nodes or use Copy JSON ',
+    jsonDepthBudget: '… depth limit ({count} levels) reached — use Copy JSON for the full body',
+    renderError: 'Rendering failed',
+    renderRetry: 'Retry',
   },
 }
 
@@ -254,6 +257,9 @@ const DICT_ZH: ViewDict = {
     jsonItems: '{count} 项',
     jsonKeys: '{count} 个键',
     jsonNodeBudget: '… 渲染节点数超限，请折叠其他节点或使用“复制 JSON”',
+    jsonDepthBudget: '… 嵌套深度已达上限（{count} 层）— 完整内容请使用“复制 JSON”',
+    renderError: '渲染失败',
+    renderRetry: '重试',
   },
 }
 

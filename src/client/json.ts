@@ -44,6 +44,8 @@ export interface JsonLabels {
   itemsCount: string
   keysCount: string
   nodeBudget: string
+  /** Depth-cap hint of a too-deep container; {count} = the cap. */
+  depthBudget: string
 }
 
 export const DEFAULT_JSON_LABELS: JsonLabels = {
@@ -62,6 +64,7 @@ export const DEFAULT_JSON_LABELS: JsonLabels = {
   itemsCount: '{count} items',
   keysCount: '{count} keys',
   nodeBudget: '… node budget exceeded, collapse other nodes or use Copy JSON ',
+  depthBudget: '… depth limit ({count} levels) reached — use Copy JSON for the full body',
 }
 
 function interp(template: string, params: Record<string, string | number>): string {
@@ -81,6 +84,18 @@ const JSON_STRING_MIN_CHARS = 40
  * budget, containers render as a summary hint pointing at Copy JSON.
  */
 const MAX_RENDER_NODES = 20_000
+/**
+ * Recursion depth cap. The node budget counts rendered LINES, so a single
+ * deeply nested chain (a model echoing brackets, a hand-edited record)
+ * could still recurse the renderer — and React's own recursive commit
+ * walk — off the stack before the budget ever trips. Past the cap the
+ * container degrades to a marked hint instead. Collapsed containers never
+ * recurse, so only Expand-all or deep per-node overrides can reach it.
+ * 96 is deliberately conservative: the dev-mode SSR renderer was measured
+ * overflowing somewhere below 300 rendered levels, and real LLM payloads
+ * (tool schemas, JSON-in-JSON arguments) barely leave the thirties.
+ */
+const MAX_RENDER_DEPTH = 96
 
 interface TreeCtx {
   mode: TreeMode
@@ -305,6 +320,15 @@ function Container(props: {
       label,
       h('span', { className: 'rl-j-punc' }, open + ' '),
       h('span', { className: 'rl-tree-summary' }, '… ' + count + ' '),
+      h('span', { className: 'rl-j-punc' }, close))
+  }
+
+  // Depth cap first: the budget below counts rendered lines, so one deep
+  // chain could blow the stack before it ever trips (MAX_RENDER_DEPTH).
+  if (depth >= MAX_RENDER_DEPTH) {
+    return h('div', { className: 'rl-tree-line' },
+      h('span', { className: 'rl-j-punc' }, open + ' '),
+      h('span', { className: 'rl-tree-summary' }, interp(labels.depthBudget, { count: MAX_RENDER_DEPTH })),
       h('span', { className: 'rl-j-punc' }, close))
   }
 

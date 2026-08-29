@@ -5,7 +5,7 @@
  * machinery beyond a file write. Keep the ClientCtx mirror in sync with
  * src/client/services.ts.
  */
-import { mkdir, rm, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -54,4 +54,18 @@ await mkdir(outDir, { recursive: true })
 await writeFile(join(outDir, 'client.d.ts'), declaration, 'utf8')
 // tsdown's client dts experiments can leave this stray map behind.
 await rm(join(outDir, 'client.ts.map'), { force: true })
+
+// tsdown (0.22) writes a `//# sourceMappingURL=index.d.ts.map` reference
+// into lib/index.d.ts even with `dts: { sourcemap: false }`, while never
+// emitting the map itself — a dangling reference in the published types.
+// Strip it here, where the build already post-processes the dts artifacts.
+const hostDts = join(outDir, 'index.d.ts')
+const hostDtsText = await readFile(hostDts, 'utf8').catch(() => null)
+if (hostDtsText !== null && hostDtsText.includes('.d.ts.map')) {
+  const stripped = hostDtsText.replace(/^\/\/# sourceMappingURL=[^\n]*\.d\.ts\.map[^\n]*\n?/gm, '')
+  if (stripped !== hostDtsText) {
+    await writeFile(hostDts, stripped, 'utf8')
+    console.log('stripped dangling d.ts sourcemap reference from lib/index.d.ts')
+  }
+}
 console.log('wrote lib/client.d.ts')

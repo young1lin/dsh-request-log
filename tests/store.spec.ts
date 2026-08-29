@@ -1554,6 +1554,35 @@ describe('repack', () => {
     expect(store.lastSweepStatus?.repackedPacks).toBe(0)
     expect(await readdir(join(directory, 'objects', 'packs'))).toEqual(before)
   })
+
+  it('reclaims a mostly-dead SMALL pack below the repack size floor', async () => {
+    const directory = await tempDir()
+    const store = new CallStore({
+      ...resolveStoreConfig({ directory }),
+      maxCallsPerSession: 1,
+      // default repackMinBytes (8 MiB): the pack built below is a few KiB —
+      // small packs must still be rewritten once they are dead-majority,
+      // or trimmed records' content lingers in them forever.
+    })
+    const shared = 'a system prompt both calls resend'
+    await store.append(recordOf({ id: 'first', request: { system: shared, messages: [{ role: 'user', content: [{ type: 'text', text: 'a'.repeat(4000) }] }] } }))
+    const past = new Date(Date.now() - 3 * 60 * 60 * 1000)
+    for (const row of await store.objectCensusForTest()) {
+      await utimes(join(directory, 'objects', row.hash.slice(0, 2), `${row.hash}.drl`), past, past)
+    }
+    await store.sweep()
+    await store.append(recordOf({
+      id: 'second',
+      request: { system: shared, messages: [{ role: 'user', content: [{ type: 'text', text: 'second body' }] }] },
+      response: { blocks: [{ type: 'text', text: 'second response' }], usage: { inputTokens: 3, outputTokens: 4 }, finish: { kind: 'stop' }, chunkCount: 2 },
+    }))
+    await store.sweep()
+    await store.sweep()
+
+    expect(store.lastSweepStatus?.repackedPacks).toBeGreaterThan(0)
+    const reopened = new CallStore(resolveStoreConfig({ directory }))
+    expect((await reopened.get('sess-1', 'second'))?.request.system).toBe(shared)
+  })
 })
 
 describe('unpacking', () => {

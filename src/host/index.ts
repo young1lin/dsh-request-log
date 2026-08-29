@@ -17,6 +17,7 @@ import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
 import { installApi } from './api'
 import { installCapture } from './capture'
 import { CallStore, type StoreConfig } from './store'
+import { errorTextOf } from './errtext'
 
 export const name = 'dsh-request-log'
 
@@ -101,7 +102,7 @@ const SWEEP_INTERVAL_MS = 24 * 60 * 60 * 1000
 export function scheduleSweep(store: CallStore, logger: { warn: (...args: unknown[]) => void }): () => void {
   const sweep = (): void => {
     store.sweep().catch(error => {
-      logger.warn('dsh-request-log: sweep failed: %o', error)
+      logger.warn('dsh-request-log: sweep failed: %s', errorTextOf(error))
     })
   }
   sweep()

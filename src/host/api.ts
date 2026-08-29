@@ -14,8 +14,11 @@
  * passes a browser-trust fence first (mirroring the one client-connection
  * mounts on /api): the Host header must be a loopback or a configured
  * trusted authority — DNS rebinding cannot forge Host — and any attached
- * browser markers (Origin, Sec-Fetch-Site) must be same-origin. Anything
- * else 403s before a store read happens.
+ * browser markers (Origin, Sec-Fetch-Site) must be same-origin. A
+ * loopback-NAMED Host is honored only when the connection itself is
+ * loopback: a non-browser client controls every header, so when the server
+ * is bound to a non-loopback interface the socket's remote address is the
+ * one fact a LAN peer cannot spoof. Anything else 403s before a store read.
  *
  * @module dsh-request-log/host/api
  */
@@ -23,6 +26,7 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { Context } from '@deepseek-ai/cordis'
 import type { CallStore } from './store'
+import { errorTextOf } from './errtext'
 
 export const API_PREFIX = '/dsh-request-log'
 
@@ -72,6 +76,13 @@ function isLoopbackHostname(hostname: string): boolean {
   return parts.length === 4 && parts.every(part => /^\d{1,3}$/.test(part) && Number(part) <= 255)
 }
 
+/** Whether the connection itself is loopback — the socket's remote end. */
+function isRemoteLoopback(req: IncomingMessage): boolean {
+  const address = req.socket?.remoteAddress
+  if (typeof address !== 'string') return false
+  return address === '::1' || address.startsWith('127.') || address.startsWith('::ffff:127.')
+}
+
 /** Whether one configured trustedHosts entry (host or host:port) matches. */
 function trustedAuthorityMatches(entry: string, hostUrl: URL): boolean {
   let entryUrl: URL
@@ -103,8 +114,13 @@ export function isTrustedReadRequest(req: IncomingMessage, trustedHosts: readonl
   } catch {
     return false
   }
-  if (!isLoopbackHostname(hostUrl.hostname)
+  const loopbackHost = isLoopbackHostname(hostUrl.hostname)
+  if (!loopbackHost
     && !trustedHosts.some(entry => trustedAuthorityMatches(entry, hostUrl))) return false
+  // A loopback-named authority carries the loopback's trust, and that trust
+  // must rest on the CONNECTION, not the client-controlled header: bound to
+  // 0.0.0.0, a LAN peer writing "Host: localhost" must not read transcripts.
+  if (loopbackHost && !isRemoteLoopback(req)) return false
   if (headerOf(req.headers, 'sec-fetch-site') === 'cross-site') return false
   const origin = headerOf(req.headers, 'origin')
   if (origin === undefined) return true
@@ -117,7 +133,11 @@ export function isTrustedReadRequest(req: IncomingMessage, trustedHosts: readonl
 
 function sendJson(res: ServerResponse, status: number, body: unknown): void {
   const payload = JSON.stringify(body)
-  res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
+  res.writeHead(status, {
+    'content-type': 'application/json; charset=utf-8',
+    'cache-control': 'no-store',
+    'x-content-type-options': 'nosniff',
+  })
   res.end(payload)
 }
 
@@ -180,7 +200,7 @@ export function installApi(ctx: Context, store: CallStore, version: string, opti
           try {
             sendJson(res, 200, await store.listIndex(sessionId, limit, offset))
           } catch (error) {
-            logger?.warn('dsh-request-log: index read failed: %o', error)
+            logger?.warn('dsh-request-log: index read failed: %s', errorTextOf(error))
             sendJson(res, 500, { error: 'index read failed' })
           }
           return
@@ -199,7 +219,7 @@ export function installApi(ctx: Context, store: CallStore, version: string, opti
               sendJson(res, 200, record)
             }
           } catch (error) {
-            logger?.warn('dsh-request-log: record read failed: %o', error)
+            logger?.warn('dsh-request-log: record read failed: %s', errorTextOf(error))
             sendJson(res, 500, { error: 'record read failed' })
           }
           return

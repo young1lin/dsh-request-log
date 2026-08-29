@@ -25,6 +25,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
 import type { CallRecord, RecordedFinish, RecordedResponse } from '../shared/types'
 import { RECORD_SCHEMA } from '../shared/types'
+import { errorTextOf } from './errtext'
 
 /** Two same-hash calls within this window count as retries of each other. */
 const RETRY_WINDOW_MS = 120_000
@@ -127,9 +128,18 @@ export function installCapture(ctx: Context, { store, logger }: CaptureOptions):
   }, { global: true })
 }
 
-/** Canonical call fingerprint: stable key order over provider, model, and payload. */
-export function requestHashOf(identity: { provider: string; model: string; request: unknown }): string {
-  return createHash('sha1').update(JSON.stringify(identity)).digest('hex').slice(0, 12)
+/**
+ * Canonical call fingerprint: stable key order over provider, model, and
+ * payload. The optional salt (the session id) scopes the fingerprint to one
+ * session: identical requests in DIFFERENT sessions then hash differently,
+ * so logs from two machines cannot be correlated by hash — while retry
+ * correlation, which only ever compares hashes within a session, is intact.
+ */
+export function requestHashOf(identity: { provider: string; model: string; request: unknown }, salt?: string): string {
+  const hash = createHash('sha1')
+  if (salt !== undefined) hash.update(salt).update('|')
+  hash.update(JSON.stringify(identity))
+  return hash.digest('hex').slice(0, 12)
 }
 
 /**
@@ -141,9 +151,27 @@ function safeSnapshot<T>(value: unknown, fallback: T, warn: Warn, what: string):
   try {
     return JSON.parse(JSON.stringify(value)) as T
   } catch (error) {
-    warn?.(`dsh-request-log: ${what} was not JSON-serializable; a placeholder was recorded: %o`, error)
+    warn?.(`dsh-request-log: ${what} was not JSON-serializable; a placeholder was recorded: %s`, errorTextOf(error))
     return fallback
   }
+}
+
+/** Credential-shaped substrings a provider failure text must never persist verbatim. */
+const SECRET_LIKE = [
+  /\bsk-ant-[A-Za-z0-9_-]{8,}\b/g,
+  /\bsk-[A-Za-z0-9][A-Za-z0-9_-]{7,}\b/g,
+  /\b(?:api[-_]?key|token|secret|password|authorization)\s*[:=]\s*["']?[^\s"'`,;]{4,}/gi,
+  /\bBearer\s+[A-Za-z0-9._~+/=-]{8,}/gi,
+]
+
+/** Upper bound on a recorded failure text: errors are evidence, not payload. */
+const FAILURE_TEXT_CAP = 500
+
+/** Redact credential-shaped substrings and cap the length of a provider failure text. */
+function redactFailureText(text: string): string {
+  let out = text
+  for (const pattern of SECRET_LIKE) out = out.replace(pattern, '<redacted>')
+  return out.length > FAILURE_TEXT_CAP ? out.slice(0, FAILURE_TEXT_CAP) + `… (+${out.length - FAILURE_TEXT_CAP} chars)` : out
 }
 
 /**
@@ -155,7 +183,19 @@ function toRecordedRequest(options: GenerateOptions, logger?: WarnLogger): CallR
   try {
     const projection = {
       system: options.system,
-      messages: options.messages,
+      // Messages project through a whitelist: the runtime shape also carries
+      // adapter-private fields (message.source — provider/model and the
+      // replay state: response ids, native stop reasons, thinking signatures)
+      // that were never part of the prompt and must not land in the log.
+      // Block CONTENT stays open (unknown block types pass through opaquely
+      // by design).
+      messages: (Array.isArray(options.messages)
+        ? options.messages.map(message => ({
+            ...message.id === undefined ? {} : { id: message.id },
+            role: message.role,
+            content: message.content,
+          }))
+        : options.messages) as unknown as CallRecord['request']['messages'],
       tools: options.tools,
       temperature: options.temperature,
       maxTokens: options.maxTokens,
@@ -163,7 +203,7 @@ function toRecordedRequest(options: GenerateOptions, logger?: WarnLogger): CallR
     }
     return safeSnapshot<CallRecord['request']>(projection, { messages: [] }, logger?.warn, 'the request payload')
   } catch (error) {
-    logger?.warn('dsh-request-log: the request payload could not be read; an empty record was kept: %o', error)
+    logger?.warn('dsh-request-log: the request payload could not be read; an empty record was kept: %s', errorTextOf(error))
     return { messages: [] }
   }
 }
@@ -178,8 +218,11 @@ async function* recordAttempt(
   let record: CallRecord
   try {
     const request = toRecordedRequest(options, logger)
-    const hash = requestHashOf({ provider: options.provider, model: options.model, request })
     const sessionId = typeof options.sessionId === 'string' && options.sessionId.length > 0 ? options.sessionId : '_'
+    // Salted with the session: same logical call in one session hashes equal
+    // (retry correlation), the same payload in another session does not
+    // (no cross-machine correlation by hash).
+    const hash = requestHashOf({ provider: options.provider, model: options.model, request }, sessionId)
     const key = `${sessionId}:${options.provider}`
     record = {
       schema: RECORD_SCHEMA,
@@ -198,7 +241,7 @@ async function* recordAttempt(
   } catch (error) {
     // Red line: a recording failure must never break the model call. Without
     // a record there is nothing to persist — pass the stream through as-is.
-    logger?.warn('dsh-request-log: failed to open a call record; this attempt is not recorded: %o', error)
+    logger?.warn('dsh-request-log: failed to open a call record; this attempt is not recorded: %s', errorTextOf(error))
     yield* source
     return
   }
@@ -231,7 +274,10 @@ async function* recordAttempt(
               kind: reason.kind,
               ...failure === undefined ? {} : {
                 failure: {
-                  message: failure.message,
+                  // Provider error text can quote endpoints and key fragments
+                  // ("Incorrect API key provided: sk-…") — redact the common
+                  // credential shapes before it lands in the log.
+                  message: redactFailureText(failure.message),
                   code: failure.code,
                   ...failure.status === undefined ? {} : { status: failure.status },
                   ...failure.requestId === undefined ? {} : { requestId: failure.requestId },
@@ -249,7 +295,7 @@ async function* recordAttempt(
       } catch (error) {
         // Observing one chunk failed — the record loses that chunk's
         // fidelity, not the consumer its stream.
-        logger?.warn('dsh-request-log: failed to observe a stream chunk: %o', error)
+        logger?.warn('dsh-request-log: failed to observe a stream chunk: %s', errorTextOf(error))
       }
       yield chunk
     }
@@ -280,7 +326,7 @@ async function* recordAttempt(
     // extend the stream's tail. Append order across concurrent calls was
     // never guaranteed; failures only log.
     store.append(record).catch(error => {
-      logger?.warn('dsh-request-log: failed to persist call record: %o', error)
+      logger?.warn('dsh-request-log: failed to persist call record: %s', errorTextOf(error))
     })
   }
 }

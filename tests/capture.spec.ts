@@ -253,6 +253,42 @@ describe('capture', () => {
   })
 })
 
+describe('capture privacy hardening', () => {
+  it('redacts credential-shaped substrings from the failure text', async () => {
+    const store = fakeStore()
+    const { ctx, listener } = contextDouble()
+    installCapture(ctx as never, { store })
+
+    const errorChunks: StreamChunk[] = [
+      { type: 'finish', reason: { kind: 'error', failure: { message: 'Incorrect API key provided: sk-abc123def456ghi789xyz', code: 'AUTH' } } },
+    ]
+    await collect(listener()(optionsOf(), () => chunksOf(errorChunks)))
+
+    expect(store.appended[0].response?.finish.failure?.message).toBe('Incorrect API key provided: <redacted>')
+  })
+
+  it('drops adapter-private message fields (source/replayState) from the persisted request', async () => {
+    const store = fakeStore()
+    const { ctx, listener } = contextDouble()
+    installCapture(ctx as never, { store })
+
+    await collect(listener()(optionsOf(), () => chunksOf(okChunks)))
+    const message = store.appended[0].request.messages[0]
+    expect(message).not.toHaveProperty('source')
+    expect(message).toEqual({ id: 'm1', role: 'user', content: [{ type: 'text', text: 'hello' }] })
+  })
+
+  it('scopes the request hash to the session: identical payloads hash differently across sessions', async () => {
+    const store = fakeStore()
+    const { ctx, listener } = contextDouble()
+    installCapture(ctx as never, { store })
+
+    await collect(listener()(optionsOf({ sessionId: 's1' }), () => chunksOf(okChunks)))
+    await collect(listener()(optionsOf({ sessionId: 's2' }), () => chunksOf(okChunks)))
+    expect(store.appended[0].requestHash).not.toBe(store.appended[1].requestHash)
+  })
+})
+
 describe('createAttemptTracker', () => {
   it('expires retry correlation past the window', () => {
     const tracker = createAttemptTracker()

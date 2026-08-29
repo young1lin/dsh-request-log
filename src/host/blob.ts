@@ -186,7 +186,9 @@ export class BlobStore {
   /** Create the root once; a failed attempt is retried on the next use. */
   private ensureDirectory(): Promise<void> {
     if (this.mkdirPromise === undefined) {
-      this.mkdirPromise = mkdir(this.config.directory, { recursive: true }).then(
+      // Owner-only where the platform honors modes (POSIX): object bytes are
+      // the conversation plaintext, compressed — not encrypted.
+      this.mkdirPromise = mkdir(this.config.directory, { recursive: true, mode: 0o700 }).then(
         () => {},
         error => {
           this.mkdirPromise = undefined
@@ -201,7 +203,7 @@ export class BlobStore {
   private async ensureBucketDir(bucket: string): Promise<void> {
     if (this.readyBuckets.has(bucket)) return
     await this.ensureDirectory()
-    await mkdir(bucket, { recursive: true }).then(
+    await mkdir(bucket, { recursive: true, mode: 0o700 }).then(
       () => { this.readyBuckets.add(bucket) },
       () => { // Retried by the next put.
       },
@@ -298,7 +300,7 @@ export class BlobStore {
     await this.ensureBucketDir(bucket)
     const temp = join(bucket, `tmp-${randomUUID()}`)
     try {
-      await writeFile(temp, encodeFrame(codec, payload))
+      await writeFile(temp, encodeFrame(codec, payload), { mode: 0o600 })
       try {
         await rename(temp, this.pathOf(hash))
       } catch {

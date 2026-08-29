@@ -40,6 +40,7 @@ function recordOf(overrides: Partial<CallRecord> = {}): CallRecord {
 interface FakeResponse {
   status: number
   body: unknown
+  headers: Record<string, string>
 }
 
 async function handle(
@@ -47,17 +48,22 @@ async function handle(
   method: string,
   url: string,
   headers: Record<string, string> = { host: '127.0.0.1:3080' },
+  remoteAddress = '127.0.0.1',
 ): Promise<FakeResponse> {
-  const captured: FakeResponse = { status: 0, body: null }
+  const captured: FakeResponse = { status: 0, body: null, headers: {} }
   const req = {
     method,
     url,
     headers,
+    socket: { remoteAddress },
     resume: () => {},
     on: () => {},
   } as unknown as IncomingMessage
   const res = {
-    writeHead: (status: number) => { captured.status = status },
+    writeHead: (status: number, responseHeaders?: Record<string, string>) => {
+      captured.status = status
+      captured.headers = responseHeaders ?? {}
+    },
     end: (payload?: string) => {
       captured.body = payload === undefined ? null : JSON.parse(payload)
     },
@@ -95,6 +101,7 @@ describe('browser-trust fence', () => {
     const { handler, dispose } = await makeHandler(await seededStore())
     const health = await handle(handler, 'GET', '/dsh-request-log/health', { host: '127.0.0.1:3080' })
     expect(health.status).toBe(200)
+    expect(health.headers['x-content-type-options']).toBe('nosniff')
     const local = await handle(handler, 'GET', '/dsh-request-log/health', { host: 'localhost:3080' })
     expect(local.status).toBe(200)
     dispose()
@@ -141,8 +148,27 @@ describe('browser-trust fence', () => {
     dispose()
   })
 
+  it('refuses a spoofed loopback Host from a non-loopback connection', async () => {
+    const { handler, dispose } = await makeHandler(await seededStore())
+    // Bound 0.0.0.0: a LAN peer controls every header, but the socket's
+    // remote address is the one fact it cannot forge.
+    const lan = await handle(handler, 'GET', '/dsh-request-log/health', { host: '127.0.0.1:3080' }, '192.168.1.66')
+    expect(lan.status).toBe(403)
+    const lanNamed = await handle(handler, 'GET', '/dsh-request-log/health', { host: 'localhost:3080' }, '192.168.1.66')
+    expect(lanNamed.status).toBe(403)
+    dispose()
+  })
+
+  it('serves a configured trusted host to a non-loopback connection', async () => {
+    const { handler, dispose } = await makeHandler(await seededStore(), ['192.168.1.10:3080'])
+    const lan = await handle(handler, 'GET', '/dsh-request-log/health', { host: '192.168.1.10:3080' }, '192.168.1.66')
+    expect(lan.status).toBe(200)
+    dispose()
+  })
+
   it('isTrustedReadRequest refuses malformed authorities', () => {
-    const req = (headers: Record<string, string>) => ({ headers }) as unknown as IncomingMessage
+    const req = (headers: Record<string, string>) =>
+      ({ headers, socket: { remoteAddress: '127.0.0.1' } }) as unknown as IncomingMessage
     expect(isTrustedReadRequest(req({ host: 'http://x' }), [])).toBe(false)
     expect(isTrustedReadRequest(req({ host: '' }), [])).toBe(false)
     expect(isTrustedReadRequest(req({ host: 'not loopback' }), ['not loopback'])).toBe(false)

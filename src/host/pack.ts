@@ -160,7 +160,7 @@ export class PackStore {
   private async writeIndex(id: string, index: Buffer): Promise<boolean> {
     const temp = join(this.config.directory, `tmp-${randomUUID()}`)
     try {
-      const handle = await open(temp, 'w')
+      const handle = await open(temp, 'w', 0o600)
       try {
         await handle.writeFile(index)
         // Sync the DATA before the rename publishes it: a rename alone journals
@@ -284,7 +284,9 @@ export class PackStore {
   }
 
   private async ensureDirectory(): Promise<void> {
-    await mkdir(this.config.directory, { recursive: true })
+    // Owner-only where the platform honors modes (POSIX): pack bytes are
+    // the conversation plaintext, compressed — not encrypted.
+    await mkdir(this.config.directory, { recursive: true, mode: 0o700 })
   }
 
   /** The pack to append to: the newest one still under the size ceiling. */
@@ -298,7 +300,7 @@ export class PackStore {
       }
     }
     const id = `pack-${Date.now().toString(36)}-${randomUUID().slice(0, 8)}`
-    await writeFile(join(this.config.directory, `${id}.pack`), encodePackHeader(), { flag: 'wx' })
+    await writeFile(join(this.config.directory, `${id}.pack`), encodePackHeader(), { flag: 'wx', mode: 0o600 })
     await this.syncDirectory()
     this.ids = undefined
     return { id, bytes: PACK_HEADER_BYTES }
@@ -361,7 +363,7 @@ export class PackStore {
     // second. A crash between them leaves an index the reader rebuilds; the
     // reverse would leave an index pointing at bytes that never landed.
     const appended = Buffer.concat(blocks)
-    const handle = await open(path, 'a')
+    const handle = await open(path, 'a', 0o600)
     let packBytes: number
     try {
       await handle.writeFile(appended)
@@ -426,7 +428,7 @@ export class PackStore {
   private async sealTorn(id: string): Promise<void> {
     this.sealed.add(id)
     try {
-      const handle = await open(join(this.config.directory, `${id}.sealed`), 'w')
+      const handle = await open(join(this.config.directory, `${id}.sealed`), 'w', 0o600)
       try {
         await handle.sync()
       } finally {
@@ -440,7 +442,7 @@ export class PackStore {
 
   /** Mark a pack unreadable to this and every other process, atomically. */
   async retire(id: string): Promise<void> {
-    await writeFile(join(this.config.directory, `${id}.retired`), '')
+    await writeFile(join(this.config.directory, `${id}.retired`), '', { mode: 0o600 })
     this.invalidate()
   }
 

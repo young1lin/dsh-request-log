@@ -53,6 +53,7 @@ import { join } from 'node:path'
 import type { CallEnvelope, CallEnvelopeV3, CallIndexEntry, CallIndexResponse, CallRecord, RecordedMessage, RecordedRequest, RecordedResponse } from '../shared/types'
 import { RECORD_SCHEMA, RECORD_SCHEMA_V2, RECORD_SCHEMA_V3, entryFromEnvelope, envelopeSumOf, toIndexEntry } from '../shared/types'
 import { BlobStore, DEFAULT_GC_GRACE_MS, hashOfContent } from './blob'
+import { errorTextOf } from './errtext'
 import { PackStore } from './pack'
 import { type TreeEntry, type TreeState, chooseTreeNode, decodeTree, encodeTree, isEntryHash, resolveTree } from './tree'
 
@@ -450,7 +451,9 @@ export class CallStore {
   /** Create the root directory once; a failed attempt is retried on the next append. */
   private ensureDirectory(): Promise<void> {
     if (this.mkdirPromise === undefined) {
-      this.mkdirPromise = mkdir(this.config.directory, { recursive: true }).then(
+      // Owner-only where the platform honors modes (POSIX): the directory
+      // holds full conversation plaintext.
+      this.mkdirPromise = mkdir(this.config.directory, { recursive: true, mode: 0o700 }).then(
         () => {},
         error => {
           this.mkdirPromise = undefined
@@ -513,7 +516,7 @@ export class CallStore {
   private async atomicWriteText(path: string, text: string): Promise<void> {
     const temp = `${path}.tmp`
     try {
-      await writeFile(temp, text, 'utf8')
+      await writeFile(temp, text, { encoding: 'utf8', mode: 0o600 })
       await rename(temp, path)
     } finally {
       // A failed rename (e.g. the destination held open by a reader on
@@ -828,7 +831,7 @@ export class CallStore {
    * followed by a failure (the torn-tail repair scenario).
    */
   protected async writeLine(path: string, line: string): Promise<void> {
-    await appendFile(path, line, 'utf8')
+    await appendFile(path, line, { encoding: 'utf8', mode: 0o600 })
   }
 
   /**
@@ -1180,7 +1183,10 @@ export class CallStore {
     }
     this.sweepStatus = status
     const swallowed = (stage: string, error: unknown): void => {
-      status.error = `${stage}: ${error instanceof Error ? error.message : String(error)}`
+      // /health is readable by anyone past the fence: the error text keeps
+      // its name/errno/shape but loses the absolute paths (and the username
+      // inside them) that fs errors carry.
+      status.error = `${stage}: ${errorTextOf(error)}`
     }
     this.sweepErrorSink = swallowed
     try {
@@ -1504,7 +1510,7 @@ export class CallStore {
     const ratio = this.config.repackLiveRatio ?? DEFAULT_REPACK_LIVE_RATIO
     const minBytes = this.config.repackMinBytes ?? DEFAULT_REPACK_MIN_BYTES
     for (const info of await this.packs.list()) {
-      if (info.bytes < minBytes || info.entryCount === 0) continue
+      if (info.entryCount === 0) continue
       const hashes = await this.packs.entriesOf(info.id).catch(() => [] as string[])
       // entriesOf fails soft to [] — its index would not load. That is not
       // the empty pack the entryCount check above already skipped, and
@@ -1512,7 +1518,13 @@ export class CallStore {
       // retire a pack full of objects nobody accounted for.
       if (hashes.length === 0) continue
       const live = hashes.filter(hash => reachable.has(hash))
-      if (live.length / hashes.length >= ratio) continue
+      // The size floor keeps churn off tiny rewrites — but a dead-MAJORITY
+      // pack holds trimmed records' content for as long as it lives, so a
+      // small pack is still worth one rewrite once half its entries are
+      // unreachable (large packs keep the configured ratio bar).
+      if (info.bytes < minBytes
+        ? live.length * 2 >= hashes.length
+        : live.length / hashes.length >= ratio) continue
 
       // Presence first, bytes later. A 64 MiB pack decompresses to several
       // hundred MB, so holding every survivor at once to learn whether they

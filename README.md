@@ -25,11 +25,13 @@ The wire views are reconstructed from the exact capture, mirroring the mapping d
 - **Usage** — input/output/cache-read/cache-write tokens exactly as the provider reported them.
 - **Durable** — one JSONL file per session under `$DSH_HOME/request-log/`, with retention (default 14 days, or `never` to keep everything the way dsh keeps its own session logs), a per-session call cap (default 2000), and a per-session byte cap (default 128 MiB, counting each line plus the object bytes that append added; oldest records trimmed first).
 - **Fail-soft** — capture and storage failures never break a model call; a partially-written line is repaired on the next append; the read API is optional (a headless composition simply skips it).
-- **Fenced** — the read API serves the loopback host (plus any `trustedHosts` you configure) only; DNS-rebinding and cross-site requests are refused before any read.
+- **Fenced** — the read API serves the loopback host (plus any `trustedHosts` you configure) only; DNS-rebinding and cross-site requests are refused before any read, and a loopback-named `Host` is honored only when the connection itself is loopback (a LAN peer cannot spoof it).
 
 ## Privacy
 
-**This plugin persists the complete plaintext of every model call** — your full prompts, conversation history, tool schemas, and model outputs — to `$DSH_HOME/request-log/<sessionId>.jsonl`, one file per session, kept for `retentionDays` (default 14) days. Anyone with access to that directory (or to a machine where the web UI is reachable) can read them. Control it with the `directory` / `retentionDays` / `maxFileBytes` / `maxCallsPerSession` settings below, delete the files to erase a session's log, or uninstall the plugin to stop recording entirely. No credentials are ever recorded — API keys do not cross the `llm/stream` boundary — but the *content* of your sessions is on disk in cleartext.
+**This plugin persists the complete plaintext of every model call** — your full prompts, conversation history, tool schemas, model outputs, reasoning traces, and the provider's own failure text (common credential shapes in it are redacted on capture, but treat it as sensitive anyway) — under `$DSH_HOME/request-log/`, kept for `retentionDays` (default 14; `never` keeps files indefinitely). The content lives in two places: the `<sessionId>.jsonl` envelopes and the deflate-compressed objects in `objects/` — compression, not encryption. **Deleting a session's `.jsonl` does not erase its content**: the objects stay until a sweep's GC reclaims them, and once the plugin is uninstalled no sweep ever runs again — to erase everything, delete the whole `request-log` directory.
+
+Anyone with access to that directory can read it all; files are created owner-only where the platform honors modes, but assume no more than the directory itself grants. The read API serves the loopback host plus any `trustedHosts` you configure — **every trustedHosts entry is an unauthenticated grant of the full transcripts to every device that can reach that authority**. When the harness web server is bound to a non-loopback interface, remote peers are refused unless they arrive under a configured trusted host: a spoofed loopback `Host` header does not pass, because loopback trust rests on the connection, not the header. Images are recorded as attachment references only, never bytes. Control everything with the `directory` / `retentionDays` / `maxFileBytes` / `maxCallsPerSession` settings below.
 
 ## Install / Update
 
@@ -67,13 +69,13 @@ The loader row's `config:` block (cordis.patch.yml) accepts:
 
 | field | default | meaning |
 | --- | --- | --- |
-| `directory` | `$DSH_HOME/request-log` | where the JSONL files live |
+| `directory` | `$DSH_HOME/request-log` | where the JSONL files live — pointing this at a synced folder (OneDrive/Dropbox) or a network share puts the plaintext in the cloud / on the wire |
 | `retentionDays` | `14` | delete session files untouched this long, in days (1–3650). `never` keeps every file forever — dsh's own session logs are never deleted, so this is what following the host looks like. `0` is refused: keeping nothing and keeping everything must not be one keystroke apart |
 | `maxCallsPerSession` | `2000` | per-session cap (newest kept) |
 | `maxFileBytes` | `134217728` | per-session cap on envelope-line bytes plus the compressed object bytes each append *materialized* — a piece already on disk bills nothing, so a retry bills 0 and shared pieces bill to whichever session wrote them first. Budget it as marginal **content**, not as disk: real occupancy runs ~2× the compressed size while objects are loose and ~1× once the sweep has packed them (see Storage above). Oldest records are trimmed first, and the raw `.jsonl` is held under the same number by a separate file-size guard |
 | `format` | `auto` | record format for new writes: `auto` = v3 deduplicating tree envelopes (+ lazy migration of old files), `v1` = legacy full-body JSONL |
 | `pack` | `auto` | whether the daily sweep packs cold reachable objects into solid-block pack files under `objects/packs/` (packing waits out the GC grace floor, so fresh writes stay loose): `auto` packs and repacks, `off` stops packing and gradually unpacks existing packs back to loose objects — the rollback door for downgrading to a build that cannot read packs; either way, one writer process per store directory |
-| `trustedHosts` | `[]` | non-loopback authorities the read API may serve (`host` or `host:port`) |
+| `trustedHosts` | `[]` | non-loopback authorities the read API may serve (`host` or `host:port`); every entry grants unauthenticated full-transcript reads to every device that can reach it |
 
 ## Development
 

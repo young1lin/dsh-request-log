@@ -11,5 +11,6 @@ coverage/
 .pnpm-store/
 .tmp/
 .bench/
+.superpowers/
 .env
 .env.local

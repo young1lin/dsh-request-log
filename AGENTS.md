@@ -66,6 +66,15 @@ Pure rules live in React-free modules so vitest can load them directly (`wire/*`
 
 Every release gets a user-facing entry in `CHANGELOG.md` (Keep a Changelog format, Chinese; it ships in the tarball via `files`). Version lives in `package.json`.
 
-Publishing is tag-driven via **npm Trusted Publishing** (`.github/workflows/publish.yml`, same as `@young1lin/dsh-ui-gitworkbench`): bump the version, push tag `vX.Y.Z`; CI runs lint / test / build / pack checks, verifies the tag matches `package.json`, and publishes through GitHub Actions OIDC — no NPM_TOKEN secret, no OTP. Trusted Publishing requires npm >= 11.5.1, hence Node 24 in the workflow.
+Publishing is tag-driven via **npm Trusted Publishing** (`.github/workflows/publish.yml`, same as `@young1lin/dsh-ui-gitworkbench`): the workflow runs lint / test / build / pack checks, verifies the tag matches `package.json`, and publishes through GitHub Actions OIDC — no NPM_TOKEN secret, no OTP. Trusted Publishing requires npm >= 11.5.1, hence Node 24 in the workflow. **Precondition:** the trusted publisher must be configured on npmjs.com — package Settings → Trusted publishing → user `young1lin`, repo `dsh-request-log`, workflow `publish.yml` — check it once before relying on the tag flow.
 
-Bootstrap for a brand-new package name (this only ever happens once): a trusted publisher can only be configured on npmjs.com for a package that **already exists**, so the first publish is done by hand from a local terminal — `npm login` then `npm publish` (`prepublishOnly` builds and dry-run checks itself). The npm account is `young1lin` with 2FA: an interactive terminal confirms via a browser popup, no code typing; a non-TTY shell (e.g. an agent's) fails with EOTP unless given `--otp=<code>`. After that first publish: npmjs.com → package Settings → Trusted publishing → add user `young1lin`, repo `dsh-request-log`, workflow `publish.yml`. Don't push a tag for the manually-published version — the first useful tag is the next one. Built against `@deepseek-ai/dsh` 0.1.1-rc.2 wire types — keep the Compatibility section of the README current when that changes.
+Cutting a release:
+
+1. Write the user-facing entry in `CHANGELOG.md` under a new `## [X.Y.Z] - YYYY-MM-DD` heading, and commit it.
+2. From a clean tree run `npm version patch` (or `minor` / `major`) — bumps `package.json` and creates the `vX.Y.Z` tag in one commit.
+3. `git push && git push --tags` — the tag triggers `publish.yml`.
+4. Watch the Actions run; when it is green verify with `npm view dsh-request-log version`. A red run publishes nothing: fix, delete the tag (local `git tag -d`, remote `git push origin :refs/tags/vX.Y.Z`), and re-push it. A version already on npm can never be republished (E403) — bump to a new version instead.
+
+History: 0.1.0 (2026-08-31) was published by hand — a trusted publisher can only be configured on a package that already exists, so a brand-new name's first publish is manual exactly once (`npm login` + `npm publish`; `prepublishOnly` builds and dry-run checks itself). The npm account `young1lin` has 2FA: an interactive terminal confirms via a browser popup, a non-TTY shell (e.g. an agent's) fails with EOTP unless given `--otp=<code>`. No tag was pushed for 0.1.0; the first useful tag is the next one.
+
+Built against `@deepseek-ai/dsh` 0.1.1-rc.2 wire types — keep the Compatibility section of the README current when that changes.

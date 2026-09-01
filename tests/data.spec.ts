@@ -5,6 +5,7 @@
 
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
+  SPEED_CEILING_TPS,
   STREAM_FLOOR_MS,
   ApiError,
   fetchCall,
@@ -13,9 +14,10 @@ import {
   formatDuration,
   formatPct,
   formatTime,
-  formatTokPerSec,
+  formatTps,
   formatToolDispatches,
   formatTokens,
+  speedReading,
 } from '../src/client/data.ts'
 
 afterEach(() => {
@@ -85,16 +87,43 @@ describe('formatTokens', () => {
   })
 })
 
-describe('formatTokPerSec', () => {
-  it('dashes for unknown inputs and unmeasurably short streams', () => {
-    expect(formatTokPerSec(undefined, 1_000)).toBe(DASH)
-    expect(formatTokPerSec(100, undefined)).toBe(DASH)
-    expect(formatTokPerSec(100, STREAM_FLOOR_MS - 1)).toBe(DASH)
+describe('speedReading', () => {
+  it('is exact over the stream phase while measurable and plausible', () => {
+    // stream = 2_000 − 500 = 1_500ms ≥ floor → 300 ÷ 1.5s = 200 t/s.
+    expect(speedReading(300, 2_000, 500)).toEqual({ tokensPerSecond: 200, approx: false })
+    // Boundary rates stay exact at the ceiling itself.
+    expect(speedReading(SPEED_CEILING_TPS, 1_200, 200)).toEqual({ tokensPerSecond: SPEED_CEILING_TPS, approx: false })
+    // A missing ttfb cannot carve out a phase at all.
+    expect(speedReading(300, 2_000, undefined)).toEqual({ tokensPerSecond: 150, approx: true })
+  })
+  it('falls back to the whole call below the stream floor, marked approx', () => {
+    // stream = floor − 1 < 200ms: output ÷ total, TTFT included (≈).
+    const streamMs = STREAM_FLOOR_MS - 1
+    expect(speedReading(99, 1_000, 1_000 - streamMs)).toEqual({ tokensPerSecond: 99, approx: true })
+  })
+  it('downgrades implausibly fast exact-phase rates to the whole call', () => {
+    // stream = 300ms (above the floor) carrying 3_000 tokens = 10_000 t/s —
+    // over the ceiling, so the coarse-flush phase counts as unmeasured.
+    expect(speedReading(3_000, 2_000, 1_700)).toEqual({ tokensPerSecond: 1_500, approx: true })
+  })
+  it('yields null for unknown output or a non-positive duration', () => {
+    expect(speedReading(undefined, 1_000, 10)).toBeNull()
+    expect(speedReading(100, undefined, 10)).toBeNull()
+    expect(speedReading(100, 0, 0)).toBeNull()
+  })
+  it('keeps a zero-token stream as exact zero data, not a gap', () => {
+    expect(speedReading(0, 2_000, 500)).toEqual({ tokensPerSecond: 0, approx: false })
+  })
+})
+
+describe('formatTps', () => {
+  it('dashes for non-finite rates', () => {
+    expect(formatTps(Number.NaN)).toBe(DASH)
   })
   it('scales precision with magnitude', () => {
-    expect(formatTokPerSec(100, 1_000)).toBe('100 t/s')
-    expect(formatTokPerSec(15, 1_000)).toBe('15.0 t/s')
-    expect(formatTokPerSec(1.5, 1_000)).toBe('1.50 t/s')
+    expect(formatTps(100)).toBe('100 t/s')
+    expect(formatTps(15)).toBe('15.0 t/s')
+    expect(formatTps(1.5)).toBe('1.50 t/s')
   })
 })
 

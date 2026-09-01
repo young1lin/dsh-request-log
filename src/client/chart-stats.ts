@@ -14,15 +14,16 @@
  */
 
 import type { CallIndexEntry } from '../shared/types'
-import { STREAM_FLOOR_MS } from './data'
+import { speedReading } from './data'
 import type { XYPoint } from './chart-scale'
 
 export interface SeriesPoint extends XYPoint {
   /**
    * Speed-only: the value falls back to output ÷ TOTAL duration because the
-   * stream phase was unmeasurable (< STREAM_FLOOR_MS — buffered responses
-   * where TTFT ≈ total). Tagged so tooltips can mark it approximate (≈)
-   * instead of punching another hole into a third of the chart.
+   * stream phase was unmeasurable (< STREAM_FLOOR_MS) or its rate exceeded
+   * SPEED_CEILING_TPS — buffered / coarse-flush responses where TTFT ≈
+   * total. Tagged so tooltips can mark it approximate (≈) instead of
+   * punching another hole into a third of the chart.
    */
   approx?: boolean
 }
@@ -123,12 +124,6 @@ function billedOf(usage: NonNullable<CallIndexEntry['usage']>): number {
   return usage.inputTokens + (usage.cacheReadTokens ?? 0) + (usage.cacheWriteTokens ?? 0)
 }
 
-/** Stream-phase milliseconds of one call, when both phases were measured. */
-function streamMs(entry: CallIndexEntry): number | undefined {
-  if (entry.durationMs === undefined || entry.ttfbMs === undefined) return undefined
-  return entry.durationMs - entry.ttfbMs
-}
-
 function readValue(entry: CallIndexEntry, group: MetricGroupKey, seriesKey: string): number | null {
   const usage = entry.usage
   switch (group) {
@@ -151,19 +146,25 @@ function readValue(entry: CallIndexEntry, group: MetricGroupKey, seriesKey: stri
       return seriesKey === 'duration' ? entry.durationMs ?? null : entry.ttfbMs ?? null
     case 'speed': {
       if (usage === undefined) return null
-      const ms = streamMs(entry)
-      // Precise: output ÷ stream phase when that phase is long enough to
-      // time. Below the floor (buffered flushes, TTFT ≈ total) fall back to
-      // the whole-call duration as an APPROXIMATION — the caller tags those
-      // points (SeriesPoint.approx) so nothing poses as an exact measure.
-      if (ms !== undefined && ms >= STREAM_FLOOR_MS) return usage.outputTokens / (ms / 1000)
-      const total = entry.durationMs
-      if (total === undefined || total <= 0) return null
-      return usage.outputTokens / (total / 1000)
+      // Precise: output ÷ stream phase while that phase is long enough to
+      // time AND the rate is plausible. Buffered flushes (TTFT ≈ total) and
+      // implausibly fast coarse flushes fall back to the whole-call duration
+      // as an APPROXIMATION — speedApproxOf tags those points (≈) so nothing
+      // poses as an exact measure.
+      const reading = speedReading(usage.outputTokens, entry.durationMs, entry.ttfbMs)
+      return reading === null ? null : reading.tokensPerSecond
     }
     default:
       return null
   }
+}
+
+/** True when the entry's speed value rides the whole-call fallback (≈). */
+function speedApproxOf(entry: CallIndexEntry): boolean {
+  const usage = entry.usage
+  if (usage === undefined) return false
+  const reading = speedReading(usage.outputTokens, entry.durationMs, entry.ttfbMs)
+  return reading !== null && reading.approx
 }
 
 /**
@@ -232,11 +233,9 @@ export function buildChartModel(calls: readonly CallIndexEntry[], xMode: XMode, 
         const finite = y !== null && Number.isFinite(y)
         if (finite) hasData = true
         // Speed approximation tag: measured over the WHOLE call when the
-        // stream phase alone is too short to time (see SeriesPoint.approx).
-        const approx =
-          finite && group.key === 'speed'
-            ? (streamMs(collapsed) === undefined || streamMs(collapsed)! < STREAM_FLOOR_MS)
-            : false
+        // stream phase alone is too short to time or implausibly fast (see
+        // SeriesPoint.approx / speedApproxOf).
+        const approx = finite && group.key === 'speed' ? speedApproxOf(collapsed) : false
         series.points.push(approx && finite ? { x: key, y, approx: true } : { x: key, y })
       }
     }

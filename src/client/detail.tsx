@@ -10,7 +10,7 @@
 import { ErrorBoundary, React, h } from './react'
 import { countToolCalls, type CallRecord } from '../shared/types'
 import { WIRE_PROTOCOLS, detectProtocol, renderWire, responsesChainOf } from '../wire'
-import { ApiError, fetchCall, formatDateTime, formatDuration, formatPct, formatToolDispatches, formatTokens, formatTokPerSec } from './data'
+import { ApiError, fetchCall, formatDateTime, formatDuration, formatPct, formatToolDispatches, formatTokens, formatTps, speedReading } from './data'
 import { JsonTree, type JsonLabels, type TreeMode } from './json'
 import { interp } from './dict'
 import type { DetailFormat, DetailPrefs, DetailSide } from './persist'
@@ -216,6 +216,10 @@ export function makeCallDetail(source: DictSource): (props: {
     }
     const usage = record.response?.usage
     const timing = timingOf(record)
+    // Same reading the ledger row and the chart plot: exact over the stream
+    // phase, ≈ over the whole call when unmeasurable (wait = total − stream,
+    // so the timing pair below reconstructs the phase).
+    const speedRead = speedReading(usage?.outputTokens, timing.total, timing.wait)
     const billed = usage === undefined
       ? undefined
       : usage.inputTokens + (usage.cacheReadTokens ?? 0) + (usage.cacheWriteTokens ?? 0)
@@ -252,8 +256,9 @@ export function makeCallDetail(source: DictSource): (props: {
           timing.total === undefined ? null : h(Row, { label: d.totalPhase }, formatDuration(timing.total)),
           h(Row, {
             label: d.outSpeed,
-            title: d.outSpeedHint,
-          }, formatTokPerSec(usage?.outputTokens, timing.stream))),
+            title: speedRead !== null && speedRead.approx ? dict.charts.speedApproxHint : d.outSpeedHint,
+          }, speedRead === null ? '\u2013'
+            : (speedRead.approx ? '\u2248 ' : '') + formatTps(speedRead.tokensPerSecond))),
         usage === undefined
           ? h('div', { className: 'rl-card' },
               h('div', { className: 'rl-card-title' }, d.usageCard),

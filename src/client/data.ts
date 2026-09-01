@@ -71,16 +71,54 @@ export function formatTokens(n: number | undefined): string {
 }
 
 /**
- * Tokens-per-second over a millisecond span. A stream phase shorter than
- * STREAM_FLOOR_MS is not measurable: some adapters flush the whole response
- * at once (buffered SSE / post-reasoning body), and dividing by ~0ms yields
- * absurd rates — those show '\u2013' instead of a misleading number.
+ * A stream phase shorter than STREAM_FLOOR_MS is not measurable: some
+ * adapters flush the whole response at once (buffered SSE / post-reasoning
+ * body), and dividing by ~0ms yields absurd rates.
  */
 export const STREAM_FLOOR_MS = 200
 
-export function formatTokPerSec(tokens: number | undefined, ms: number | undefined): string {
-  if (tokens === undefined || ms === undefined || ms < STREAM_FLOOR_MS) return '\u2013'
-  const rate = tokens / (ms / 1000)
+/**
+ * No real provider decodes this fast. An exact-phase rate above the ceiling
+ * means the "stream" was a few coarse flushes (multi-chunk buffering), not
+ * incremental decode — the phase counts as unmeasured and the reading falls
+ * back to the whole call.
+ */
+export const SPEED_CEILING_TPS = 500
+
+/** One call's output speed; `approx` marks the whole-call fallback (≈). */
+export interface SpeedReading {
+  tokensPerSecond: number
+  approx: boolean
+}
+
+/**
+ * Output speed of one call from its timing pair (durationMs = whole call,
+ * ttfbMs = first chunk). Exact = output ÷ stream phase (TTFT excluded) while
+ * that phase runs at least STREAM_FLOOR_MS AND the rate stays at or under
+ * SPEED_CEILING_TPS; otherwise output ÷ whole call, marked approximate — for
+ * a buffered flush the wait WAS the generation, so the whole-call rate is
+ * the honest estimate rather than a fabricated precision.
+ * Unreported output or a non-positive duration yields null.
+ */
+export function speedReading(
+  outputTokens: number | undefined,
+  durationMs: number | undefined,
+  ttfbMs: number | undefined,
+): SpeedReading | null {
+  if (outputTokens === undefined || durationMs === undefined || durationMs <= 0) return null
+  if (ttfbMs !== undefined) {
+    const streamMs = durationMs - ttfbMs
+    if (streamMs >= STREAM_FLOOR_MS) {
+      const exact = outputTokens / (streamMs / 1000)
+      if (exact <= SPEED_CEILING_TPS) return { tokensPerSecond: exact, approx: false }
+    }
+  }
+  return { tokensPerSecond: outputTokens / (durationMs / 1000), approx: true }
+}
+
+/** Compact tokens-per-second text; precision scales with magnitude. */
+export function formatTps(rate: number): string {
+  if (!Number.isFinite(rate)) return '\u2013'
   if (rate >= 100) return rate.toFixed(0) + ' t/s'
   if (rate >= 10) return rate.toFixed(1) + ' t/s'
   return rate.toFixed(2) + ' t/s'

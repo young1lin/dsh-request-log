@@ -256,9 +256,16 @@ export function StatsPanel(props: {
       if (pick >= 0) barDrawn.push({ x: reference[pick]!.x, idx: pick })
     }
   }
+  // Snapping runs in PIXEL space: nearestIndex compares the pointer's px
+  // position, so the candidates must be drawn px positions — data-unit xs
+  // here once made every hover land on the last slot (a pointer px of ~300
+  // beats every step number below it). Lines snap against the
+  // FULL-resolution first visible series so the returned ordinal indexes
+  // the same arrays the tooltip/crosshair reads — decimation stays
+  // drawing-only, as the module header promises.
   const hoverXs: number[] = cumulative
-    ? barDrawn.map(column => column.x)
-    : rendered[0]?.points.map(p => p.x) ?? []
+    ? barDrawn.map(column => sx(column.x))
+    : visible[0]?.points.map(p => sx(p.x)) ?? []
 
   const onMove = React.useCallback((event: { clientX?: number }): void => {
     if (hoverXs.length === 0 || typeof event.clientX !== 'number') return
@@ -516,6 +523,8 @@ export function StatsPanel(props: {
     x: x0, y: y0, width: Math.max(x1 - x0, 1), height: Math.max(y1 - y0, 1),
     fill: 'transparent',
     onMouseMove: onMove,
+    // A click/tap without a prior move (touch) snaps the same way.
+    onClick: onMove,
     onMouseLeave: clearHover,
   }))
 

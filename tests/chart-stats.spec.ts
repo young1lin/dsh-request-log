@@ -77,7 +77,7 @@ describe('buildChartModel slots', () => {
 
   it('guards speed below the stream floor and maps latency phases', () => {
     const fast = entryOf({ id: 'f', step: 1, durationMs: 150, ttfbMs: 40, usage: usage(10, undefined, undefined, 99) })
-    const slow = entryOf({ id: 's', step: 2, durationMs: 2_000, ttfbMs: 600, usage: usage(10, undefined, undefined, 700) })
+    const slow = entryOf({ id: 's', step: 2, durationMs: 2_000, ttfbMs: 600, usage: usage(10, undefined, undefined, 350) })
     const model = buildChartModel([fast, slow], 'step')
     const speed = model.groups.find(group => group.key === 'speed')!.series[0]!
     // Sub-floor stream phase no longer punches a hole: the point falls back
@@ -85,11 +85,22 @@ describe('buildChartModel slots', () => {
     expect(speed.points[0]!.y).not.toBeNull()
     expect(speed.points[0]!.approx).toBe(true)
     expect(speed.points[0]!.y!).toBeCloseTo(99 / 0.15, 5)
-    // Measurable stream phases stay exact (no tag).
-    expect(speed.points[1]!.y).toBeCloseTo(700 / 1.4, 5)
+    // Measurable (and plausibly fast) stream phases stay exact (no tag).
+    expect(speed.points[1]!.y).toBeCloseTo(350 / 1.4, 5)
     expect(speed.points[1]!.approx).toBeUndefined()
     const latency = model.groups.find(group => group.key === 'latency')!
     expect(latency.series.map(series => series.points[1]!.y)).toEqual([2_000, 600])
+  })
+
+  it('downgrades an above-ceiling exact-phase rate to the whole-call approximation', () => {
+    // Stream phase 300ms (≥ floor) carrying 2_000 tokens = ~6_667 t/s — over
+    // SPEED_CEILING_TPS, so the coarse flush counts as unmeasured: the point
+    // falls back to output ÷ total (≈), exactly like a sub-floor flush.
+    const burst = entryOf({ id: 'b', step: 1, durationMs: 2_000, ttfbMs: 1_700, usage: usage(10, undefined, undefined, 2_000) })
+    const model = buildChartModel([burst], 'step')
+    const speed = model.groups.find(group => group.key === 'speed')!.series[0]!
+    expect(speed.points[0]!.y).toBeCloseTo(2_000 / 2, 5)
+    expect(speed.points[0]!.approx).toBe(true)
   })
 
   it('keeps true gaps when neither phase nor output exists', () => {

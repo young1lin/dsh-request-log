@@ -11,7 +11,7 @@
 
 import { ErrorBoundary, React, h } from './react'
 import type { CallIndexEntry } from '../shared/types'
-import { ApiError, fetchCalls, formatDateTime, formatDuration, formatPct, formatTime, formatToolDispatches, formatTokens, formatTokPerSec } from './data'
+import { ApiError, fetchCalls, formatDateTime, formatDuration, formatPct, formatTime, formatToolDispatches, formatTokens, formatTps, speedReading } from './data'
 import { makeCallDetail } from './detail'
 import { StatsPanel } from './chart'
 import { interp, type ViewDict } from './dict'
@@ -140,9 +140,6 @@ const CallRow = React.memo(function CallRow(props: {
   const call = props.call
   const dict = props.dict
   const usage = call.usage
-  const streamMs = call.durationMs !== undefined && call.ttfbMs !== undefined
-    ? call.durationMs - call.ttfbMs
-    : undefined
   const billed = usage === undefined
     ? undefined
     : usage.inputTokens + (usage.cacheReadTokens ?? 0) + (usage.cacheWriteTokens ?? 0)
@@ -153,7 +150,12 @@ const CallRow = React.memo(function CallRow(props: {
     + (text === DASH ? ' rl-none' : '')
   const ttft = formatDuration(call.ttfbMs)
   const total = formatDuration(call.durationMs)
-  const speed = formatTokPerSec(usage?.outputTokens, streamMs)
+  // Same reading the chart plots (chart-stats): exact over the stream phase,
+  // ≈ over the whole call when that phase is unmeasurable — one number, one
+  // meaning, instead of the ledger's old '–' where the chart showed ≈.
+  const speedRead = speedReading(usage?.outputTokens, call.durationMs, call.ttfbMs)
+  const speed = speedRead === null ? DASH
+    : (speedRead.approx ? '\u2248 ' : '') + formatTps(speedRead.tokensPerSecond)
   const input = formatTokens(usage?.inputTokens)
   const hit = formatTokens(usage?.cacheReadTokens)
   const write = formatTokens(usage?.cacheWriteTokens)
@@ -185,7 +187,10 @@ const CallRow = React.memo(function CallRow(props: {
         : null),
     h('span', { className: numCls(ttft) }, ttft),
     h('span', { className: numCls(total) }, total),
-    h('span', { className: numCls(speed), title: dict.speedHint }, speed),
+    h('span', {
+      className: numCls(speed),
+      title: speedRead !== null && speedRead.approx ? dict.charts.speedApproxHint : dict.speedHint,
+    }, speed),
     // Billed input first: the total context the provider counted for this
     // call (uncached + cache hits + cache writes) — the number the In /
     // Cache-hit columns decompose.

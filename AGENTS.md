@@ -71,7 +71,7 @@ Publishing is tag-driven via **npm Trusted Publishing** (`.github/workflows/publ
 Cutting a release:
 
 1. Write the user-facing entry in `CHANGELOG.md` under a new `## [X.Y.Z] - YYYY-MM-DD` heading, and commit it.
-2. From a clean tree run `npm version patch` (or `minor` / `major`) — bumps `package.json` and creates the `vX.Y.Z` tag in one commit.
+2. From a clean tree run `npm version patch` (or `minor` / `major`) — bumps `package.json` and creates the `vX.Y.Z` tag in one commit. **Then bump the `VERSION` constant in `src/host/index.ts` to match and amend it into that commit** — `tests/plugin.spec.ts` asserts the two never drift, so a tag without this bump dies in CI (v0.1.1's first push did exactly that).
 3. `git push && git push --tags` — the tag triggers `publish.yml`.
 4. Watch the Actions run; when it is green verify with `npm view dsh-request-log version`. A red run publishes nothing: fix, delete the tag (local `git tag -d`, remote `git push origin :refs/tags/vX.Y.Z`), and re-push it. A version already on npm can never be republished (E403) — bump to a new version instead.
 

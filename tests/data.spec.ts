@@ -88,6 +88,19 @@ describe('formatTokens', () => {
   it('dashes when unknown', () => {
     expect(formatTokens(undefined)).toBe(DASH)
   })
+
+  it('holds three significant figures instead of widening with magnitude', () => {
+    // The M rung was a flat toFixed(2): fine at 1.50M, two dead zeros at
+    // 45.00M and five significant figures at 123.46M.
+    expect(formatTokens(45_000_000)).toBe('45.0M')
+    expect(formatTokens(123_456_789)).toBe('123M')
+    expect(formatTokens(15_900)).toBe('15.9k')
+  })
+
+  it('promotes a mantissa that rounds past its own unit', () => {
+    // 999_999 is 999.999k, which reads back as '1000.0k'.
+    expect(formatTokens(999_999)).toBe('1.00M')
+  })
 })
 
 describe('speedReading', () => {
@@ -140,6 +153,13 @@ describe('formatPct', () => {
     expect(formatPct(25, 100)).toBe('25.0%')
     expect(formatPct(1, 3)).toBe('33.3%')
   })
+
+  it('drops the dead decimal once the figure fills three digits', () => {
+    // A fully cached turn read '100.0%' — four significant figures on a
+    // quantity that cannot exceed three.
+    expect(formatPct(4, 4)).toBe('100%')
+    expect(formatPct(2.04, 100)).toBe('2.04%')
+  })
 })
 
 describe('formatTime / formatDateTime', () => {
@@ -150,9 +170,16 @@ describe('formatTime / formatDateTime', () => {
     const expected = pad(date.getHours()) + ':' + pad(date.getMinutes()) + ':' + pad(date.getSeconds())
     expect(formatTime(ms)).toBe(expected)
   })
-  it('renders the full local date-time', () => {
+  it('renders the full local date-time in the same shape as the axis', () => {
+    // toLocaleString() rendered '2026/9/3 16:00:04' here while the ledger
+    // showed '16:00:04' and the chart axis '09-03 16:00' — three shapes for
+    // one instant, none comparable to the others at a glance.
     const ms = 1_700_000_000_000
-    expect(formatDateTime(ms)).toBe(new Date(ms).toLocaleString())
+    const date = new Date(ms)
+    const pad = (n: number): string => String(n).padStart(2, '0')
+    const expected = String(date.getFullYear()) + '-' + pad(date.getMonth() + 1) + '-' + pad(date.getDate())
+      + ' ' + pad(date.getHours()) + ':' + pad(date.getMinutes()) + ':' + pad(date.getSeconds())
+    expect(formatDateTime(ms)).toBe(expected)
   })
   it('dashes when unknown', () => {
     expect(formatTime(undefined)).toBe(DASH)
@@ -175,11 +202,27 @@ describe('formatBytes', () => {
   it('scales from bytes through MB, keeping small figures exact', () => {
     expect(formatBytes(0)).toBe('0 B')
     expect(formatBytes(812)).toBe('812 B')
-    // A round KiB reads as 1.0 KB, never as 1024 B.
-    expect(formatBytes(1024)).toBe('1.0 KB')
-    expect(formatBytes(390 * 1024)).toBe('390.0 KB')
+    // A round KiB reads as 1.00 KB, never as 1024 B.
+    expect(formatBytes(1024)).toBe('1.00 KB')
     expect(formatBytes(3_000_000)).toBe('2.86 MB')
     expect(formatBytes(2 * 1024 * 1024 * 1024)).toBe('2.00 GB')
+  })
+
+  it('holds three significant figures at every scale', () => {
+    // The KB rung used to print a fourth digit (318.8 KB) and the MB/GB rungs
+    // a fifth (856.07 MB) — more claimed precision than any other reading in
+    // the UI, and more than the underlying figure supports.
+    expect(formatBytes(326_400)).toBe('319 KB')
+    expect(formatBytes(897_654_321)).toBe('856 MB')
+    expect(formatBytes(390 * 1024)).toBe('390 KB')
+    expect(formatBytes(1500)).toBe('1.46 KB')
+  })
+
+  it('promotes a mantissa that rounds past its own unit', () => {
+    // 1_048_575 B is 1023.999 KiB, which reads back as '1024.0 KB' — a value
+    // that belongs one rung up. Same story at the MB/GB boundary.
+    expect(formatBytes(1024 * 1024 - 1)).toBe('1.00 MB')
+    expect(formatBytes(1024 * 1024 * 1024 - 1)).toBe('1.00 GB')
   })
 
   it('renders an absent figure as a dash rather than 0 B', () => {

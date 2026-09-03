@@ -45,10 +45,32 @@ export function formatTime(ms: number | undefined): string {
   return pad(date.getHours()) + ':' + pad(date.getMinutes()) + ':' + pad(date.getSeconds())
 }
 
-/** Full local date-time (tooltip / detail view — unambiguous across days). */
+/**
+ * Full local date-time (tooltip / detail view — unambiguous across days).
+ * Fixed shape rather than toLocaleString(): the ledger renders HH:MM:SS and
+ * the chart axis MM-DD HH:MM, so a locale-shaped '2026/9/3 16:00:04' made
+ * three unrelated renderings of one instant. Same separators, same order,
+ * same local zone — the three now read as one family, longest to shortest.
+ */
 export function formatDateTime(ms: number | undefined): string {
   if (ms === undefined) return '\u2013'
-  return new Date(ms).toLocaleString()
+  const date = new Date(ms)
+  const pad = (n: number): string => (n < 10 ? '0' + String(n) : String(n))
+  return String(date.getFullYear()) + '-' + pad(date.getMonth() + 1) + '-' + pad(date.getDate())
+    + ' ' + pad(date.getHours()) + ':' + pad(date.getMinutes()) + ':' + pad(date.getSeconds())
+}
+
+/**
+ * Three significant figures — the precision every reading in this UI settles
+ * on. formatDuration and formatTps already spelled this ladder out inline
+ * (5.44s / 16.3s / 103 t/s); formatTokens, formatBytes and formatPct had
+ * drifted off it in both directions, printing 1000.0k, 856.07 MB and 100.0%.
+ * One helper, so the rule cannot drift again.
+ */
+function sig3(n: number): string {
+  if (n >= 100) return n.toFixed(0)
+  if (n >= 10) return n.toFixed(1)
+  return n.toFixed(2)
 }
 
 /** Format a duration in milliseconds: sub-second stays ms, seconds get two decimals under 10s. */
@@ -62,12 +84,18 @@ export function formatDuration(ms: number | undefined): string {
   return String(minutes) + 'm' + String(seconds) + 's'
 }
 
-/** Compact token count formatting. */
+/**
+ * Compact token count. Exact below 10k (a ledger column wants the real number
+ * there), then three significant figures per rung. A mantissa that ROUNDS up
+ * past its own unit is promoted rather than printed: 999_999 is 999.999k,
+ * which would otherwise read back as the nonsense '1000.0k'.
+ */
 export function formatTokens(n: number | undefined): string {
   if (n === undefined) return '\u2013'
   if (n < 10_000) return String(n)
-  if (n < 1_000_000) return (n / 1000).toFixed(1) + 'k'
-  return (n / 1_000_000).toFixed(2) + 'M'
+  const thousands = sig3(n / 1000)
+  if (Number(thousands) < 1000) return thousands + 'k'
+  return sig3(n / 1_000_000) + 'M'
 }
 
 /**
@@ -106,9 +134,11 @@ export function formatAxisTime(ms: number | undefined, withDate: boolean): strin
 export function formatBytes(n: number | undefined): string {
   if (n === undefined) return '–'
   if (n < 1024) return String(n) + ' B'
-  if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB'
-  if (n < 1024 * 1024 * 1024) return (n / (1024 * 1024)).toFixed(2) + ' MB'
-  return (n / (1024 * 1024 * 1024)).toFixed(2) + ' GB'
+  const kib = sig3(n / 1024)
+  if (Number(kib) < 1024) return kib + ' KB'
+  const mib = sig3(n / (1024 * 1024))
+  if (Number(mib) < 1024) return mib + ' MB'
+  return sig3(n / (1024 * 1024 * 1024)) + ' GB'
 }
 
 /**
@@ -160,13 +190,15 @@ export function speedReading(
 /** Compact tokens-per-second text; precision scales with magnitude. */
 export function formatTps(rate: number): string {
   if (!Number.isFinite(rate)) return '\u2013'
-  if (rate >= 100) return rate.toFixed(0) + ' t/s'
-  if (rate >= 10) return rate.toFixed(1) + ' t/s'
-  return rate.toFixed(2) + ' t/s'
+  return sig3(rate) + ' t/s'
 }
 
-/** Percentage (0–100) with one decimal; '\u2013' when the base is zero/unknown. */
+/**
+ * Percentage (0–100) at three significant figures; '\u2013' when the base is
+ * zero/unknown. A flat one decimal claimed a fourth digit at the top of a
+ * scale that only has three: a fully cached turn read '100.0%'.
+ */
 export function formatPct(part: number | undefined, base: number | undefined): string {
   if (part === undefined || base === undefined || base <= 0) return '\u2013'
-  return ((part / base) * 100).toFixed(1) + '%'
+  return sig3((part / base) * 100) + '%'
 }

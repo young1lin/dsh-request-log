@@ -273,9 +273,7 @@
 }
 
 .rl-th-hit { color: var(--dsw-alias-state-success-secondary); }
-.rl-th-out { color: var(--dsw-alias-brand-text); }
 .rl-td-hit { color: var(--dsw-alias-state-success-primary); }
-.rl-td-out { color: var(--dsw-alias-brand-text); }
 
 /* An absent value ('–') must recede, never wear the column's data color. */
 .rl-cell.rl-none { color: var(--dsw-alias-label-tertiary); }
@@ -287,7 +285,9 @@
   text-overflow: ellipsis;
   white-space: nowrap;
   color: var(--dsw-alias-label-secondary);
-  font-size: 11.5px;
+  /* 12px, not 11.5 -- the scale in this file is 14/13/12/11/10, and a half
+     pixel just renders as an arbitrary blur at 1x. */
+  font-size: 12px;
 }
 
 .rl-badge {
@@ -315,7 +315,7 @@
 
 /* Step badge: which conversation-loop step this call belongs to (#N). */
 .rl-badge-step {
-  color: var(--dsw-alias-brand-text);
+  color: var(--dsw-alias-label-primary);
   border-color: color-mix(in srgb, var(--dsw-alias-brand-primary, var(--dsw-alias-label-secondary)) 45%, transparent);
   font-style: normal;
   font-weight: 600;
@@ -444,7 +444,6 @@
 }
 
 .rl-token-hit .rl-token-value { color: var(--dsw-alias-state-success-primary); }
-.rl-token-out .rl-token-value { color: var(--dsw-alias-brand-text); }
 .rl-token-total { border-style: dashed; }
 .rl-token-total .rl-token-value { color: var(--dsw-alias-label-primary); }
 
@@ -459,8 +458,12 @@
   border: 1px solid var(--dsw-alias-border-l1);
   border-radius: 10px;
   color: var(--dsw-alias-label-primary);
-  font-family: ui-monospace, SFMono-Regular, Consolas, 'Courier New', monospace;
-  font-size: 11.5px;
+  /* dsh defines the code face with CJK fallbacks (PingFang SC / Microsoft
+     YaHei) and this view renders prompt bodies that are largely Chinese --
+     the bare Consolas stack left them to whatever the browser picked.
+     12px/1.55 is dsh's own code size and dsh-context's .lc-ts-arg-val. */
+  font-family: var(--ds-font-family-code, ui-monospace, SFMono-Regular, Consolas, 'Courier New', monospace);
+  font-size: 12px;
   line-height: 1.55;
 }
 

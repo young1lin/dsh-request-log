@@ -29,12 +29,14 @@
 
 .rl-head-actions { display: flex; gap: 4px; }
 
-/* Segmented-button chrome (mirrors .lc-gran / .lc-gran-btn). */
+/* Segmented-button chrome. border-l1 is 4% black on a white page — an
+   invisible frame, which left the selected chip floating unattached. dsh's
+   own buttons (Session log) draw 1px rgba(0,0,0,0.1), which IS border-l2. */
 .rl-head-actions, .rl-tabs {
   display: inline-flex;
   gap: 2px;
   background: var(--dsw-alias-bg-layer-2);
-  border: 1px solid var(--dsw-alias-border-l1);
+  border: 1px solid var(--dsw-alias-border-l2);
   border-radius: 6px;
   padding: 1px;
 }
@@ -54,16 +56,33 @@
 
 .rl-btn:hover { color: var(--dsw-alias-label-primary); }
 
+/* Selected state. button-primary-fill is #0f1115 — near-black, and dsh core
+   fills nothing that way: its selected tab is brand-blue TEXT and its buttons
+   are outlined and white. Two black chips were the heaviest ink on a mostly
+   white page, louder than the tab bar, the table head and the chart. The
+   token that belongs here is the interactive fill, carried by weight and a
+   primary label rather than by inversion. */
 .rl-btn-on, .rl-btn-on:hover {
-  background: var(--dsw-alias-button-primary-fill);
-  color: var(--dsw-alias-label-primary-foreground);
+  background: var(--dsw-alias-interactive-bg-hover-solid);
+  color: var(--dsw-alias-label-primary);
+  font-weight: 600;
 }
 
-/* Session summary. Five headline figures over one named breakdown line: the
-   billed input IS the sum of the three parts below it, so showing them as
-   equal siblings misstated the data as much as it crowded the strip. No
-   boxes — bg-layer-2 equals the page behind it, so the old tiles drew eight
-   4%-black outlines for no contrast at all. */
+/* Session summary. Five figures over one named breakdown line: the billed
+   input IS the sum of the three parts below it, so showing them as equal
+   siblings misstated the data as much as it crowded the strip. No boxes --
+   bg-layer-2 equals the page behind it, so the old tiles drew eight
+   4%-black outlines for no contrast at all.
+
+   The type scale is NOT invented here. Two in-repo references agree: the dsh
+   status bar under the composer (12px/20px, weight 400, label-tertiary, "."
+   within a group and "|" between) and dsh-context's own panel stats
+   (.lc-stat-value 14px/600 label-primary over .lc-stat-label 11px/600
+   label-secondary, tabular-nums). This block follows the latter, because a
+   plugin panel is what it is. An earlier pass ran the figures at 17px/600
+   with -0.015em and the sub-line at 11.5px -- three sizes that appear
+   NOWHERE in either codebase, inflating the value/label contrast from both
+   ends at once. That mismatch, not the spacing, was what read as foreign. */
 .rl-stats {
   display: flex;
   flex-direction: column;
@@ -86,14 +105,14 @@
   display: flex;
   flex-wrap: wrap;
   align-items: flex-end;
-  gap: 10px 36px;
+  gap: 8px 28px;
   min-width: 0;
 }
 
 .rl-metric {
   display: flex;
   flex-direction: column;
-  gap: 3px;
+  gap: 2px;
   min-width: 0;
 }
 
@@ -101,26 +120,26 @@
   /* Set from the token here rather than inherited: a computed color inherited
      from an ancestor would not follow a theme swap on this subtree. */
   color: var(--dsw-alias-label-primary);
-  font-size: 17px;
+  font-size: 14px;
   font-weight: 600;
-  letter-spacing: -0.015em;
-  /* Digits share a width, so a polling value cannot jitter the layout. */
+  /* Digits share a width, so a polling value cannot jitter the layout.
+     dsh-context uses this on its own live figures. */
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
 
+/* Same size as the figure -- shrinking and lifting the unit is a typographic
+   trick neither dsh nor dsh-context plays. Weight and colour carry it. */
 .rl-metric-unit {
-  font-size: 11px;
   font-weight: 500;
-  color: var(--dsw-alias-label-tertiary);
-  margin-left: 3px;
-  letter-spacing: 0;
+  color: var(--dsw-alias-label-secondary);
+  margin-left: 4px;
 }
 
 .rl-metric-label {
-  color: var(--dsw-alias-label-tertiary);
+  color: var(--dsw-alias-label-secondary);
   font-size: 11px;
-  font-weight: 400;
+  font-weight: 600;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -128,13 +147,14 @@
 
 .rl-metric-hit .rl-metric-value { color: var(--dsw-alias-state-success-primary); }
 
+/* No rule above this line: it would span the full ledger width to underline a
+   sentence that ends around a third of the way across. dsh's own status bar
+   and dsh-context's .lc-foot both separate a meta line by space alone. */
 .rl-stats-sub {
-  margin-top: 11px;
-  padding-top: 9px;
-  border-top: 1px solid var(--dsw-alias-border-l1);
+  margin-top: 10px;
   color: var(--dsw-alias-label-tertiary);
-  font-size: 11.5px;
-  line-height: 1.5;
+  font-size: 12px;
+  line-height: 20px;
 }
 
 .rl-sub-key { margin-right: 8px; }

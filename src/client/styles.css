@@ -648,6 +648,19 @@
 .rl-bar.rl-ls-error { color: var(--dsw-alias-state-error-primary); }
 .rl-bar.rl-ls-neutral { color: var(--dsw-alias-label-primary); }
 
+/* Cumulative totals on the clock axis: the continuous form of the columns
+   above. Slightly softer than a bar because neighbouring bands touch. */
+.rl-area {
+  stroke: none;
+  fill: currentColor;
+  fill-opacity: 0.72;
+}
+.rl-area.rl-ls-brand { color: var(--dsw-alias-brand-primary, var(--dsw-alias-label-secondary)); }
+.rl-area.rl-ls-success { color: var(--dsw-alias-state-success-primary); }
+.rl-area.rl-ls-warn { color: var(--dsw-alias-state-warn-primary); }
+.rl-area.rl-ls-error { color: var(--dsw-alias-state-error-primary); }
+.rl-area.rl-ls-neutral { color: var(--dsw-alias-label-primary); }
+
 /* Wide translucent wash over the hovered column (bars have no dot tops). */
 .rl-bar-hover {
   fill: var(--dsw-alias-label-foreground);

@@ -96,6 +96,10 @@ export interface ChartsDict {
   /** Token-group cumulative (running-total) toggle + its tooltip. */
   cumulative: string
   cumulativeHint: string
+  /** Label of the x-axis toggle: names the axis you switch TO. */
+  xAxisToStep: string
+  xAxisToTime: string
+  xAxisHint: string
   /** Shown when no plotted value exists anywhere. */
   emptyTitle: string
   emptyHint: string

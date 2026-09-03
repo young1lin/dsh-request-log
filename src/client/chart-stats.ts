@@ -187,9 +187,15 @@ export function buildChartModel(calls: readonly CallIndexEntry[], xMode: XMode, 
   // Oldest-first, defensively: the ledger holds chronological rows, but this
   // module refuses to depend on its callers.
   const chrono = calls.slice().sort((a, b) => a.startedAt - b.startedAt)
+  // Auxiliary calls (compaction / session-title) carry no step, so the
+  // numbered axis can never hold them; a time axis can, and a compaction is
+  // usually the very thing that explains a hit-rate cliff. ONE list either
+  // way — concatenating a second aux list onto an unfiltered `chrono` both
+  // double-counted them and made 'exclude' a no-op in time mode.
   const includeAux = options.auxCalls === 'include'
-  const aux = includeAux && xMode === 'time' ? chrono.filter(call => call.purpose !== undefined) : []
-  const ordinary = xMode === 'step' ? chrono.filter(call => call.purpose === undefined) : chrono
+  const plottable = xMode === 'time' && includeAux
+    ? chrono
+    : chrono.filter(call => call.purpose === undefined)
 
   // In step mode an entry WITHOUT a step (auxiliary or legacy pre-projection
   // rows) cannot join the numbered axis — those are the excluded ones.
@@ -204,7 +210,7 @@ export function buildChartModel(calls: readonly CallIndexEntry[], xMode: XMode, 
   // Slot the entries: one slot per step (retry-collapsed) or one per call.
   const slotKeys: number[] = []
   const slotEntries = new Map<number, CallIndexEntry[]>()
-  for (const entry of [...ordinary, ...aux]) {
+  for (const entry of plottable) {
     if (xMode === 'step' && entry.step === undefined) continue
     const key = xMode === 'step' ? entry.step! : entry.startedAt
     const bucket = slotEntries.get(key)

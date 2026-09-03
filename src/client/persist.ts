@@ -23,7 +23,7 @@
  */
 
 import { WIRE_PROTOCOLS, type WireProtocol } from '../wire'
-import type { MetricGroupKey } from './chart-stats'
+import type { MetricGroupKey, XMode } from './chart-stats'
 
 export type DetailSide = 'request' | 'response'
 
@@ -50,6 +50,11 @@ export interface ChartsPrefs {
   stacks: boolean
   /** Token group: running-total (Cursor-dashboard style) mode. */
   cumulative: boolean
+  /**
+   * Which x axis the panel draws: wall-clock time (the default — it answers
+   * "when did I ask for what") or the numbered conversation step.
+   */
+  xMode: XMode
 }
 
 export interface ViewMemory {
@@ -73,6 +78,7 @@ const VALID_FORMATS: readonly string[] = ['neutral', ...WIRE_PROTOCOLS.map(entry
 const memory = new Map<string, ViewMemory>()
 
 const VALID_GROUPS: readonly MetricGroupKey[] = ['hitrate', 'tokens', 'latency', 'speed']
+const VALID_X_MODES: readonly XMode[] = ['time', 'step']
 
 export function freshViewMemory(): ViewMemory {
   return {
@@ -80,7 +86,7 @@ export function freshViewMemory(): ViewMemory {
     limit: PAGE_SIZE,
     auto: true,
     detail: { side: 'request', format: null },
-    charts: { open: true, group: 'hitrate', stacks: false, cumulative: true },
+    charts: { open: true, group: 'hitrate', stacks: false, cumulative: true, xMode: 'time' },
   }
 }
 
@@ -167,6 +173,9 @@ function coerceMemory(raw: unknown): ViewMemory | null {
       : fresh.charts.group,
     stacks: typeof chartsRaw.stacks === 'boolean' ? chartsRaw.stacks : fresh.charts.stacks,
     cumulative: typeof chartsRaw.cumulative === 'boolean' ? chartsRaw.cumulative : fresh.charts.cumulative,
+    xMode: VALID_X_MODES.includes(chartsRaw.xMode as XMode)
+      ? chartsRaw.xMode as XMode
+      : fresh.charts.xMode,
   }
 
   return {

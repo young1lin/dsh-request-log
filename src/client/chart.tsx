@@ -25,7 +25,7 @@
 
 import { React, h } from './react'
 import type { CallIndexEntry } from '../shared/types'
-import { formatDuration, formatTime, formatTokens } from './data'
+import { formatAxisTime, formatDuration, formatTime, formatTokens } from './data'
 import {
   buildChartModel,
   cumulateSerieses,
@@ -37,6 +37,7 @@ import {
 import {
   extentOf,
   intTicks,
+  timeTicks,
   linear,
   lttbDecimate,
   nearestIndex,
@@ -123,7 +124,14 @@ export function StatsPanel(props: {
 }): React.ReactElement {
   const dict = props.dict
   const charts = dict.charts
-  const model = React.useMemo(() => buildChartModel(props.calls, 'step'), [props.calls])
+  // Auxiliary calls carry no step, so the numbered axis can never hold them;
+  // the time axis can, and a compaction is usually what explains a hit-rate
+  // cliff. buildChartModel ignores the option in step mode.
+  const model = React.useMemo(
+    () => buildChartModel(props.calls, props.prefs.xMode, { auxCalls: 'include' }),
+    [props.calls, props.prefs.xMode],
+  )
+  const timeMode = model.xMode === 'time'
   const group: MetricGroup =
     model.groups.find(entry => entry.key === props.prefs.group) ?? model.groups[0]!
 
@@ -138,14 +146,18 @@ export function StatsPanel(props: {
     })
   }, [])
 
-  // Step → startedAt for the tooltip title (#N · HH:MM:SS).
-  const startsAt = React.useMemo(() => {
-    const map = new Map<number, number>()
+  // Slot key → what the tooltip title says about it. The key is a step
+  // number on the numbered axis and a start time on the clock axis, so the
+  // map is rebuilt when the axis changes.
+  const slotMeta = React.useMemo(() => {
+    const map = new Map<number, { startedAt: number; step?: number; purpose?: string }>()
     for (const call of props.calls) {
-      if (call.step !== undefined && !map.has(call.step)) map.set(call.step, call.startedAt)
+      const key = timeMode ? call.startedAt : call.step
+      if (key === undefined || map.has(key)) continue
+      map.set(key, { startedAt: call.startedAt, step: call.step, purpose: call.purpose })
     }
     return map
-  }, [props.calls])
+  }, [props.calls, timeMode])
 
   // --- width measurement ladder -------------------------------------------
   const bodyRef = React.useRef<HTMLDivElement | null>(null)
@@ -296,17 +308,23 @@ export function StatsPanel(props: {
       x: x0 - 6, y: sy(v) + 3.5, textAnchor: 'end',
     }, formatValue(group, v, false)))
   // Steps are 1-based; never label the phantom '#0' the padded domain admits.
-  const xTickValues = intTicks(
-    Math.ceil(xMinRaw),
-    Math.ceil(xMinRaw + xSpanRaw),
-    Math.min(12, Math.max(2, Math.floor(plotW / 56))),
-  ).filter(v => v >= 1)
+  const xTickValues = timeMode
+    ? timeTicks(xMinRaw, xMinRaw + xSpanRaw)
+    : intTicks(
+        Math.ceil(xMinRaw),
+        Math.ceil(xMinRaw + xSpanRaw),
+        Math.min(12, Math.max(2, Math.floor(plotW / 56))),
+      ).filter(v => v >= 1)
+  // A bare HH:MM repeated down a week-long axis names nothing, so the date
+  // leads as soon as the plotted span leaves the day it started in.
+  const spansDays = timeMode
+    && new Date(xMinRaw).toDateString() !== new Date(xMinRaw + xSpanRaw).toDateString()
   const xLabels = xTickValues.map(v =>
     h('text', {
       key: 'tx' + String(v),
       className: 'rl-axis-text',
       x: sx(v), y: height - 7, textAnchor: 'middle',
-    }, '#' + String(v)))
+    }, timeMode ? formatAxisTime(v, spansDays) : '#' + String(v)))
   const vGrids = xTickValues.map(v =>
     h('line', {
       key: 'gx' + String(v),
@@ -319,7 +337,40 @@ export function StatsPanel(props: {
   })
 
   const shapes: React.ReactElement[] = []
-  if (cumulative) {
+  // On the clock axis a running total becomes a stacked AREA: columns there
+  // would take their width from neighbour spacing, so the same data would
+  // draw 1px slivers inside a burst and a fat bar around an isolated call.
+  // A single column has no area to fill, so it keeps the bar form.
+  const cumulativeArea = cumulative && timeMode && barDrawn.length > 1
+  if (cumulativeArea) {
+    for (const [li, layer] of visible.entries()) {
+      const below = li > 0 ? visible[li - 1] : undefined
+      let run: number[] = []
+      const flushRun = (): void => {
+        if (run.length > 1) {
+          const top = run.map(i => String(sx(reference[i]!.x)) + ',' + String(sy(layer.points[i]!.y as number)))
+          const floor = run.slice().reverse().map(i => {
+            const under = below?.points[i]?.y
+            const base = typeof under === 'number' && Number.isFinite(under) ? under : 0
+            return String(sx(reference[i]!.x)) + ',' + String(sy(base))
+          })
+          shapes.push(h('polygon', {
+            key: layer.key + '-area-' + String(run[0]),
+            className: 'rl-area rl-ls-' + layer.colorRole,
+            points: [...top, ...floor].join(' '),
+          }))
+        }
+        run = []
+      }
+      for (const column of barDrawn) {
+        const y = layer.points[column.idx]?.y
+        if (y === null || y === undefined || !Number.isFinite(y)) flushRun()
+        else run.push(column.idx)
+      }
+      flushRun()
+    }
+  }
+  if (cumulative && !cumulativeArea) {
     // Column geometry: width from drawn-column spacing, clamped to [1, 22].
     const spacing = barDrawn.length > 1
       ? (sx(barDrawn[barDrawn.length - 1]!.x) - sx(barDrawn[0]!.x)) / (barDrawn.length - 1)
@@ -424,7 +475,7 @@ export function StatsPanel(props: {
   if (hover !== null && xsAll.length > 0) {
     const idx = Math.min(hover.index, xsAll.length - 1)
     const slot = xsAll[idx]!
-    const startedAt = startsAt.get(slot)
+    const meta = slotMeta.get(slot)
     const snapPx = sx(slot)
     const flip = snapPx > width / 2
     tooltip = h('div', {
@@ -435,7 +486,14 @@ export function StatsPanel(props: {
         : { left: String(snapPx + TIP_MARGIN) + 'px' },
     },
       h('div', { className: 'rl-tip-title' },
-        '#' + String(slot) + (startedAt === undefined ? '' : ' · ' + formatTime(startedAt))),
+        // The clock axis leads with the time — it is the question being
+        // asked — and names the turn behind it, or the auxiliary call's
+        // purpose for the rows that have no step at all.
+        timeMode
+          ? formatTime(slot) + (meta?.step !== undefined
+              ? ' · #' + String(meta.step)
+              : meta?.purpose === undefined ? '' : ' · ' + meta.purpose)
+          : '#' + String(slot) + (meta === undefined ? '' : ' · ' + formatTime(meta.startedAt))),
       ...(tipRows.length === 0
         ? [h('div', { key: 'none', className: 'rl-tip-row' }, EN_DASH)]
         : [
@@ -471,6 +529,13 @@ export function StatsPanel(props: {
             h('span', { className: 'rl-tip-swatch rl-ls-' + series.colorRole }),
             seriesLabel(dict, series.key))))
     : null
+  // The label names the axis you switch TO, so the button reads as an action
+  // rather than as an on/off state with no obvious "on".
+  const xAxisToggle = h('button', {
+    className: 'rl-btn',
+    title: charts.xAxisHint,
+    onClick: () => props.onPrefs({ xMode: timeMode ? 'step' : 'time' }),
+  }, timeMode ? charts.xAxisToStep : charts.xAxisToTime)
   const cumulativeToggle = group.cumulable !== true ? null : h('button', {
     className: 'rl-btn' + (cumulative ? ' rl-btn-on' : ''),
     title: charts.cumulativeHint,
@@ -502,7 +567,7 @@ export function StatsPanel(props: {
     y1: y0, y2: y1,
   }))
   if (focusDots.length > 0) bodyChildren.push(h('g', { key: 'focus' }, ...focusDots))
-  if (cumulative && hover !== null && xsAll.length > 0 && barDrawn.length > 0) {
+  if (cumulative && !cumulativeArea && hover !== null && xsAll.length > 0 && barDrawn.length > 0) {
     // Wide translucent wash over the hovered column — bars have no dot tops.
     const slotX = sx(xsAll[Math.min(hover.index, xsAll.length - 1)]!)
     const washW = Math.min(Math.max(barDrawn.length > 1
@@ -541,6 +606,7 @@ export function StatsPanel(props: {
       h('span', { className: 'rl-chart-tabs-group' }, ...tabs),
       h('span', { className: 'rl-chart-tabs-space' }),
       legend,
+      xAxisToggle,
       cumulativeToggle,
       stacksToggle,
       note),

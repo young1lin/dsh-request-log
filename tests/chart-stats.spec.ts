@@ -189,3 +189,82 @@ describe('cumulateSerieses', () => {
     expect(byKey.get('in')!.points.map(p => p.y)).toEqual([10, 110, 110])
   })
 })
+
+describe('buildChartModel time mode', () => {
+  const at = (h: number, m: number, s = 0) => new Date(2025, 0, 1, h, m, s).getTime()
+
+  it('slots by wall-clock start, so idle gaps become real distance on the axis', () => {
+    const model = buildChartModel([
+      entryOf({ id: 'a', step: 1, startedAt: at(9, 0), usage: usage(100, 0, 0, 10) }),
+      entryOf({ id: 'b', step: 2, startedAt: at(9, 1), usage: usage(200, 0, 0, 20) }),
+      // ...then an hour of nothing.
+      entryOf({ id: 'c', step: 3, startedAt: at(10, 30), usage: usage(300, 0, 0, 30) }),
+    ], 'time')
+
+    expect(model.xMode).toBe('time')
+    const out = model.groups.find(g => g.key === 'tokens')!.series.find(s => s.key === 'out')!
+    expect(out.points.map(p => p.x)).toEqual([at(9, 0), at(9, 1), at(10, 30)])
+    // The 89-minute void between b and c is 89 minutes of x, not one slot.
+    expect(out.points[2]!.x - out.points[1]!.x).toBe(89 * 60_000)
+  })
+
+  it('plots each retry attempt separately — in time a retry IS another request', () => {
+    // Step mode collapses these two into one slot; time mode must not, or the
+    // chart would claim nothing happened during the retry.
+    const calls = [
+      entryOf({ id: 'r1', step: 1, requestHash: 'H', attempt: 1, startedAt: at(9, 0), status: 'error' }),
+      entryOf({ id: 'r2', step: 1, requestHash: 'H', attempt: 2, startedAt: at(9, 2), usage: usage(50, 0, 0, 5) }),
+    ]
+    const timed = buildChartModel(calls, 'time')
+    const stepped = buildChartModel(calls, 'step')
+
+    const outOf = (m: typeof timed) => m.groups.find(g => g.key === 'tokens')!.series.find(s => s.key === 'out')!
+    expect(outOf(timed).points.map(p => p.x)).toEqual([at(9, 0), at(9, 2)])
+    expect(outOf(stepped).points).toHaveLength(1)
+  })
+
+  it('admits auxiliary calls when asked, and then excludes nothing', () => {
+    const calls = [
+      entryOf({ id: 'turn', step: 1, startedAt: at(9, 0), usage: usage(100, 0, 0, 10) }),
+      entryOf({ id: 'compact', purpose: 'compaction', startedAt: at(9, 5), usage: usage(900, 0, 0, 90) }),
+      entryOf({ id: 'title', purpose: 'session-title', startedAt: at(9, 6), usage: usage(20, 0, 0, 2) }),
+    ]
+    const included = buildChartModel(calls, 'time', { auxCalls: 'include' })
+    expect(included.callCount).toBe(3)
+    // Nothing sits off the axis, so the ⓘ badge has nothing to report.
+    expect(included.excludedAux).toBe(0)
+
+    // Left out, they simply do not plot.
+    expect(buildChartModel(calls, 'time').callCount).toBe(1)
+  })
+
+  it('still reports steps excluded from the NUMBERED axis in step mode', () => {
+    const model = buildChartModel([
+      entryOf({ id: 'turn', step: 1, startedAt: at(9, 0), usage: usage(100) }),
+      entryOf({ id: 'compact', purpose: 'compaction', startedAt: at(9, 5), usage: usage(900) }),
+    ], 'step')
+    expect(model.excludedAux).toBe(1)
+    expect(model.callCount).toBe(1)
+  })
+
+  it('orders slots chronologically even when handed calls out of order', () => {
+    const model = buildChartModel([
+      entryOf({ id: 'late', step: 2, startedAt: at(11, 0), usage: usage(1) }),
+      entryOf({ id: 'early', step: 1, startedAt: at(9, 0), usage: usage(2) }),
+    ], 'time')
+    const xs = model.groups[0]!.series[0]!.points.map(p => p.x)
+    expect(xs).toEqual([at(9, 0), at(11, 0)])
+  })
+
+  it('accumulates cumulative totals across time slots, gaps carrying forward', () => {
+    const model = buildChartModel([
+      entryOf({ id: 'a', step: 1, startedAt: at(9, 0), usage: usage(100, 0, 0, 10) }),
+      entryOf({ id: 'b', step: 2, startedAt: at(9, 30), status: 'error' }),
+      entryOf({ id: 'c', step: 3, startedAt: at(10, 0), usage: usage(300, 0, 0, 30) }),
+    ], 'time')
+    const tokens = model.groups.find(g => g.key === 'tokens')!
+    const out = cumulateSerieses(tokens).find(s => s.key === 'out')!
+    // The error step reported nothing: the running total carries, never dips.
+    expect(out.points.map(p => p.y)).toEqual([10, 10, 40])
+  })
+})

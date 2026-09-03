@@ -102,6 +102,7 @@ const dict: Dict = {
     groupHitRate: 'Hit rate', groupTokens: 'Tokens', groupLatency: 'Latency', groupSpeed: 'Speed',
     stacks: 'Stacked', stacksHint: '',
     cumulative: 'Cumulative', cumulativeHint: '',
+    xAxisToStep: 'By step', xAxisToTime: 'By time', xAxisHint: '',
     emptyTitle: 'Nothing to plot yet', emptyHint: '', allNull: '',
     speedApproxHint: 'Approximate.',
     excludedShort: '{count} aux',
@@ -156,13 +157,18 @@ describe('stats panel screenshot fixtures', () => {
   it('renders every metric group to .tmp/*.html', () => {
     mkdirSync('.tmp', { recursive: true })
     const variants: { name: string; prefs: import('../src/client/persist').ChartsPrefs }[] = [
-      { name: 'hitrate', prefs: { open: true, group: 'hitrate', stacks: false, cumulative: true } },
-      { name: 'tokens-lines', prefs: { open: true, group: 'tokens', stacks: false, cumulative: false } },
-      { name: 'tokens-cumulative', prefs: { open: true, group: 'tokens', stacks: false, cumulative: true } },
-      { name: 'tokens-cumulative-stacked', prefs: { open: true, group: 'tokens', stacks: true, cumulative: true } },
-      { name: 'tokens-stacked', prefs: { open: true, group: 'tokens', stacks: true, cumulative: false } },
-      { name: 'latency', prefs: { open: true, group: 'latency', stacks: false, cumulative: true } },
-      { name: 'speed', prefs: { open: true, group: 'speed', stacks: false, cumulative: true } },
+      { name: 'hitrate', prefs: { open: true, group: 'hitrate', stacks: false, cumulative: true, xMode: 'step' } },
+      { name: 'tokens-lines', prefs: { open: true, group: 'tokens', stacks: false, cumulative: false, xMode: 'step' } },
+      { name: 'tokens-cumulative', prefs: { open: true, group: 'tokens', stacks: false, cumulative: true, xMode: 'step' } },
+      { name: 'tokens-cumulative-stacked', prefs: { open: true, group: 'tokens', stacks: true, cumulative: true, xMode: 'step' } },
+      { name: 'tokens-stacked', prefs: { open: true, group: 'tokens', stacks: true, cumulative: false, xMode: 'step' } },
+      { name: 'latency', prefs: { open: true, group: 'latency', stacks: false, cumulative: true, xMode: 'step' } },
+      { name: 'speed', prefs: { open: true, group: 'speed', stacks: false, cumulative: true, xMode: 'step' } },
+      // The clock axis: idle gaps become distance, cumulative becomes an area.
+      { name: 'time-hitrate', prefs: { open: true, group: 'hitrate', stacks: false, cumulative: true, xMode: 'time' } },
+      { name: 'time-tokens-lines', prefs: { open: true, group: 'tokens', stacks: false, cumulative: false, xMode: 'time' } },
+      { name: 'time-tokens-area', prefs: { open: true, group: 'tokens', stacks: false, cumulative: true, xMode: 'time' } },
+      { name: 'time-latency', prefs: { open: true, group: 'latency', stacks: false, cumulative: true, xMode: 'time' } },
     ]
     for (const variant of variants) {
       const html = page(variant.name, renderToStaticMarkup(

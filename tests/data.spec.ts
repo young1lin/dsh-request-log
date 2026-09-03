@@ -11,6 +11,7 @@ import {
   fetchCall,
   fetchCalls,
   formatDateTime,
+  formatAxisTime,
   formatBytes,
   formatDuration,
   formatPct,
@@ -183,5 +184,24 @@ describe('formatBytes', () => {
   it('renders an absent figure as a dash rather than 0 B', () => {
     // 0 B is a claim (nothing stored); undefined is an absence (old server).
     expect(formatBytes(undefined)).toBe(DASH)
+  })
+})
+
+describe('formatAxisTime', () => {
+  const at = (mo: number, d: number, h: number, mi: number) => new Date(2025, mo, d, h, mi).getTime()
+
+  it('reads as a clock within one day', () => {
+    expect(formatAxisTime(at(0, 1, 9, 5), false)).toBe('09:05')
+    expect(formatAxisTime(at(0, 1, 17, 44), false)).toBe('17:44')
+  })
+
+  it('carries the date once the span crosses one', () => {
+    // Several real sessions run across a week: bare HH:MM would repeat 09:00
+    // four times down the axis with nothing to tell the days apart.
+    expect(formatAxisTime(at(8, 3, 9, 0), true)).toBe('09-03 09:00')
+  })
+
+  it('renders an absent time as a dash', () => {
+    expect(formatAxisTime(undefined, false)).toBe(DASH)
   })
 })

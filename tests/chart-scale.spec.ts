@@ -70,6 +70,57 @@ describe('intTicks / timeTicks', () => {
     expect(ticks.length).toBeLessThanOrEqual(7)
     expect((ticks[1]! - ticks[0]!) % 60_000).toBe(0)
   })
+
+  it('anchors ticks to LOCAL wall-clock boundaries, not UTC epoch multiples', () => {
+    // A three-day span ticks daily. Epoch-multiple alignment would land these
+    // on UTC midnight — 08:00 for a UTC+8 reader — labelling a "day" boundary
+    // in the middle of a working morning.
+    const start = new Date(2025, 0, 1, 9, 30, 0).getTime()
+    const ticks = timeTicks(start, start + 6 * 86_400_000)
+    expect(ticks.length).toBeGreaterThanOrEqual(2)
+    for (const tick of ticks) {
+      const at = new Date(tick)
+      expect(at.getHours()).toBe(0)
+      expect(at.getMinutes()).toBe(0)
+    }
+  })
+
+  it('anchors a half-day cadence on local midnight and local noon', () => {
+    const start = new Date(2025, 0, 1, 9, 30, 0).getTime()
+    for (const tick of timeTicks(start, start + 3 * 86_400_000)) {
+      const at = new Date(tick)
+      expect([0, 12]).toContain(at.getHours())
+      expect(at.getMinutes()).toBe(0)
+    }
+  })
+
+  it('anchors an hourly cadence on the local hour', () => {
+    const start = new Date(2025, 0, 1, 9, 37, 12).getTime()
+    const ticks = timeTicks(start, start + 6 * 3_600_000)
+    for (const tick of ticks) {
+      const at = new Date(tick)
+      expect(at.getMinutes()).toBe(0)
+      expect(at.getSeconds()).toBe(0)
+    }
+  })
+
+  it('resolves a burst that lasts seconds instead of collapsing to one tick', () => {
+    // Ten calls inside 20s is a real shape on a time axis; a 10s floor gave
+    // such a span two ticks and no readable structure.
+    const start = new Date(2025, 0, 1, 9, 0, 0).getTime()
+    const ticks = timeTicks(start, start + 20_000)
+    expect(ticks.length).toBeGreaterThanOrEqual(3)
+    expect(ticks.length).toBeLessThanOrEqual(7)
+  })
+
+  it('keeps every tick inside the requested span', () => {
+    const start = new Date(2025, 5, 10, 14, 3, 7).getTime()
+    const end = start + 47 * 60_000
+    for (const tick of timeTicks(start, end)) {
+      expect(tick).toBeGreaterThanOrEqual(start)
+      expect(tick).toBeLessThanOrEqual(end)
+    }
+  })
 })
 
 describe('extentOf', () => {

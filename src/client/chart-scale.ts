@@ -68,19 +68,34 @@ export function intTicks(from: number, to: number, target = 10): number[] {
 }
 
 /**
- * Time ticks for epoch-ms x axes: pick the coarsest 1/2/5-second-family
- * cadence yielding ≤ ~7 ticks, anchored at multiples of the cadence.
- * Returns raw times — callers format (data.ts owns formatting).
+ * Time ticks for epoch-ms x axes: pick the coarsest cadence yielding ≤ ~7
+ * ticks. Returns raw times — callers format (data.ts owns formatting).
+ *
+ * The ladder starts at 1s because a burst of calls inside a few seconds is a
+ * real shape once x is the clock, and reaches a day for sessions that span
+ * one.
  */
+const DAY_MS = 86_400_000
 const TIME_CADENCES = [
-  10_000, 15_000, 30_000, 60_000, 120_000, 300_000, 600_000, 900_000,
-  1_800_000, 3_600_000, 7_200_000, 21_600_000, 43_200_000, 86_400_000,
+  1_000, 2_000, 5_000, 10_000, 15_000, 30_000, 60_000, 120_000, 300_000,
+  600_000, 900_000, 1_800_000, 3_600_000, 7_200_000, 10_800_000, 21_600_000,
+  43_200_000, DAY_MS,
 ]
 
+/**
+ * Ticks land on LOCAL wall-clock boundaries, never on epoch multiples: a
+ * reader at UTC+8 whose daily ticks sat on UTC midnight would see a "day"
+ * boundary drawn through 08:00, mid-morning.
+ *
+ * Sub-day cadences all divide a local day evenly, so shifting into local
+ * space, aligning there, and shifting back is exact. Day-or-longer cadences
+ * step by calendar DATE instead, because a DST changeover day is 23 or 25
+ * hours long and adding 86_400_000 would walk the ticks off midnight.
+ */
 export function timeTicks(fromMs: number, toMs: number): number[] {
   if (!(toMs > fromMs)) return [fromMs]
   const span = toMs - fromMs
-  let cadence = TIME_CADENCES[TIME_CADENCES.length - 1] ?? 86_400_000
+  let cadence = TIME_CADENCES[TIME_CADENCES.length - 1] ?? DAY_MS
   for (const candidate of TIME_CADENCES) {
     if (span / candidate <= 7) {
       cadence = candidate
@@ -88,7 +103,21 @@ export function timeTicks(fromMs: number, toMs: number): number[] {
     }
   }
   const ticks: number[] = []
-  for (let t = Math.ceil(fromMs / cadence) * cadence; t <= toMs; t += cadence) ticks.push(t)
+  if (cadence >= DAY_MS) {
+    const days = Math.max(1, Math.round(cadence / DAY_MS))
+    const at = new Date(fromMs)
+    const cursor = new Date(at.getFullYear(), at.getMonth(), at.getDate())
+    if (cursor.getTime() < fromMs) cursor.setDate(cursor.getDate() + days)
+    while (cursor.getTime() <= toMs) {
+      ticks.push(cursor.getTime())
+      cursor.setDate(cursor.getDate() + days)
+    }
+  } else {
+    const offsetMs = new Date(fromMs).getTimezoneOffset() * 60_000
+    for (let t = Math.ceil((fromMs - offsetMs) / cadence) * cadence + offsetMs; t <= toMs; t += cadence) {
+      ticks.push(t)
+    }
+  }
   return ticks.length > 0 ? ticks : [fromMs]
 }
 

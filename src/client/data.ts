@@ -71,6 +71,19 @@ export function formatTokens(n: number | undefined): string {
 }
 
 /**
+ * An x-axis label for the time-based chart axis. `HH:MM` reads as a clock
+ * within a single day; once the plotted span crosses one, the date leads,
+ * because a bare `09:00` repeated down a week-long axis names nothing.
+ */
+export function formatAxisTime(ms: number | undefined, withDate: boolean): string {
+  if (ms === undefined) return '–'
+  const at = new Date(ms)
+  const pad = (n: number): string => (n < 10 ? '0' + String(n) : String(n))
+  const clock = pad(at.getHours()) + ':' + pad(at.getMinutes())
+  return withDate ? pad(at.getMonth() + 1) + '-' + pad(at.getDate()) + ' ' + clock : clock
+}
+
+/**
  * Format a byte count for the summary strip. Binary units (the store's caps
  * are powers of two), two significant decimals from MB up so a session's
  * figure moves visibly between polls instead of sitting on a rounded integer.

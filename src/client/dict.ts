@@ -124,7 +124,6 @@ export interface ViewDict {
   stale: string
   refresh: string
   auto: string
-  calls: string
   time: string
   model: string
   ttft: string
@@ -142,6 +141,8 @@ export interface ViewDict {
   sizeHint: string
   retryOf: string
   sumCalls: string
+  /** Calls label while only part of the session is loaded; {total} = all of it. */
+  sumCallsOf: string
   sumBilledInput: string
   /** Tooltip: what the billed-input total counts. */
   sumBilledInputHint: string

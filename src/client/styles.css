@@ -69,19 +69,25 @@
   flex-direction: column;
 }
 
-/* Auto-fit tracks, as the old tile grid had: five figures huddled at the
-   left of a full-width ledger read as unfinished, however well spaced they
-   were among themselves. Empty tracks collapse, so the five spread edge to
-   edge on a wide pane and wrap to further rows on a narrow one. */
+/* Figures left, controls right, one line. Stretching the figures across the
+   full width (1fr tracks) filled it without composing anything: 242px tracks
+   holding ~70px each put 170px of dead air between every pair, and five
+   items at mechanical intervals stop reading as a row. What the block needed
+   was not spread but an ANCHOR on the far edge, which the controls are. */
+.rl-stats-top {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 16px 24px;
+  flex-wrap: wrap;
+}
+
 .rl-stats-row {
-  display: grid;
-  /* 190px, not the ~150 the five figures actually need: at a ~770px ledger
-     four narrower tracks still fit and strand the fifth alone on row two,
-     where this breaks a more even 3 + 2. Wide panes are unaffected — six
-     tracks fit there, and auto-fit collapses the empty one. */
-  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
-  align-items: baseline;
-  gap: 10px 16px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 10px 36px;
+  min-width: 0;
 }
 
 .rl-metric {

@@ -501,7 +501,13 @@ export function makeRequestLogView(source: DictSource): (props: { sessionId?: st
     const sums = summarize(state.calls)
     // A headline figure: the number leads, its name sits under it. A trailing
     // unit ('2.86 MB') is set smaller so the digits stay the thing you read.
-    const metric = (label: string, text: string, cls?: string, title?: string): React.ReactElement => {
+    const metric = (
+      label: string,
+      text: string,
+      cls?: string,
+      title?: string,
+      labelOverride?: string,
+    ): React.ReactElement => {
       const { value, unit } = splitMeasure(text)
       return h('div', {
         className: 'rl-metric' + (cls === undefined ? '' : ' ' + cls),
@@ -510,7 +516,7 @@ export function makeRequestLogView(source: DictSource): (props: { sessionId?: st
         h('span', { className: 'rl-metric-value' },
           value,
           unit === undefined ? null : h('span', { className: 'rl-metric-unit' }, unit)),
-        h('span', { className: 'rl-metric-label' }, label))
+        h('span', { className: 'rl-metric-label' }, labelOverride ?? label))
     }
     // One part of the breakdown line under the headlines.
     const part = (value: string, label: string): React.ReactElement =>
@@ -525,26 +531,22 @@ export function makeRequestLogView(source: DictSource): (props: { sessionId?: st
       h('div', { className: 'rl-fixed-head' },
         state.warning === undefined ? null : h('div', { className: 'rl-warn', title: state.warning },
           dict.stale),
-        h('div', { className: 'rl-head' },
-          h('span', { className: 'rl-head-title' }, dict.calls + ' · ' + String(state.total)),
-          h('span', { className: 'rl-head-actions' },
-            h('button', {
-              className: 'rl-btn' + (charts.open ? ' rl-btn-on' : ''),
-              title: dict.charts.toggleHint,
-              onClick: () => onChartsPrefs({ open: !charts.open }),
-            }, dict.charts.toggle),
-            h('button', {
-              className: 'rl-btn' + (auto ? ' rl-btn-on' : ''),
-              onClick: () => {
-                const next = !auto
-                setAuto(next)
-                updateViewMemory(sessionId, { auto: next })
-              },
-            }, dict.auto),
-            h('button', { className: 'rl-btn', onClick: refresh }, dict.refresh))),
         h('div', { className: 'rl-stats' },
-          h('div', { className: 'rl-stats-row' },
-            metric(dict.sumCalls, String(sums.count) + (sums.count < state.total ? '+' : '')),
+          // Figures and controls share one line: the figures read as a group
+          // only when something holds the far edge, and the controls are
+          // what that is.
+          h('div', { className: 'rl-stats-top' },
+           h('div', { className: 'rl-stats-row' },
+            // The panel title used to repeat this count beside it; folding the
+            // total into the label drops the duplication AND says what the
+            // other figures are summed over, which the bare '100+' never did.
+            metric(
+              dict.sumCalls,
+              String(sums.count),
+              undefined,
+              undefined,
+              sums.count < state.total ? interp(dict.sumCallsOf, { total: String(state.total) }) : undefined,
+            ),
             metric(dict.sumBilledInput, formatTokens(sums.billed), undefined, dict.sumBilledInputHint),
             // The hit rate is the figure people actually scan, and the only
             // one carrying colour — which is what makes it findable.
@@ -560,6 +562,21 @@ export function makeRequestLogView(source: DictSource): (props: { sessionId?: st
                   cap: formatBytes(state.storage.maxFileBytes),
                   pct: formatPct(state.storage.logicalBytes, state.storage.maxFileBytes),
                 }))),
+            h('span', { className: 'rl-head-actions' },
+              h('button', {
+                className: 'rl-btn' + (charts.open ? ' rl-btn-on' : ''),
+                title: dict.charts.toggleHint,
+                onClick: () => onChartsPrefs({ open: !charts.open }),
+              }, dict.charts.toggle),
+              h('button', {
+                className: 'rl-btn' + (auto ? ' rl-btn-on' : ''),
+                onClick: () => {
+                  const next = !auto
+                  setAuto(next)
+                  updateViewMemory(sessionId, { auto: next })
+                },
+              }, dict.auto),
+              h('button', { className: 'rl-btn', onClick: refresh }, dict.refresh))),
           // Billed input IS these three summed; naming the line says so.
           h('div', { className: 'rl-stats-sub' },
             h('span', { className: 'rl-sub-key' }, dict.sumInput),

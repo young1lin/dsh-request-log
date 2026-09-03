@@ -88,12 +88,12 @@ calls.push(entryOf({
 
 const dict: Dict = {
   tab: 'Requests', empty: '', emptyHint: '', error: '', retry: '',
-  stepHint: '', stale: '', refresh: 'Refresh', auto: 'Auto', calls: 'Provider calls',
+  stepHint: '', stale: '', refresh: 'Refresh', auto: 'Auto',
   time: 'Time', model: 'Model', ttft: 'TTFT', totalTime: 'Total',
   colSpeed: 'Speed', speedHint: '', colBilledInput: 'Total in', colIn: 'In',
   colCacheRead: 'Cache hit', hitRateHint: '', colHitRate: 'Hit %',
   colCacheWrite: 'Cache write', colOut: 'Out', size: 'Msg/Calls', sizeHint: '',
-  retryOf: '', sumCalls: 'Calls', sumBilledInput: 'Total in', sumBilledInputHint: '',
+  retryOf: '', sumCalls: 'Calls', sumCallsOf: 'of {total} calls', sumBilledInput: 'Total in', sumBilledInputHint: '',
   sumInput: 'Input', sumUncached: 'uncached', sumCached: 'cached', sumWritten: 'written', sumHitRate: 'Hit rate',
   sumCacheWrite: 'Cache write', sumOutput: 'Output',
   sumStorage: 'Disk added', sumStorageHint: '', loadMore: '',

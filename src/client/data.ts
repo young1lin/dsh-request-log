@@ -71,6 +71,18 @@ export function formatTokens(n: number | undefined): string {
 }
 
 /**
+ * Split a formatted measure into its number and trailing unit, so the summary
+ * strip can set `MB` smaller than the `2.86` it qualifies. Only a
+ * SPACE-separated unit splits: formatTokens glues its suffix on ('311.9k'),
+ * where the k is part of how the number reads and must not shrink.
+ */
+export function splitMeasure(text: string): { value: string; unit?: string } {
+  const at = text.lastIndexOf(' ')
+  if (at <= 0 || at === text.length - 1) return { value: text }
+  return { value: text.slice(0, at), unit: text.slice(at + 1) }
+}
+
+/**
  * An x-axis label for the time-based chart axis. `HH:MM` reads as a clock
  * within a single day; once the plotted span crosses one, the date leads,
  * because a bare `09:00` repeated down a week-long axis names nothing.

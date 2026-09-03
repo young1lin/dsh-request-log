@@ -94,7 +94,7 @@ const dict: Dict = {
   colCacheRead: 'Cache hit', hitRateHint: '', colHitRate: 'Hit %',
   colCacheWrite: 'Cache write', colOut: 'Out', size: 'Msg/Calls', sizeHint: '',
   retryOf: '', sumCalls: 'Calls', sumBilledInput: 'Total in', sumBilledInputHint: '',
-  sumInput: 'Input', sumCacheRead: 'Cache hit', sumHitRate: 'Hit rate',
+  sumInput: 'Input', sumUncached: 'uncached', sumCached: 'cached', sumWritten: 'written', sumHitRate: 'Hit rate',
   sumCacheWrite: 'Cache write', sumOutput: 'Output',
   sumStorage: 'Disk added', sumStorageHint: '', loadMore: '',
   charts: {

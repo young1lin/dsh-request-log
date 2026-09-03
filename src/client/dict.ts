@@ -145,8 +145,13 @@ export interface ViewDict {
   sumBilledInput: string
   /** Tooltip: what the billed-input total counts. */
   sumBilledInputHint: string
+  /** Sub-line prefix naming what the breakdown decomposes. */
   sumInput: string
-  sumCacheRead: string
+  /** Breakdown part labels: uncached input, cache reads, cache writes.
+   *  Lower case and parallel — they read as a list, not as three headings. */
+  sumUncached: string
+  sumCached: string
+  sumWritten: string
   sumHitRate: string
   sumCacheWrite: string
   sumOutput: string

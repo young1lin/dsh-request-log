@@ -11,7 +11,7 @@
 
 import { ErrorBoundary, React, h } from './react'
 import type { CallIndexEntry, SessionStorageFootprint } from '../shared/types'
-import { ApiError, fetchCalls, formatBytes, formatDateTime, formatDuration, formatPct, formatTime, formatToolDispatches, formatTokens, formatTps, speedReading } from './data'
+import { ApiError, fetchCalls, formatBytes, formatDateTime, formatDuration, formatPct, formatTime, formatToolDispatches, formatTokens, formatTps, speedReading, splitMeasure } from './data'
 import { makeCallDetail } from './detail'
 import { StatsPanel } from './chart'
 import { interp, type ViewDict } from './dict'
@@ -499,13 +499,23 @@ export function makeRequestLogView(source: DictSource): (props: { sessionId?: st
     }
 
     const sums = summarize(state.calls)
-    const stat = (label: string, value: string, cls?: string, title?: string): React.ReactElement =>
-      h('div', {
-        className: 'rl-stat' + (cls === undefined ? '' : ' ' + cls),
+    // A headline figure: the number leads, its name sits under it. A trailing
+    // unit ('2.86 MB') is set smaller so the digits stay the thing you read.
+    const metric = (label: string, text: string, cls?: string, title?: string): React.ReactElement => {
+      const { value, unit } = splitMeasure(text)
+      return h('div', {
+        className: 'rl-metric' + (cls === undefined ? '' : ' ' + cls),
         ...title === undefined ? {} : { title },
       },
-        h('span', { className: 'rl-stat-label' }, label),
-        h('span', { className: 'rl-stat-value' }, value))
+        h('span', { className: 'rl-metric-value' },
+          value,
+          unit === undefined ? null : h('span', { className: 'rl-metric-unit' }, unit)),
+        h('span', { className: 'rl-metric-label' }, label))
+    }
+    // One part of the breakdown line under the headlines.
+    const part = (value: string, label: string): React.ReactElement =>
+      h('span', { className: 'rl-sub-part', key: label },
+        h('span', { className: 'rl-sub-value' }, value), ' ', label)
 
     // The head and summary ride a sticky wrapper: the ledger pins to the
     // newest call at the bottom (and the real scroller may be an ancestor
@@ -533,23 +543,29 @@ export function makeRequestLogView(source: DictSource): (props: { sessionId?: st
             }, dict.auto),
             h('button', { className: 'rl-btn', onClick: refresh }, dict.refresh))),
         h('div', { className: 'rl-stats' },
-          stat(dict.sumCalls, String(sums.count) + (sums.count < state.total ? '+' : '')),
-          stat(dict.sumBilledInput, formatTokens(sums.billed), undefined, dict.sumBilledInputHint),
-        stat(dict.sumInput, formatTokens(sums.input)),
-        stat(dict.sumCacheRead, formatTokens(sums.cacheRead), 'rl-stat-hit'),
-        stat(dict.sumHitRate, formatPct(sums.cacheRead, sums.billed), 'rl-stat-hit'),
-          stat(dict.sumCacheWrite, formatTokens(sums.cacheWrite)),
-          stat(dict.sumOutput, formatTokens(sums.output), 'rl-stat-out'),
-          // Marginal, not the transcript's weight — the tooltip carries the
-          // whole caveat, so the label says ADDED and never "total".
-          state.storage === undefined
-            ? null
-            : stat(dict.sumStorage, formatBytes(state.storage.logicalBytes), undefined, interp(dict.sumStorageHint, {
-                envelope: formatBytes(state.storage.envelopeBytes),
-                objects: formatBytes(state.storage.objectBytes),
-                cap: formatBytes(state.storage.maxFileBytes),
-                pct: formatPct(state.storage.logicalBytes, state.storage.maxFileBytes),
-              })))),
+          h('div', { className: 'rl-stats-row' },
+            metric(dict.sumCalls, String(sums.count) + (sums.count < state.total ? '+' : '')),
+            metric(dict.sumBilledInput, formatTokens(sums.billed), undefined, dict.sumBilledInputHint),
+            // The hit rate is the figure people actually scan, and the only
+            // one carrying colour — which is what makes it findable.
+            metric(dict.sumHitRate, formatPct(sums.cacheRead, sums.billed), 'rl-metric-hit'),
+            metric(dict.sumOutput, formatTokens(sums.output)),
+            // Marginal, not the transcript's weight — the tooltip carries the
+            // whole caveat, so the label says ADDED and never "total".
+            state.storage === undefined
+              ? null
+              : metric(dict.sumStorage, formatBytes(state.storage.logicalBytes), undefined, interp(dict.sumStorageHint, {
+                  envelope: formatBytes(state.storage.envelopeBytes),
+                  objects: formatBytes(state.storage.objectBytes),
+                  cap: formatBytes(state.storage.maxFileBytes),
+                  pct: formatPct(state.storage.logicalBytes, state.storage.maxFileBytes),
+                }))),
+          // Billed input IS these three summed; naming the line says so.
+          h('div', { className: 'rl-stats-sub' },
+            h('span', { className: 'rl-sub-key' }, dict.sumInput),
+            part(formatTokens(sums.input), dict.sumUncached),
+            part(formatTokens(sums.cacheRead), dict.sumCached),
+            part(formatTokens(sums.cacheWrite), dict.sumWritten)))),
         charts.open
           ? h(StatsPanel, { calls: state.calls, dict, prefs: charts, onPrefs: onChartsPrefs })
           : null,

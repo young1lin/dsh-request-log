@@ -13,6 +13,7 @@ import {
   formatDateTime,
   formatAxisTime,
   formatBytes,
+  splitMeasure,
   formatDuration,
   formatPct,
   formatTime,
@@ -203,5 +204,19 @@ describe('formatAxisTime', () => {
 
   it('renders an absent time as a dash', () => {
     expect(formatAxisTime(undefined, false)).toBe(DASH)
+  })
+})
+
+describe('splitMeasure', () => {
+  it('separates a trailing unit so it can be set smaller than the number', () => {
+    expect(splitMeasure('2.86 MB')).toEqual({ value: '2.86', unit: 'MB' })
+    expect(splitMeasure('812 B')).toEqual({ value: '812', unit: 'B' })
+  })
+
+  it('leaves a unit-less measure whole', () => {
+    // formatTokens glues its suffix on ('311.9k'), and a bare count has none.
+    expect(splitMeasure('311.9k')).toEqual({ value: '311.9k' })
+    expect(splitMeasure('543')).toEqual({ value: '543' })
+    expect(splitMeasure(DASH)).toEqual({ value: DASH })
   })
 })

@@ -60,44 +60,83 @@
 }
 
 /* Overview stat cells (mirrors .lc-stats / .lc-stat). */
+/* Session summary. Five headline figures over one named breakdown line: the
+   billed input IS the sum of the three parts below it, so showing them as
+   equal siblings misstated the data as much as it crowded the strip. No
+   boxes — bg-layer-2 equals the page behind it, so the old tiles drew eight
+   4%-black outlines for no contrast at all. */
 .rl-stats {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(96px, 1fr));
-  gap: 6px;
-}
-
-.rl-stat {
-  background: var(--dsw-alias-bg-layer-2);
-  border: 1px solid var(--dsw-alias-border-l1);
-  border-radius: 8px;
-  padding: 6px;
   display: flex;
   flex-direction: column;
-  gap: 2px;
+}
+
+.rl-stats-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px 34px;
+}
+
+.rl-metric {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
   min-width: 0;
 }
 
-.rl-stat-label {
-  color: var(--dsw-alias-label-secondary);
-  font-size: 11px;
-  font-weight: 600;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.rl-stat-value {
+.rl-metric-value {
+  /* Set from the token here rather than inherited: a computed color inherited
+     from an ancestor would not follow a theme swap on this subtree. */
   color: var(--dsw-alias-label-primary);
-  font-size: 14px;
+  font-size: 17px;
   font-weight: 600;
+  letter-spacing: -0.015em;
+  /* Digits share a width, so a polling value cannot jitter the layout. */
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.rl-metric-unit {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--dsw-alias-label-tertiary);
+  margin-left: 3px;
+  letter-spacing: 0;
+}
+
+.rl-metric-label {
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 11px;
+  font-weight: 400;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  text-align: left;
 }
 
-.rl-stat-hit .rl-stat-value { color: var(--dsw-alias-state-success-primary); }
-.rl-stat-out .rl-stat-value { color: var(--dsw-alias-brand-text); }
+.rl-metric-hit .rl-metric-value { color: var(--dsw-alias-state-success-primary); }
+
+.rl-stats-sub {
+  margin-top: 11px;
+  padding-top: 9px;
+  border-top: 1px solid var(--dsw-alias-border-l1);
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+
+.rl-sub-key { margin-right: 8px; }
+
+.rl-sub-part + .rl-sub-part::before {
+  content: '·';
+  margin: 0 8px;
+  color: var(--dsw-alias-border-l2);
+}
+
+.rl-sub-value {
+  color: var(--dsw-alias-label-secondary);
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
 
 /* Call table. Header and every row are SEPARATE grids, so the column
    template must never contain a content-sized track: max-content would size

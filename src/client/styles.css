@@ -59,7 +59,6 @@
   color: var(--dsw-alias-label-primary-foreground);
 }
 
-/* Overview stat cells (mirrors .lc-stats / .lc-stat). */
 /* Session summary. Five headline figures over one named breakdown line: the
    billed input IS the sum of the three parts below it, so showing them as
    equal siblings misstated the data as much as it crowded the strip. No
@@ -70,11 +69,19 @@
   flex-direction: column;
 }
 
+/* Auto-fit tracks, as the old tile grid had: five figures huddled at the
+   left of a full-width ledger read as unfinished, however well spaced they
+   were among themselves. Empty tracks collapse, so the five spread edge to
+   edge on a wide pane and wrap to further rows on a narrow one. */
 .rl-stats-row {
-  display: flex;
-  flex-wrap: wrap;
+  display: grid;
+  /* 190px, not the ~150 the five figures actually need: at a ~770px ledger
+     four narrower tracks still fit and strand the fifth alone on row two,
+     where this breaks a more even 3 + 2. Wide panes are unaffected — six
+     tracks fit there, and auto-fit collapses the empty one. */
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
   align-items: baseline;
-  gap: 8px 34px;
+  gap: 10px 16px;
 }
 
 .rl-metric {

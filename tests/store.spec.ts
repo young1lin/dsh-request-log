@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { deflateRawSync, inflateRawSync } from 'node:zlib'
 import { afterEach, describe, expect, it } from 'vitest'
-import { assignSteps, CallStore, fileNameOf, packingOrder } from '../src/host/store.ts'
+import { assignSteps, CallStore, fileNameOf, footprintOfLine, packingOrder } from '../src/host/store.ts'
 import { BlobStore, CODEC_DEFLATE_RAW, decodeFrame, encodeFrame, hashOfContent } from '../src/host/blob.ts'
 import { PackStore } from '../src/host/pack.ts'
 import { TREE_SCHEMA, encodeTree, resolveTree } from '../src/host/tree.ts'
@@ -1672,5 +1672,80 @@ describe('unpacking', () => {
     // ...and the pack holding the unwritable object is never retired.
     const packFiles = (await readdir(join(directory, 'objects', 'packs'))).filter(n => n.endsWith('.pack'))
     expect(packFiles).toHaveLength(1)
+  })
+})
+
+describe('session storage footprint', () => {
+  it('splits one line into its envelope and materialized-object halves', () => {
+    const v3 = JSON.stringify({ v: RECORD_SCHEMA_V3, id: 'a', tree: 't', resp: 'r', zn: 512 })
+    const footprint = footprintOfLine(v3)
+    expect(footprint.envelope).toBe(Buffer.byteLength(v3, 'utf8'))
+    expect(footprint.object).toBe(512)
+
+    // A legacy full-body line carries its content inline: nothing to attribute.
+    const v1 = JSON.stringify({ schema: RECORD_SCHEMA, id: 'a' })
+    expect(footprintOfLine(v1)).toEqual({ envelope: Buffer.byteLength(v1, 'utf8'), object: 0 })
+
+    // Garbage must not poison the tally.
+    expect(footprintOfLine('not json')).toEqual({ envelope: 8, object: 0 })
+  })
+
+  it('reports the footprint alongside the index page', async () => {
+    const directory = await tempDir()
+    const store = new CallStore({ directory, retentionDays: 14, maxCallsPerSession: 100, maxFileBytes: 8 * 1024 * 1024 })
+    await store.append(richRecord())
+
+    const page = await store.listIndex('sess-1', 50, 0)
+    expect(page.storage).toBeDefined()
+    const { envelopeBytes, objectBytes, logicalBytes, maxFileBytes } = page.storage!
+    expect(envelopeBytes).toBeGreaterThan(0)
+    expect(objectBytes).toBeGreaterThan(0)
+    expect(logicalBytes).toBe(envelopeBytes + objectBytes)
+    expect(maxFileBytes).toBe(8 * 1024 * 1024)
+    // The envelope half is exactly the bytes on disk.
+    const text = await readFile(join(directory, 'sess-1.jsonl'), 'utf8')
+    expect(envelopeBytes).toBe(Buffer.byteLength(text, 'utf8'))
+  })
+
+  it('bills a dedup hit no object bytes — the number is MARGINAL, not content weight', async () => {
+    const directory = await tempDir()
+    const store = new CallStore({ directory, retentionDays: 14, maxCallsPerSession: 100, maxFileBytes: 8 * 1024 * 1024 })
+    const first = richRecord()
+    await store.append(first)
+    const after = (await store.listIndex('sess-1', 50, 0)).storage!
+
+    // A retry re-sends an identical request: same tree, same response body.
+    await store.append({ ...first, id: 'retry', attempt: 2 })
+    const retried = (await store.listIndex('sess-1', 50, 0)).storage!
+
+    expect(retried.objectBytes).toBe(after.objectBytes) // not one byte more
+    expect(retried.envelopeBytes).toBeGreaterThan(after.envelopeBytes)
+  })
+
+  it('keeps the tally correct across the incremental tail parse and a trim', async () => {
+    const directory = await tempDir()
+    const store = new CallStore({ directory, retentionDays: 14, maxCallsPerSession: 3, maxFileBytes: 8 * 1024 * 1024 })
+    for (let i = 0; i < 3; i += 1) {
+      await store.append(recordOf({ id: 'r' + String(i), timing: { startedAt: 1_000 + i } }))
+    }
+    await store.listIndex('sess-1', 50, 0) // warm the incremental cache
+    await store.append(recordOf({ id: 'r3', timing: { startedAt: 1_003 } }))
+
+    const grown = (await store.listIndex('sess-1', 50, 0)).storage!
+    const text = await readFile(join(directory, 'sess-1.jsonl'), 'utf8')
+    expect(grown.envelopeBytes).toBe(Buffer.byteLength(text, 'utf8'))
+
+    await store.sweep() // trims to the newest 3
+    const trimmed = (await store.listIndex('sess-1', 50, 0)).storage!
+    expect(trimmed.envelopeBytes).toBeLessThan(grown.envelopeBytes)
+    expect(trimmed.logicalBytes).toBe(trimmed.envelopeBytes + trimmed.objectBytes)
+  })
+
+  it('reports a zero footprint for a session that has no file', async () => {
+    const directory = await tempDir()
+    const store = new CallStore({ directory, retentionDays: 14, maxCallsPerSession: 100, maxFileBytes: 1024 })
+    const page = await store.listIndex('nobody', 50, 0)
+    expect(page.total).toBe(0)
+    expect(page.storage).toEqual({ envelopeBytes: 0, objectBytes: 0, logicalBytes: 0, maxFileBytes: 1024 })
   })
 })

@@ -146,6 +146,14 @@ export interface ViewDict {
   sumHitRate: string
   sumCacheWrite: string
   sumOutput: string
+  /** Label of the disk-footprint stat. Says ADDED, never total — see sumStorageHint. */
+  sumStorage: string
+  /**
+   * Tooltip behind {@link sumStorage}: {envelope}, {objects}, {pct}, {cap}.
+   * Must keep saying that the figure is MARGINAL — a piece already stored
+   * bills nothing — or readers will read it as the transcript's weight.
+   */
+  sumStorageHint: string
   /** Load-older button label; {count} = entries not yet loaded. */
   loadMore: string
   charts: ChartsDict

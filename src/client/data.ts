@@ -71,6 +71,22 @@ export function formatTokens(n: number | undefined): string {
 }
 
 /**
+ * Format a byte count for the summary strip. Binary units (the store's caps
+ * are powers of two), two significant decimals from MB up so a session's
+ * figure moves visibly between polls instead of sitting on a rounded integer.
+ *
+ * `undefined` renders as a dash, never as `0 B`: a zero is a claim that
+ * nothing was stored, while an absence means a server too old to report it.
+ */
+export function formatBytes(n: number | undefined): string {
+  if (n === undefined) return '–'
+  if (n < 1024) return String(n) + ' B'
+  if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB'
+  if (n < 1024 * 1024 * 1024) return (n / (1024 * 1024)).toFixed(2) + ' MB'
+  return (n / (1024 * 1024 * 1024)).toFixed(2) + ' GB'
+}
+
+/**
  * A stream phase shorter than STREAM_FLOOR_MS is not measurable: some
  * adapters flush the whole response at once (buffered SSE / post-reasoning
  * body), and dividing by ~0ms yields absurd rates.

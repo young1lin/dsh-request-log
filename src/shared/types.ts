@@ -160,12 +160,38 @@ export interface CallIndexEntry {
   requestChars: number
 }
 
+/**
+ * What one session's records have MATERIALIZED on disk — the same accounting
+ * `maxFileBytes` enforces, surfaced so the number is visible instead of only
+ * being a cap the operator has to guess at.
+ *
+ * This is a MARGINAL figure, not the weight of the conversation: a piece
+ * already in the object store bills nothing, so a retry bills 0 and pieces
+ * two sessions share bill to whichever wrote them first. A session that
+ * reused heavily can therefore read far smaller than its transcript, and
+ * per-session figures never sum to the store directory's size (pack indexes,
+ * block entry tables and cluster slack belong to no session). UI copy must
+ * say ADDED, never total.
+ */
+export interface SessionStorageFootprint {
+  /** Bytes of the session's own `.jsonl` — its envelope lines. */
+  envelopeBytes: number
+  /** Compressed object bytes these envelopes' appends actually created. */
+  objectBytes: number
+  /** `envelopeBytes + objectBytes`: what the per-session cap bills. */
+  logicalBytes: number
+  /** The cap in force, so a client can render a share without guessing it. */
+  maxFileBytes: number
+}
+
 /** Paged index response. */
 export interface CallIndexResponse {
   calls: CallIndexEntry[]
   total: number
   offset: number
   limit: number
+  /** Absent only from responses built before the field existed. */
+  storage?: SessionStorageFootprint
 }
 
 /** Health probe response. */

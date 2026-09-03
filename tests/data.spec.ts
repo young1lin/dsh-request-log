@@ -11,6 +11,7 @@ import {
   fetchCall,
   fetchCalls,
   formatDateTime,
+  formatBytes,
   formatDuration,
   formatPct,
   formatTime,
@@ -165,5 +166,22 @@ describe('formatToolDispatches', () => {
   it('renders single calls bare and repeats with a multiplier', () => {
     expect(formatToolDispatches([{ name: 'read', count: 1 }])).toBe('read')
     expect(formatToolDispatches([{ name: 'read', count: 1 }, { name: 'pwsh', count: 2 }])).toBe('read · pwsh ×2')
+  })
+})
+
+describe('formatBytes', () => {
+  it('scales from bytes through MB, keeping small figures exact', () => {
+    expect(formatBytes(0)).toBe('0 B')
+    expect(formatBytes(812)).toBe('812 B')
+    // A round KiB reads as 1.0 KB, never as 1024 B.
+    expect(formatBytes(1024)).toBe('1.0 KB')
+    expect(formatBytes(390 * 1024)).toBe('390.0 KB')
+    expect(formatBytes(3_000_000)).toBe('2.86 MB')
+    expect(formatBytes(2 * 1024 * 1024 * 1024)).toBe('2.00 GB')
+  })
+
+  it('renders an absent figure as a dash rather than 0 B', () => {
+    // 0 B is a claim (nothing stored); undefined is an absence (old server).
+    expect(formatBytes(undefined)).toBe(DASH)
   })
 })

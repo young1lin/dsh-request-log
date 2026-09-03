@@ -10,8 +10,8 @@
  */
 
 import { ErrorBoundary, React, h } from './react'
-import type { CallIndexEntry } from '../shared/types'
-import { ApiError, fetchCalls, formatDateTime, formatDuration, formatPct, formatTime, formatToolDispatches, formatTokens, formatTps, speedReading } from './data'
+import type { CallIndexEntry, SessionStorageFootprint } from '../shared/types'
+import { ApiError, fetchCalls, formatBytes, formatDateTime, formatDuration, formatPct, formatTime, formatToolDispatches, formatTokens, formatTps, speedReading } from './data'
 import { makeCallDetail } from './detail'
 import { StatsPanel } from './chart'
 import { interp, type ViewDict } from './dict'
@@ -62,7 +62,15 @@ export function reconcileCalls(next: CallIndexEntry[], prev: CallIndexEntry[] | 
 type LoadState =
   | { kind: 'loading' }
   | { kind: 'error'; message: string }
-  | { kind: 'ready'; calls: CallIndexEntry[]; total: number; /** Set when the LAST refresh failed and the data shown is stale. */ warning?: string }
+  | {
+      kind: 'ready'
+      calls: CallIndexEntry[]
+      total: number
+      /** Session disk footprint, absent against a server too old to report it. */
+      storage?: SessionStorageFootprint
+      /** Set when the LAST refresh failed and the data shown is stale. */
+      warning?: string
+    }
 
 function StatusDot(props: { status: string }): React.ReactElement {
   const cls = props.status === 'ok' ? 'rl-dot-ok' : props.status === 'open' ? 'rl-dot-open' : 'rl-dot-bad'
@@ -338,8 +346,8 @@ export function makeRequestLogView(source: DictSource): (props: { sessionId?: st
           // The API pages newest-first; the ledger renders oldest-first so
           // the newest call sits at the bottom, like the Trajectory tab.
           setState(previous => previous.kind === 'ready'
-            ? { kind: 'ready', calls: reconcileCalls(page.calls, previous.calls), total: page.total }
-            : { kind: 'ready', calls: reconcileCalls(page.calls, undefined), total: page.total })
+            ? { kind: 'ready', calls: reconcileCalls(page.calls, previous.calls), total: page.total, storage: page.storage }
+            : { kind: 'ready', calls: reconcileCalls(page.calls, undefined), total: page.total, storage: page.storage })
         } catch (error) {
           if (cancelled || abort.signal.aborted) return
           const message = error instanceof ApiError ? error.message : String(error)
@@ -347,7 +355,7 @@ export function makeRequestLogView(source: DictSource): (props: { sessionId?: st
           // loaded ledger — the data stays and a banner marks it stale. Only
           // a session with nothing loaded yet degrades to the error screen.
           setState(prev => prev.kind === 'ready'
-            ? { kind: 'ready', calls: prev.calls, total: prev.total, warning: message }
+            ? { kind: 'ready', calls: prev.calls, total: prev.total, storage: prev.storage, warning: message }
             : { kind: 'error', message })
         }
       }
@@ -376,7 +384,7 @@ export function makeRequestLogView(source: DictSource): (props: { sessionId?: st
           if (cancelled) return
           setState(prev => {
             if (prev.kind !== 'ready') {
-              return { kind: 'ready', calls: reconcileCalls(page.calls, undefined), total: page.total }
+              return { kind: 'ready', calls: reconcileCalls(page.calls, undefined), total: page.total, storage: page.storage }
             }
             const probeIds = new Set(page.calls.map(call => call.id))
             const prevById = new Map(prev.calls.map(call => [call.id, call]))
@@ -384,13 +392,13 @@ export function makeRequestLogView(source: DictSource): (props: { sessionId?: st
             // reuse entry objects for the rows it does (memo identity).
             const older = prev.calls.filter(call => !probeIds.has(call.id))
             const spliced = page.calls.slice().reverse().map(call => prevById.get(call.id) ?? call)
-            return { kind: 'ready', calls: [...older, ...spliced], total: page.total }
+            return { kind: 'ready', calls: [...older, ...spliced], total: page.total, storage: page.storage }
           })
         } catch (error) {
           if (cancelled || abort.signal.aborted) return
           const message = error instanceof ApiError ? error.message : String(error)
           setState(prev => prev.kind === 'ready'
-            ? { kind: 'ready', calls: prev.calls, total: prev.total, warning: message }
+            ? { kind: 'ready', calls: prev.calls, total: prev.total, storage: prev.storage, warning: message }
             : prev)
         }
       }
@@ -531,7 +539,17 @@ export function makeRequestLogView(source: DictSource): (props: { sessionId?: st
         stat(dict.sumCacheRead, formatTokens(sums.cacheRead), 'rl-stat-hit'),
         stat(dict.sumHitRate, formatPct(sums.cacheRead, sums.billed), 'rl-stat-hit'),
           stat(dict.sumCacheWrite, formatTokens(sums.cacheWrite)),
-          stat(dict.sumOutput, formatTokens(sums.output), 'rl-stat-out'))),
+          stat(dict.sumOutput, formatTokens(sums.output), 'rl-stat-out'),
+          // Marginal, not the transcript's weight — the tooltip carries the
+          // whole caveat, so the label says ADDED and never "total".
+          state.storage === undefined
+            ? null
+            : stat(dict.sumStorage, formatBytes(state.storage.logicalBytes), undefined, interp(dict.sumStorageHint, {
+                envelope: formatBytes(state.storage.envelopeBytes),
+                objects: formatBytes(state.storage.objectBytes),
+                cap: formatBytes(state.storage.maxFileBytes),
+                pct: formatPct(state.storage.logicalBytes, state.storage.maxFileBytes),
+              })))),
         charts.open
           ? h(StatsPanel, { calls: state.calls, dict, prefs: charts, onPrefs: onChartsPrefs })
           : null,

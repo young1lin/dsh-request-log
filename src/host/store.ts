@@ -156,6 +156,12 @@ interface IndexCacheEntry {
    * can be parsed incrementally instead of re-reading the whole file.
    */
   parsedBytes: number
+  /**
+   * Attributed bytes of exactly the lines in {@link entries}. Accumulated
+   * beside them so the incremental tail parse carries it too: publishing the
+   * footprint costs the poll no extra read.
+   */
+  footprint: LineFootprint
 }
 
 /** Validated logical-bytes marker, bound to the file state it was counted at. */
@@ -345,36 +351,90 @@ function entryOfLine(line: string): CallIndexEntry | undefined {
   return undefined
 }
 
+/** The two halves of what one line attributes to its session. */
+export interface LineFootprint {
+  /** The envelope line's own bytes — what sits in the `.jsonl`. */
+  envelope: number
+  /** Compressed object bytes this line's append materialized. */
+  object: number
+}
+
+/**
+ * Split one KEPT line into the bytes it attributes to its session: the line
+ * itself, plus the compressed object bytes its append materialized (counted
+ * once per referencing envelope). Legacy full-body lines carry their content
+ * inline, so they attribute nothing to the object half.
+ *
+ * The primitive behind both the `maxFileBytes` cap and the footprint the read
+ * API publishes — one accounting, so what the UI shows is exactly what the cap
+ * bills. Unparsable input degrades to its physical size, never to a throw:
+ * this runs on the sweep's trim path, where a torn line must not be fatal.
+ */
+export function footprintOfLine(line: string): LineFootprint {
+  const envelope = Buffer.byteLength(line, 'utf8')
+  if (isV3Line(line)) {
+    try {
+      const env = JSON.parse(line) as { zn?: unknown }
+      // zn is what this append MATERIALIZED: exact, and never double-counted
+      // across records that share a blob.
+      return { envelope, object: typeof env.zn === 'number' && env.zn >= 0 ? env.zn : 0 }
+    } catch {
+      return { envelope, object: 0 }
+    }
+  }
+  if (!isV2Line(line)) return { envelope, object: 0 }
+  try {
+    const env = JSON.parse(line) as { refs?: { z?: unknown }[] }
+    let object = 0
+    if (Array.isArray(env.refs)) {
+      for (const ref of env.refs) {
+        if (ref !== null && typeof ref === 'object' && typeof ref.z === 'number') object += ref.z
+      }
+    }
+    return { envelope, object }
+  } catch {
+    return { envelope, object: 0 }
+  }
+}
+
 /**
  * Logical bytes one KEPT line attributes to its session: the line itself plus
  * its referenced compressed sizes (once per referencing envelope). Legacy
  * lines attribute their raw size.
  */
 function logicalBytesOfLine(line: string): number {
-  const physical = Buffer.byteLength(line, 'utf8')
-  if (isV3Line(line)) {
-    try {
-      const env = JSON.parse(line) as { zn?: unknown }
-      // zn is what this append MATERIALIZED: exact, and never double-counted
-      // across records that share a blob.
-      return physical + (typeof env.zn === 'number' && env.zn >= 0 ? env.zn : 0)
-    } catch {
-      return physical
-    }
+  const { envelope, object } = footprintOfLine(line)
+  return envelope + object
+}
+
+/** Index entries of a run of complete lines, with what they attribute. */
+interface ParsedLines {
+  entries: CallIndexEntry[]
+  footprint: LineFootprint
+}
+
+/**
+ * Project a run of COMPLETE lines into index entries and their attributed
+ * bytes in one pass. Both readers share it so the footprint rides the
+ * incremental tail parse: a poll on a grown file tallies only the new lines,
+ * never a re-scan of the whole session.
+ *
+ * A line that yields no entry (blank, or unparsable) attributes nothing —
+ * the tally must describe exactly the rows the page reports.
+ */
+function projectLines(text: string): ParsedLines {
+  const entries: CallIndexEntry[] = []
+  const footprint: LineFootprint = { envelope: 0, object: 0 }
+  for (const line of text.split('\n')) {
+    const entry = entryOfLine(line)
+    if (entry === undefined) continue
+    entries.push(entry)
+    const { envelope, object } = footprintOfLine(line)
+    // The newline every record is written with belongs to the line it ends.
+    footprint.envelope += envelope + 1
+    footprint.object += object
   }
-  if (!isV2Line(line)) return physical
-  try {
-    const env = JSON.parse(line) as { refs?: { z?: unknown }[] }
-    let total = physical
-    if (Array.isArray(env.refs)) {
-      for (const ref of env.refs) {
-        if (ref !== null && typeof ref === 'object' && typeof ref.z === 'number') total += ref.z
-      }
-    }
-    return total
-  } catch {
-    return physical
-  }
+  return { entries, footprint }
 }
 
 export class CallStore {
@@ -879,23 +939,18 @@ export class CallStore {
     })
   }
 
-  private async readAll(sessionId: string): Promise<{ entries: CallIndexEntry[]; parsedBytes: number }> {
+  private async readAll(sessionId: string): Promise<ParsedLines & { parsedBytes: number }> {
     let text: string
     try {
       text = await readFile(this.pathOf(sessionId), 'utf8')
     } catch {
-      return { entries: [], parsedBytes: 0 }
+      return { entries: [], footprint: { envelope: 0, object: 0 }, parsedBytes: 0 }
     }
     // Only complete lines count: a torn trailing write (no newline) is left
     // for a later pass so its completed form is parsed then.
     const completeEnd = text.endsWith('\n') ? text.length : Math.max(text.lastIndexOf('\n') + 1, 0)
     const complete = text.slice(0, completeEnd)
-    const entries: CallIndexEntry[] = []
-    for (const line of complete.split('\n')) {
-      const entry = entryOfLine(line)
-      if (entry !== undefined) entries.push(entry)
-    }
-    return { entries, parsedBytes: Buffer.byteLength(complete, 'utf8') }
+    return { ...projectLines(complete), parsedBytes: Buffer.byteLength(complete, 'utf8') }
   }
 
   /**
@@ -905,7 +960,7 @@ export class CallStore {
    * file shrank or the offset no longer sits on a line boundary (a trim
    * rewrote the file): callers fall back to a full re-read.
    */
-  private async readTail(sessionId: string, fromByte: number): Promise<{ entries: CallIndexEntry[]; parsedBytes: number } | null> {
+  private async readTail(sessionId: string, fromByte: number): Promise<(ParsedLines & { parsedBytes: number }) | null> {
     if (fromByte <= 0) return null
     const handle = await open(this.pathOf(sessionId), 'r').catch(() => null)
     if (handle === null) return null
@@ -922,19 +977,9 @@ export class CallStore {
       if (lastNewline !== text.length - 1) {
         // Torn trailing line: parse up to the last complete line only.
         const complete = lastNewline === -1 ? '' : text.slice(0, lastNewline + 1)
-        const entries: CallIndexEntry[] = []
-        for (const line of complete.split('\n')) {
-          const entry = entryOfLine(line)
-          if (entry !== undefined) entries.push(entry)
-        }
-        return { entries, parsedBytes: fromByte + Buffer.byteLength(complete, 'utf8') }
+        return { ...projectLines(complete), parsedBytes: fromByte + Buffer.byteLength(complete, 'utf8') }
       }
-      const entries: CallIndexEntry[] = []
-      for (const line of text.split('\n')) {
-        const entry = entryOfLine(line)
-        if (entry !== undefined) entries.push(entry)
-      }
-      return { entries, parsedBytes: size }
+      return { ...projectLines(text), parsedBytes: size }
     } finally {
       await handle.close().catch(() => {})
     }
@@ -946,33 +991,40 @@ export class CallStore {
    * parses only its appended tail — the 3s poll on a long session costs a
    * stat plus the new lines, never a re-parse of the whole history.
    */
-  private async entriesOf(sessionId: string): Promise<CallIndexEntry[]> {
+  private async entriesOf(sessionId: string): Promise<ParsedLines> {
     let info
     try {
       info = await stat(this.pathOf(sessionId))
     } catch {
       this.indexCache.delete(sessionId)
-      return []
+      return { entries: [], footprint: { envelope: 0, object: 0 } }
     }
     const cached = this.indexCache.get(sessionId)
     if (cached !== undefined && cached.mtimeMs === info.mtimeMs && cached.size === info.size) {
-      return cached.entries
+      return { entries: cached.entries, footprint: cached.footprint }
     }
     let entries: CallIndexEntry[]
+    let footprint: LineFootprint
     let parsedBytes: number
     if (cached !== undefined && info.size > cached.parsedBytes) {
       const tail = await this.readTail(sessionId, cached.parsedBytes)
       if (tail !== null) {
         entries = [...cached.entries, ...tail.entries]
+        footprint = {
+          envelope: cached.footprint.envelope + tail.footprint.envelope,
+          object: cached.footprint.object + tail.footprint.object,
+        }
         parsedBytes = tail.parsedBytes
       } else {
         const full = await this.readAll(sessionId)
         entries = full.entries
+        footprint = full.footprint
         parsedBytes = full.parsedBytes
       }
     } else {
       const full = await this.readAll(sessionId)
       entries = full.entries
+      footprint = full.footprint
       parsedBytes = full.parsedBytes
     }
     assignSteps(entries)
@@ -980,22 +1032,33 @@ export class CallStore {
       const oldest = this.indexCache.keys().next().value
       if (oldest !== undefined) this.indexCache.delete(oldest)
     }
-    this.indexCache.set(sessionId, { mtimeMs: info.mtimeMs, size: info.size, entries, parsedBytes })
-    return entries
+    this.indexCache.set(sessionId, { mtimeMs: info.mtimeMs, size: info.size, entries, parsedBytes, footprint })
+    return { entries, footprint }
   }
 
   /**
    * Newest-first index page for one session.
    */
   async listIndex(sessionId: string, limit: number, offset: number): Promise<CallIndexResponse> {
-    const entries = await this.entriesOf(sessionId)
+    const { entries, footprint } = await this.entriesOf(sessionId)
     const total = entries.length
     // Newest-first paging without materializing a reversed copy of the whole
     // session: the requested window is a slice off the tail, reversed.
     const end = Math.max(total - offset, 0)
     const start = Math.max(end - limit, 0)
     const calls = entries.slice(start, end).reverse()
-    return { calls, total, offset, limit }
+    return {
+      calls,
+      total,
+      offset,
+      limit,
+      storage: {
+        envelopeBytes: footprint.envelope,
+        objectBytes: footprint.object,
+        logicalBytes: footprint.envelope + footprint.object,
+        maxFileBytes: this.config.maxFileBytes,
+      },
+    }
   }
 
   /** Fetch one full record by attempt id (parses only the matching line). */

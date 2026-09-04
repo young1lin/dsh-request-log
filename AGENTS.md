@@ -8,6 +8,30 @@ This file provides guidance to coding agents working in this repository.
 
 `README.md` is the handoff document — read it before non-trivial work. `DESIGN-persistence.md` and `docs/superpowers/plans/` record the storage design decisions; `.superpowers/sdd/` (git-ignored) holds the task-by-task build history of the object-pack store.
 
+## The design bar
+
+Four standing criteria from the project owner. Every proposal — a feature, a
+control, a mechanism — is judged against **all four**, and a change that wins on
+one while losing on another is not an improvement. When in doubt, this section
+outranks cleverness.
+
+- **Simple.** Prefer the mechanism with the fewest moving parts and the smallest
+  failure surface. A 3s poll beats a streaming channel; plain `fetch` beats RPC.
+  Count what a change adds to the host process's lifecycle — held connections,
+  teardown paths, reconnection — not just what it adds to the diff.
+- **Concise.** Nothing that does not earn its place. A control the reader has to
+  be taught, or whose only job is to leak an implementation detail (a page size,
+  a poll interval, a cache boundary), is a defect wearing a feature's clothes.
+  Prefer removing the need over documenting the control.
+- **Functionally complete.** Simplicity is never bought by dropping a real case.
+  If a mechanism has a gap, close it in the code; do not hand the user a button
+  and rely on them noticing when to press it.
+- **Coherent with dsh.** Match the harness's own idiom — its design tokens, type
+  scale, control shapes, separators, iconography. Measure them in dsh (and in
+  the sibling plugins) before writing CSS. A value that appears nowhere in
+  either codebase is exactly what reads as foreign, and spacing is rarely the
+  culprit: the type scale usually is.
+
 ## Commands
 
 ```sh

@@ -11,8 +11,8 @@
 
 import { ErrorBoundary, React, h } from './react'
 import type { CallIndexEntry, SessionStorageFootprint } from '../shared/types'
-import { ApiError, fetchCalls, formatBytes, formatDateTime, formatDuration, formatPct, formatTime, formatToolDispatches, formatTokens, formatTps, speedReading, splitMeasure } from './data'
-import { makeCallDetail } from './detail'
+import { ApiError, fetchCalls, formatBytes, formatDateTime, formatDuration, formatLedgerTime, formatPct, formatToolDispatches, formatTokens, formatTps, speedReading, splitMeasure } from './data'
+import { chevron, makeCallDetail } from './detail'
 import { StatsPanel } from './chart'
 import { interp, type ViewDict } from './dict'
 import { PAGE_SIZE, loadViewMemory, updateViewMemory, type ChartsPrefs, type DetailPrefs, type SelectedCall } from './persist'
@@ -31,6 +31,11 @@ function useDict(source: DictSource): ViewDict {
 
 const NO_CALLS: CallIndexEntry[] = []
 
+/** Stable DOM target for chart → ledger navigation. */
+export function ledgerRowId(callId: string): string {
+  return 'dsh-request-log-call-' + encodeURIComponent(callId)
+}
+
 /** How far down the ledger must travel before the back-to-top button shows. */
 export const TOP_BTN_PX = 320
 
@@ -45,26 +50,6 @@ export const PIN_PX = 48
 /** True when the viewport sits at (or within {@link PIN_PX} of) the bottom. */
 export function pinnedToBottom(scrollTop: number, scrollHeight: number, clientHeight: number): boolean {
   return scrollHeight - scrollTop - clientHeight < PIN_PX
-}
-
-/**
- * Chevron for the floating scroll buttons. dsh draws every icon button with an
- * SVG; a text '↑' picks up the body font's arrow glyph, whose weight and
- * baseline match nothing else on the page and which is missing outright from
- * some CJK fallback faces.
- */
-function chevron(dir: 'up' | 'down'): React.ReactElement {
-  return h('svg', {
-    width: 13,
-    height: 13,
-    viewBox: '0 0 14 14',
-    'aria-hidden': true,
-    fill: 'none',
-    stroke: 'currentColor',
-    strokeWidth: 1.6,
-    strokeLinecap: 'round',
-    strokeLinejoin: 'round',
-  }, h('path', { d: dir === 'up' ? 'M3.5 8.25 7 4.75l3.5 3.5' : 'M3.5 5.75 7 9.25l3.5-3.5' }))
 }
 
 /** The element that actually scrolls for this ledger: .rl-root itself or a bounded ancestor pane. */
@@ -195,6 +180,10 @@ export function summarize(calls: CallIndexEntry[]): {
 const CallRow = React.memo(function CallRow(props: {
   call: CallIndexEntry
   dict: ViewDict
+  /** The loaded window spans more than one local day — lead the clock with its date. */
+  withDate: boolean
+  /** This row is the chart's current navigation target. */
+  located: boolean
   onOpen: () => void
 }): React.ReactElement {
   const call = props.call
@@ -221,12 +210,18 @@ const CallRow = React.memo(function CallRow(props: {
   const write = formatTokens(usage?.cacheWriteTokens)
   const out = formatTokens(usage?.outputTokens)
   const called = formatToolDispatches(call.calledTools)
-  return h('button', { className: 'rl-row', onClick: props.onOpen },
+  return h('button', {
+    id: ledgerRowId(call.id),
+    className: 'rl-row' + (props.located ? ' rl-row-located' : ''),
+    'aria-current': props.located ? 'true' : undefined,
+    onClick: props.onOpen,
+  },
     h('span', {
       className: 'rl-cell rl-c-time',
-      // HH:MM:SS alone is ambiguous across midnight; hover shows the date.
+      // A bare clock is ambiguous across midnight (and across a multi-day
+      // window — hence withDate); hover shows the full moment, zone included.
       title: formatDateTime(call.startedAt),
-    }, formatTime(call.startedAt)),
+    }, formatLedgerTime(call.startedAt, props.withDate)),
     h('span', { className: 'rl-cell rl-c-model' },
       h(StatusDot, { status: call.status }),
       h('span', { className: 'rl-model-name', title: call.provider + ' · ' + call.model }, call.model),
@@ -304,6 +299,7 @@ export function makeRequestLogView(source: DictSource): (props: { sessionId?: st
     const [auto, setAuto] = React.useState(initial.auto)
     const [charts, setCharts] = React.useState<ChartsPrefs>(initial.charts)
     const [selected, setSelected] = React.useState<SelectedCall | null>(initial.selected)
+    const [locatedCallId, setLocatedCallId] = React.useState<string | null>(null)
     const [tick, setTick] = React.useState(0)
     // Auto-refresh drives this probe counter (see the probe effect below);
     // manual refresh drives `tick` and reloads the whole window.
@@ -408,6 +404,17 @@ export function makeRequestLogView(source: DictSource): (props: { sessionId?: st
         return next
       })
     }, [sessionId])
+    const locateCall = React.useCallback((callId: string): void => {
+      setLocatedCallId(callId)
+      if (typeof document !== 'object') return
+      const row = document.getElementById(ledgerRowId(callId))
+      if (!(row instanceof HTMLElement)) return
+      // A deliberate chart jump means the reader left the live tail. Keep
+      // Auto polling, but do not let the next probe drag the viewport back.
+      stickToBottom.current = false
+      row.scrollIntoView({ block: 'center', inline: 'nearest' })
+      row.focus({ preventScroll: true })
+    }, [])
 
     // Full load: the whole loaded window (initial load, manual refresh,
     // "Load older" growing the limit). Records settle once and never
@@ -501,6 +508,12 @@ export function makeRequestLogView(source: DictSource): (props: { sessionId?: st
     // One O(n) pass per loaded-window change instead of a per-row scan. Must
     // sit above the conditional returns: it is a hook like the rest.
     const readyCalls = state.kind === 'ready' ? state.calls : NO_CALLS
+    // A clock that repeats across days names nothing: once the loaded window
+    // spans a day boundary, every Time cell leads with its date — the chart
+    // axis's own spansDays rule, kept in the same family.
+    const spansDays = readyCalls.length > 1
+      && new Date(readyCalls[0]!.startedAt).toDateString()
+        !== new Date(readyCalls[readyCalls.length - 1]!.startedAt).toDateString()
     const prevIds = React.useMemo(() => prevIdsOf(readyCalls), [readyCalls])
     // Openers must resolve predecessors through the LATEST map: prevIds is
     // rebuilt whenever the loaded window grows (Load older), and an opener
@@ -715,7 +728,13 @@ export function makeRequestLogView(source: DictSource): (props: { sessionId?: st
             part(formatTokens(sums.cacheRead), dict.sumCached),
             part(formatTokens(sums.cacheWrite), dict.sumWritten)))),
         charts.open
-          ? h(StatsPanel, { calls: state.calls, dict, prefs: charts, onPrefs: onChartsPrefs })
+          ? h(StatsPanel, {
+              calls: state.calls,
+              dict,
+              prefs: charts,
+              onPrefs: onChartsPrefs,
+              onSelectCall: locateCall,
+            })
           : null,
       state.calls.length < state.total
         ? h('div', { className: 'rl-loadmore' },
@@ -751,10 +770,11 @@ export function makeRequestLogView(source: DictSource): (props: { sessionId?: st
           key: call.id,
           call,
           dict,
+          withDate: spansDays,
+          located: call.id === locatedCallId,
           onOpen: openerOf(call),
         }))))
   }
 
   return RequestLogView
 }
-

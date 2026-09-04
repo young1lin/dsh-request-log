@@ -12,6 +12,7 @@ import {
   fetchCalls,
   formatDateTime,
   formatAxisTime,
+  formatLedgerTime,
   formatBytes,
   splitMeasure,
   formatDuration,
@@ -185,8 +186,10 @@ describe('formatTime / formatDateTime', () => {
     const ms = 1_700_000_000_000
     const date = new Date(ms)
     const pad = (n: number): string => String(n).padStart(2, '0')
+    const off = -date.getTimezoneOffset()
     const expected = String(date.getFullYear()) + '-' + pad(date.getMonth() + 1) + '-' + pad(date.getDate())
       + ' ' + pad(date.getHours()) + ':' + pad(date.getMinutes()) + ':' + pad(date.getSeconds())
+      + ' ' + (off < 0 ? '-' : '+') + pad(Math.floor(Math.abs(off) / 60)) + ':' + pad(Math.abs(off) % 60)
     expect(formatDateTime(ms)).toBe(expected)
   })
   it('dashes when unknown', () => {
@@ -255,6 +258,26 @@ describe('formatAxisTime', () => {
 
   it('renders an absent time as a dash', () => {
     expect(formatAxisTime(undefined, false)).toBe(DASH)
+  })
+})
+
+describe('formatLedgerTime', () => {
+  const at = (mo: number, d: number, h: number, mi: number, s: number) => new Date(2025, mo, d, h, mi, s).getTime()
+
+  it('reads as a clock within one day, seconds included', () => {
+    expect(formatLedgerTime(at(0, 1, 9, 5, 3), false)).toBe('09:05:03')
+  })
+
+  it('carries the date once the loaded window spans days', () => {
+    // A session that runs across a week renders '09:05:03' several times
+    // over with nothing telling the days apart — the same rule the chart
+    // axis already applies (formatAxisTime), kept for the table column.
+    expect(formatLedgerTime(at(8, 3, 9, 5, 3), true)).toBe('09-03 09:05:03')
+  })
+
+  it('renders an absent time as a dash', () => {
+    expect(formatLedgerTime(undefined, false)).toBe(DASH)
+    expect(formatLedgerTime(undefined, true)).toBe(DASH)
   })
 })
 

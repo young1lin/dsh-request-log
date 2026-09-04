@@ -25,7 +25,7 @@
 
 import { React, h } from './react'
 import type { CallIndexEntry } from '../shared/types'
-import { formatAxisTime, formatDuration, formatTime, formatTokens } from './data'
+import { formatAxisTime, formatDuration, formatLedgerTime, formatTokens } from './data'
 import {
   buildChartModel,
   cumulateSerieses,
@@ -124,6 +124,8 @@ export function StatsPanel(props: {
   dict: ViewDict
   prefs: ChartsPrefs
   onPrefs: (patch: Partial<ChartsPrefs>) => void
+  /** Select the concrete ledger row represented by a clicked chart slot. */
+  onSelectCall?: (callId: string) => void
 }): React.ReactElement {
   const dict = props.dict
   const charts = dict.charts
@@ -148,19 +150,6 @@ export function StatsPanel(props: {
       return next
     })
   }, [])
-
-  // Slot key → what the tooltip title says about it. The key is a step
-  // number on the numbered axis and a start time on the clock axis, so the
-  // map is rebuilt when the axis changes.
-  const slotMeta = React.useMemo(() => {
-    const map = new Map<number, { startedAt: number; step?: number; purpose?: string }>()
-    for (const call of props.calls) {
-      const key = timeMode ? call.startedAt : call.step
-      if (key === undefined || map.has(key)) continue
-      map.set(key, { startedAt: call.startedAt, step: call.step, purpose: call.purpose })
-    }
-    return map
-  }, [props.calls, timeMode])
 
   // --- width measurement ladder -------------------------------------------
   const bodyRef = React.useRef<HTMLDivElement | null>(null)
@@ -282,20 +271,55 @@ export function StatsPanel(props: {
     ? barDrawn.map(column => sx(column.x))
     : visible[0]?.points.map(p => sx(p.x)) ?? []
 
-  const onMove = React.useCallback((event: { clientX?: number }): void => {
-    if (hoverXs.length === 0 || typeof event.clientX !== 'number') return
+  const snapIndex = React.useCallback((event: { clientX?: number; clientY?: number }): number => {
+    if (hoverXs.length === 0 || typeof event.clientX !== 'number') return -1
     const svg = svgRef.current
-    if (svg === null) return
+    if (svg === null) return -1
     const rect = svg.getBoundingClientRect()
-    const index = nearestIndex(hoverXs, event.clientX - rect.left)
-    if (index < 0) {
-      setHover(null)
-      return
+    const nearest = nearestIndex(hoverXs, event.clientX - rect.left)
+    if (nearest < 0) return -1
+    let ordinal = nearest
+    // Concurrent calls can share an x pixel (and even the exact timestamp).
+    // When they do, vertical proximity chooses the visible point the reader
+    // actually clicked instead of making the first call permanently win.
+    if (typeof event.clientY === 'number') {
+      const tied: number[] = []
+      const targetX = hoverXs[nearest]!
+      for (let i = 0; i < hoverXs.length; i += 1) {
+        if (Math.abs(hoverXs[i]! - targetX) < 0.5) tied.push(i)
+      }
+      if (tied.length > 1) {
+        const pointerY = event.clientY - rect.top
+        let bestDistance = Number.POSITIVE_INFINITY
+        for (const candidate of tied) {
+          const slotIndex = cumulative ? barDrawn[candidate]!.idx : candidate
+          for (const series of visible) {
+            const y = series.points[slotIndex]?.y
+            if (y === null || y === undefined || !Number.isFinite(y)) continue
+            const distance = Math.abs(sy(y) - pointerY)
+            if (distance < bestDistance) {
+              bestDistance = distance
+              ordinal = candidate
+            }
+          }
+        }
+      }
     }
     // Bars carry their exact full-resolution slot index; lines keep the
     // drawn-set ordinal the tooltip code below has always consumed.
-    setHover({ index: cumulative ? barDrawn[index]!.idx : index })
-  }, [hoverXs, cumulative, barDrawn])
+    return cumulative ? barDrawn[ordinal]!.idx : ordinal
+  }, [hoverXs, cumulative, barDrawn, visible, sy])
+  const onMove = React.useCallback((event: { clientX?: number; clientY?: number }): void => {
+    const index = snapIndex(event)
+    setHover(index < 0 ? null : { index })
+  }, [snapIndex])
+  const onSelect = React.useCallback((event: { clientX?: number; clientY?: number }): void => {
+    const index = snapIndex(event)
+    if (index < 0) return
+    setHover({ index })
+    const slot = model.slots[index]
+    if (slot !== undefined) props.onSelectCall?.(slot.callId)
+  }, [snapIndex, model.slots, props.onSelectCall])
 
   // Elements -----------------------------------------------------------------
   const gridlines = yTicks.map(v =>
@@ -319,9 +343,10 @@ export function StatsPanel(props: {
         Math.min(12, Math.max(2, Math.floor(plotW / 56))),
       ).filter(v => v >= 1)
   // A bare HH:MM repeated down a week-long axis names nothing, so the date
-  // leads as soon as the plotted span leaves the day it started in.
-  const spansDays = timeMode
-    && new Date(xMinRaw).toDateString() !== new Date(xMinRaw + xSpanRaw).toDateString()
+  // leads as soon as the plotted span leaves the day it started in. Decided
+  // by the span alone, not the axis mode — the step-axis tooltip title has
+  // the same ambiguity to answer.
+  const spansDays = new Date(xMinRaw).toDateString() !== new Date(xMinRaw + xSpanRaw).toDateString()
   const xLabels = xTickValues.map(v =>
     h('text', {
       key: 'tx' + String(v),
@@ -478,7 +503,7 @@ export function StatsPanel(props: {
   if (hover !== null && xsAll.length > 0) {
     const idx = Math.min(hover.index, xsAll.length - 1)
     const slot = xsAll[idx]!
-    const meta = slotMeta.get(slot)
+    const meta = model.slots[idx]
     const snapPx = sx(slot)
     const flip = snapPx > width / 2
     tooltip = h('div', {
@@ -491,12 +516,14 @@ export function StatsPanel(props: {
       h('div', { className: 'rl-tip-title' },
         // The clock axis leads with the time — it is the question being
         // asked — and names the turn behind it, or the auxiliary call's
-        // purpose for the rows that have no step at all.
+        // purpose for the rows that have no step at all. spansDays keeps the
+        // title honest on a multi-day axis, seconds included (the axis ticks
+        // drop them for space; a tooltip can afford them).
         timeMode
-          ? formatTime(slot) + (meta?.step !== undefined
+          ? formatLedgerTime(slot, spansDays) + (meta?.step !== undefined
               ? ' · #' + String(meta.step)
               : meta?.purpose === undefined ? '' : ' · ' + meta.purpose)
-          : '#' + String(slot) + (meta === undefined ? '' : ' · ' + formatTime(meta.startedAt))),
+          : '#' + String(slot) + (meta === undefined ? '' : ' · ' + formatLedgerTime(meta.startedAt, spansDays))),
       ...(tipRows.length === 0
         ? [h('div', { key: 'none', className: 'rl-tip-row' }, EN_DASH)]
         : [
@@ -592,7 +619,7 @@ export function StatsPanel(props: {
     fill: 'transparent',
     onMouseMove: onMove,
     // A click/tap without a prior move (touch) snaps the same way.
-    onClick: onMove,
+    onClick: onSelect,
     onMouseLeave: clearHover,
   }))
 

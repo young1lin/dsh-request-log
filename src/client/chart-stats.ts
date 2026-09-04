@@ -57,12 +57,23 @@ export interface MetricGroup {
 export interface ChartModel {
   groups: MetricGroup[]
   xMode: XMode
+  /** Plot slots aligned one-for-one with every metric series' points. */
+  slots: ChartSlot[]
   /** At least one finite value anywhere — false renders the empty state. */
   hasData: boolean
   /** Ordinary calls that produced the per-step slots. */
   callCount: number
   /** Auxiliary calls excluded from the per-step series (kept in totals). */
   excludedAux: number
+}
+
+/** The concrete ledger row represented by one plotted x slot. */
+export interface ChartSlot {
+  x: number
+  callId: string
+  startedAt: number
+  step?: number
+  purpose?: string
 }
 
 export type XMode = 'step' | 'time'
@@ -216,31 +227,44 @@ export function buildChartModel(calls: readonly CallIndexEntry[], xMode: XMode, 
     }
   }
 
-  // Slot the entries: one slot per step (retry-collapsed) or one per call.
-  const slotKeys: number[] = []
-  const slotEntries = new Map<number, CallIndexEntry[]>()
-  for (const entry of plottable) {
-    if (xMode === 'step' && entry.step === undefined) continue
-    const key = xMode === 'step' ? entry.step! : entry.startedAt
-    const bucket = slotEntries.get(key)
-    if (bucket === undefined) {
-      slotEntries.set(key, [entry])
-      slotKeys.push(key)
-    } else {
-      bucket.push(entry)
+  // Slot the entries: step mode groups retries under one numbered turn; time
+  // mode keeps ONE slot PER ATTEMPT. A timestamp is a coordinate, never an
+  // identity: dsh starts the main request and the session-title request
+  // together, so both routinely carry the exact same millisecond. Grouping
+  // time slots in a Map used to let the auxiliary call replace the main call
+  // and made a reported hit rate disappear from the chart. Equal-x points are
+  // intentionally retained; SVG draws them at their honest shared instant.
+  const slots: { x: number; entries: CallIndexEntry[] }[] = []
+  if (xMode === 'time') {
+    for (const entry of plottable) slots.push({ x: entry.startedAt, entries: [entry] })
+  } else {
+    const byStep = new Map<number, CallIndexEntry[]>()
+    for (const entry of plottable) {
+      if (entry.step === undefined) continue
+      const bucket = byStep.get(entry.step)
+      if (bucket === undefined) byStep.set(entry.step, [entry])
+      else bucket.push(entry)
     }
+    for (const [step, entries] of byStep) slots.push({ x: step, entries })
+    slots.sort((a, b) => a.x - b.x)
   }
-  slotKeys.sort((a, b) => a - b)
 
   const groups = [HIT_RATE_GROUP, TOKENS_GROUP, LATENCY_GROUP, SPEED_GROUP].map(group => ({
     ...group,
     series: group.series.map(series => ({ ...series, points: [] as SeriesPoint[] })),
   })) as MetricGroup[]
+  const plottedSlots: ChartSlot[] = []
   let hasData = false
   let plotted = 0
-  for (const key of slotKeys) {
-    const bucket = slotEntries.get(key) ?? []
-    const collapsed = xMode === 'step' ? collapseStep(bucket) : bucket[bucket.length - 1]!
+  for (const slot of slots) {
+    const collapsed = xMode === 'step' ? collapseStep(slot.entries) : slot.entries[0]!
+    plottedSlots.push({
+      x: slot.x,
+      callId: collapsed.id,
+      startedAt: collapsed.startedAt,
+      ...collapsed.step === undefined ? {} : { step: collapsed.step },
+      ...collapsed.purpose === undefined ? {} : { purpose: collapsed.purpose },
+    })
     plotted += 1
     for (const group of groups) {
       for (const series of group.series) {
@@ -251,11 +275,11 @@ export function buildChartModel(calls: readonly CallIndexEntry[], xMode: XMode, 
         // stream phase alone is too short to time or implausibly fast (see
         // SeriesPoint.approx / speedApproxOf).
         const approx = finite && group.key === 'speed' ? speedApproxOf(collapsed) : false
-        series.points.push(approx && finite ? { x: key, y, approx: true } : { x: key, y })
+        series.points.push(approx && finite ? { x: slot.x, y, approx: true } : { x: slot.x, y })
       }
     }
   }
-  return { groups, xMode, hasData, callCount: plotted, excludedAux }
+  return { groups, xMode, slots: plottedSlots, hasData, callCount: plotted, excludedAux }
 }
 
 /**

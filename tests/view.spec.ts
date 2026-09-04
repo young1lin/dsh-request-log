@@ -10,7 +10,13 @@ import { describe, expect, it } from 'vitest'
 
 ;(globalThis as { require?: NodeRequire }).require = createRequire(import.meta.url)
 
-const { prevIdsOf, pinnedToBottom, reconcileCalls, showTopBtn, summarize } = await import('../src/client/view.tsx')
+const { ledgerRowId, prevIdsOf, pinnedToBottom, reconcileCalls, showTopBtn, summarize } = await import('../src/client/view.tsx')
+
+describe('ledgerRowId', () => {
+  it('makes arbitrary call ids safe and stable as chart navigation targets', () => {
+    expect(ledgerRowId('step/34 retry 2')).toBe('dsh-request-log-call-step%2F34%20retry%202')
+  })
+})
 type Entry = import('../src/shared/types').CallIndexEntry
 
 function entryOf(overrides: Partial<Entry> & { id: string }): Entry {

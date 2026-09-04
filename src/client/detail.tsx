@@ -55,6 +55,29 @@ function CopyButton(props: { getText: () => string; label: string; copiedLabel: 
     state === 'copied' ? props.copiedLabel : state === 'failed' ? props.failedLabel : props.label)
 }
 
+/**
+ * Chevron for icon-bearing buttons (the detail Back button, the ledger's
+ * jump controls). dsh draws every icon with an SVG; a text '←'/'↑' picks up
+ * the body font's arrow glyph, whose weight and baseline match nothing else
+ * on the page and which is missing outright from some CJK fallback faces.
+ */
+export function chevron(dir: 'up' | 'down' | 'left'): React.ReactElement {
+  const path = dir === 'up' ? 'M3.5 8.25 7 4.75l3.5 3.5'
+    : dir === 'down' ? 'M3.5 5.75 7 9.25l3.5-3.5'
+      : 'M8.25 3.5 4.75 7l3.5 3.5'
+  return h('svg', {
+    width: 13,
+    height: 13,
+    viewBox: '0 0 14 14',
+    'aria-hidden': true,
+    fill: 'none',
+    stroke: 'currentColor',
+    strokeWidth: 1.6,
+    strokeLinecap: 'round',
+    strokeLinejoin: 'round',
+  }, h('path', { d: path }))
+}
+
 /** Timing phases: wait (start → first chunk) and stream (first chunk → end). */
 function timingOf(record: CallRecord): { wait?: number; stream?: number; total?: number } {
   const { startedAt, firstChunkAt, endedAt } = record.timing
@@ -231,7 +254,7 @@ export function makeCallDetail(source: DictSource): (props: {
 
     return h('div', { className: 'rl-root' },
       h('div', { className: 'rl-head' },
-        h('button', { className: 'rl-btn', onClick: props.onBack }, '← ' + d.back),
+        h('button', { className: 'rl-btn', onClick: props.onBack }, chevron('left'), d.back),
         h('span', { className: 'rl-head-title' }, record.model
           + (record.reasoningEffort !== undefined ? ' · ' + record.reasoningEffort : '')),
         h('span', { className: 'rl-head-actions' },
@@ -242,7 +265,7 @@ export function makeCallDetail(source: DictSource): (props: {
             failedLabel: d.copyFailed,
           }))),
       h('div', { className: 'rl-cards' },
-        h('div', { className: 'rl-card' },
+        h('div', { className: 'rl-card rl-card-timing' },
           h('div', { className: 'rl-card-title' }, d.timingCard),
           h(Row, { label: d.startedAt }, formatDateTime(record.timing.startedAt)),
           timing.wait === undefined ? null : h(Row, {
@@ -260,10 +283,10 @@ export function makeCallDetail(source: DictSource): (props: {
           }, speedRead === null ? '\u2013'
             : (speedRead.approx ? '\u2248 ' : '') + formatTps(speedRead.tokensPerSecond))),
         usage === undefined
-          ? h('div', { className: 'rl-card' },
+          ? h('div', { className: 'rl-card rl-card-usage' },
               h('div', { className: 'rl-card-title' }, d.usageCard),
               h('div', { className: 'rl-empty-hint' }, d.usageNone))
-          : h('div', { className: 'rl-card' },
+          : h('div', { className: 'rl-card rl-card-usage' },
               h('div', { className: 'rl-card-title' }, d.usageCard),
               h('div', { className: 'rl-tokens' },
                 h('div', { className: 'rl-token' },
@@ -287,7 +310,7 @@ export function makeCallDetail(source: DictSource): (props: {
                 h('div', { className: 'rl-token rl-token-total' },
                   h('span', { className: 'rl-token-label' }, d.billedInput),
                   h('span', { className: 'rl-token-value' }, billed === undefined ? '–' : formatTokens(billed))))),
-        h('div', { className: 'rl-card' },
+        h('div', { className: 'rl-card rl-card-call' },
           h('div', { className: 'rl-card-title' }, d.callCard),
           props.step === undefined ? null : h(Row, { label: d.step }, '#' + String(props.step)),
           h(Row, { label: d.provider }, record.provider

@@ -39,14 +39,35 @@ export function fetchCall(sessionId: string, callId: string, signal?: AbortSigna
 
 /** Format an epoch-milliseconds timestamp as a local HH:MM:SS string. */
 export function formatTime(ms: number | undefined): string {
-  if (ms === undefined) return '\u2013'
-  const date = new Date(ms)
-  const pad = (n: number): string => (n < 10 ? '0' + String(n) : String(n))
-  return pad(date.getHours()) + ':' + pad(date.getMinutes()) + ':' + pad(date.getSeconds())
+  return formatLedgerTime(ms, false)
 }
 
 /**
- * Full local date-time (tooltip / detail view — unambiguous across days).
+ * The ledger Time column (and the chart tooltip title): a bare clock within
+ * one day; the date leads once the loaded window spans days \u2014 the axis rule
+ * in formatAxisTime, applied to the column. A session that runs across a
+ * week renders '09:05:03' several times over otherwise, with nothing telling
+ * the days apart.
+ */
+export function formatLedgerTime(ms: number | undefined, withDate: boolean): string {
+  if (ms === undefined) return '\u2013'
+  const date = new Date(ms)
+  const pad = (n: number): string => (n < 10 ? '0' + String(n) : String(n))
+  const clock = pad(date.getHours()) + ':' + pad(date.getMinutes()) + ':' + pad(date.getSeconds())
+  return withDate ? pad(date.getMonth() + 1) + '-' + pad(date.getDate()) + ' ' + clock : clock
+}
+
+/** The date's local UTC offset as an ISO-8601-shaped '+08:00' / '-05:30'. */
+function utcOffsetOf(date: Date): string {
+  const minutes = -date.getTimezoneOffset()
+  const pad = (n: number): string => (n < 10 ? '0' + String(n) : String(n))
+  return (minutes < 0 ? '-' : '+') + pad(Math.floor(Math.abs(minutes) / 60)) + ':' + pad(Math.abs(minutes) % 60)
+}
+
+/**
+ * Full local date-time with its UTC offset (tooltip / detail view —
+ * unambiguous across days AND zones: '16:00:04' names a wall clock, the
+ * offset is what makes the string a moment).
  * Fixed shape rather than toLocaleString(): the ledger renders HH:MM:SS and
  * the chart axis MM-DD HH:MM, so a locale-shaped '2026/9/3 16:00:04' made
  * three unrelated renderings of one instant. Same separators, same order,
@@ -58,6 +79,7 @@ export function formatDateTime(ms: number | undefined): string {
   const pad = (n: number): string => (n < 10 ? '0' + String(n) : String(n))
   return String(date.getFullYear()) + '-' + pad(date.getMonth() + 1) + '-' + pad(date.getDate())
     + ' ' + pad(date.getHours()) + ':' + pad(date.getMinutes()) + ':' + pad(date.getSeconds())
+    + ' ' + utcOffsetOf(date)
 }
 
 /**

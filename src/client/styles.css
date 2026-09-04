@@ -44,12 +44,19 @@
 }
 
 .rl-btn {
+  /* inline-flex so an icon + label button (the detail Back chevron) spaces
+     itself with gap; text-only buttons are single items and never see it. */
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
   border: 0;
   background: transparent;
   color: var(--dsw-alias-label-secondary);
-  font-size: 11px;
-  line-height: 1;
-  padding: 4px 9px;
+  /* dsh and the sibling workbench reserve 11px for captions/meta. Actions
+     sit on the dense-control tier: readable without growing the toolbar. */
+  font-size: 12px;
+  line-height: 18px;
+  padding: 2px 8px;
   border-radius: 5px;
   cursor: pointer;
   font-family: inherit;
@@ -252,35 +259,37 @@
 
 .rl-table {
   /* time · model · ttft total speed · total-in in hit hit% write out · msg/tools
-     Every numeric column is FIXED at the width its own content needs, and the
-     model column takes all the slack. On `repeat(9, minmax(56px, 1fr))` the
-     nine metrics shared the leftover width equally and sat ~99px apart, so a
-     figure never lined up against the one beside it and the eye had to cross
-     50px of dead space per hop. TTFT and Total hold the narrowest content in
-     the table ('185ms', '1m33s') and were paying the widest toll, so they
-     halve to 52px. Speed keeps 74px for the '≈ 0.00 t/s' form; the two cache
-     columns keep 64px because their English headers, not their figures, set
-     the floor. Below ~950px the table scrolls horizontally rather than
-     squeezing any of them.
-     The trailing 1fr is a SPACER track with no cell in it: on a wide window
-     the twelve columns need well under the full width, and that surplus has
-     to land somewhere. Handing it to the model column instead (its natural
-     home, since model names are the one thing that truncates) opened ~380px
-     of white between the model name and the first figure — a void in the
-     middle of every row is far worse to read across than the same space
-     parked past the last column. */
-  --rl-cols: 56px minmax(150px, 280px) 52px 52px 74px 60px 58px 64px 56px 64px 58px 58px 1fr;
+     ONE grid for the whole table, every row subgridded into it, so each
+     track's max-content is measured ACROSS all rows — real table column
+     semantics. Every column sits at the width of the widest thing in it
+     (header or value), which is why no header can clip in any locale, at any
+     font size, after any copy edit: the floor is derived, never declared.
+     The hand-tuned px track list this replaces had exactly that failure —
+     'Cache write' and 'Msg/Calls' lost their last letters in en, 首字延迟
+     and 消息/调用 in zh — while the model column idled at a 280px cap
+     holding a 41px name.
+     The twelve content tracks stay max-content and the table takes exactly
+     that content width, centered in the pane. Below the content floor it
+     still scrolls horizontally rather than dropping or squeezing a field. */
+  display: grid;
+  grid-template-columns: repeat(12, max-content);
+  column-gap: 10px;
+  width: fit-content;
+  max-width: 100%;
+  margin-inline: auto;
   background: var(--dsw-alias-bg-layer-1);
   border: 1px solid var(--dsw-alias-border-l1);
-  border-radius: 10px;
+  border-radius: 12px;
   overflow: auto;
   min-height: 0;
 }
 
 .rl-row {
   display: grid;
-  grid-template-columns: var(--rl-cols);
-  gap: 10px;
+  /* Tracks belong to .rl-table; the row adopts them (and its gaps) verbatim,
+     so every row's columns align by construction, not by a shared px list. */
+  grid-template-columns: subgrid;
+  grid-column: 1 / -1;
   align-items: center;
   box-sizing: border-box;
   width: 100%;
@@ -297,6 +306,8 @@
 
 .rl-row:last-child { border-bottom: none; }
 .rl-row:hover { background: var(--dsw-alias-interactive-bg-hover); }
+.rl-row-located,
+.rl-row-located:hover { background: var(--dsw-alias-interactive-bg-active); }
 
 .rl-row-head {
   position: sticky;
@@ -308,8 +319,6 @@
   cursor: default;
   background: var(--dsw-alias-bg-layer-1);
 }
-
-.rl-row-head .rl-cell { text-overflow: clip; }
 
 .rl-row-head:hover { background: var(--dsw-alias-bg-layer-1); }
 
@@ -324,13 +333,11 @@
 
 /* Metrics and the trailing size column are LEFT-aligned like every other
    column; headers share these classes, so labels sit over their values by
-   construction. The hairline left rule keeps each column bounded — text
-   starts one padding step right of it, never touching the rule. */
+   construction. The grid gap separates columns without adding rules that
+   dsh's Trajectory ledger does not use. */
 .rl-c-num,
 .rl-c-size {
   text-align: left;
-  border-left: 1px solid var(--dsw-alias-border-l1);
-  padding-left: 10px;
 }
 
 .rl-c-num {
@@ -437,12 +444,26 @@
 .rl-card {
   background: var(--dsw-alias-bg-layer-1);
   border: 1px solid var(--dsw-alias-border-l1);
-  border-radius: 10px;
+  border-radius: 12px;
   padding: 12px 14px;
   display: flex;
   flex-direction: column;
   gap: 4px;
 }
+
+/* The Call card carries seven short facts. Give it the full row and let those
+   facts form dense columns, instead of leaving a blank half-row or pushing the
+   JSON below dsh's composer. */
+.rl-card-call {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  align-content: start;
+  gap: 4px 16px;
+}
+
+.rl-card-call .rl-card-title { grid-column: 1 / -1; }
+.rl-card-call .rl-sum-label { width: 88px; }
 
 .rl-card-title {
   font-weight: 600;
@@ -522,7 +543,7 @@
   padding: 12px 14px;
   background: var(--dsw-alias-markdown-code-block);
   border: 1px solid var(--dsw-alias-border-l1);
-  border-radius: 10px;
+  border-radius: 12px;
   color: var(--dsw-alias-label-primary);
   /* dsh defines the code face with CJK fallbacks (PingFang SC / Microsoft
      YaHei) and this view renders prompt bodies that are largely Chinese --
@@ -677,7 +698,7 @@
   gap: 8px;
   background: var(--dsw-alias-bg-layer-2);
   border: 1px solid var(--dsw-alias-border-l1);
-  border-radius: 10px;
+  border-radius: 12px;
   padding: 8px 12px 12px;
 }
 
@@ -691,6 +712,14 @@
 .rl-chart-tabs-group {
   display: inline-flex;
   gap: 6px;
+}
+
+/* Chart tabs are labels inside an already named analysis panel, so they use
+   the meta tier; primary detail/list actions keep the 12px control tier. */
+.rl-chart .rl-btn {
+  font-size: 11px;
+  line-height: 16px;
+  padding: 2px 7px;
 }
 
 .rl-chart-tabs-space { flex: 1; }
@@ -815,7 +844,7 @@
   pointer-events: none;
 }
 
-.rl-overlay { pointer-events: all; cursor: crosshair; }
+.rl-overlay { pointer-events: all; cursor: pointer; }
 
 .rl-crosshair {
   stroke: var(--dsw-alias-border-l2);

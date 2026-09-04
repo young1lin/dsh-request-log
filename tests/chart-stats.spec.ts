@@ -255,6 +255,44 @@ describe('buildChartModel time mode', () => {
     expect(outOf(stepped).points).toHaveLength(1)
   })
 
+  it('keeps concurrent calls that share the exact same millisecond', () => {
+    // dsh launches the ordinary request and its session-title helper together;
+    // startedAt is therefore a coordinate shared by two calls, not a unique id.
+    const startedAt = at(9, 0)
+    const model = buildChartModel([
+      entryOf({ id: 'turn', step: 1, startedAt, usage: usage(100, 20, 0, 10) }),
+      entryOf({ id: 'title', purpose: 'session-title', startedAt, usage: usage(7, undefined, undefined, 2) }),
+    ], 'time', { auxCalls: 'include' })
+
+    const tokens = model.groups.find(g => g.key === 'tokens')!
+    const inputs = tokens.series.find(s => s.key === 'in')!
+    const hitRate = model.groups.find(g => g.key === 'hitrate')!.series[0]!
+    expect(model.callCount).toBe(2)
+    expect(model.slots).toEqual([
+      { x: startedAt, callId: 'turn', startedAt, step: 1 },
+      { x: startedAt, callId: 'title', startedAt, purpose: 'session-title' },
+    ])
+    expect(inputs.points).toEqual([
+      { x: startedAt, y: 100 },
+      { x: startedAt, y: 7 },
+    ])
+    expect(hitRate.points.map(point => point.y)).toEqual([20 / 120 * 100, null])
+  })
+
+  it('points a numbered step at the retry attempt selected for its metrics', () => {
+    const model = buildChartModel([
+      entryOf({ id: 'failed', step: 34, attempt: 1, startedAt: at(9, 0), usage: undefined }),
+      entryOf({ id: 'settled', step: 34, attempt: 2, startedAt: at(9, 1), usage: usage(10, 5, 0, 44) }),
+    ], 'step')
+
+    expect(model.slots).toEqual([{
+      x: 34,
+      callId: 'settled',
+      startedAt: at(9, 1),
+      step: 34,
+    }])
+  })
+
   it('admits auxiliary calls when asked, and then excludes nothing', () => {
     const calls = [
       entryOf({ id: 'turn', step: 1, startedAt: at(9, 0), usage: usage(100, 0, 0, 10) }),

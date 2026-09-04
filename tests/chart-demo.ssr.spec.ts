@@ -92,7 +92,7 @@ calls.push(entryOf({
 
 const dict: Dict = {
   tab: 'Requests', empty: '', emptyHint: '', error: '', retry: '',
-  stepHint: '', stale: '', refresh: 'Refresh', auto: 'Auto',
+  stepHint: '', stale: '', refresh: 'Refresh', refreshHint: '', auto: 'Auto', autoHint: '',
   time: 'Time', model: 'Model', ttft: 'TTFT', totalTime: 'Total',
   colSpeed: 'Speed', speedHint: '', colBilledInput: 'Total in', colIn: 'In',
   colCacheRead: 'Cache hit', hitRateHint: '', colHitRate: 'Hit %',

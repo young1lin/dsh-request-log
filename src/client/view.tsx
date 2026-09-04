@@ -700,13 +700,14 @@ export function makeRequestLogView(source: DictSource): (props: { sessionId?: st
               }, dict.charts.toggle),
               h('button', {
                 className: 'rl-btn' + (auto ? ' rl-btn-on' : ''),
+                title: dict.autoHint,
                 onClick: () => {
                   const next = !auto
                   setAuto(next)
                   updateViewMemory(sessionId, { auto: next })
                 },
               }, dict.auto),
-              h('button', { className: 'rl-btn', onClick: refresh }, dict.refresh))),
+              h('button', { className: 'rl-btn', title: dict.refreshHint, onClick: refresh }, dict.refresh))),
           // Billed input IS these three summed; naming the line says so.
           h('div', { className: 'rl-stats-sub' },
             h('span', { className: 'rl-sub-key' }, dict.sumInput),

@@ -123,7 +123,16 @@ export interface ViewDict {
   /** Banner shown when the last refresh failed but stale data is kept. */
   stale: string
   refresh: string
+  /** Tooltip behind {@link refresh}: what a manual reload adds over the poll. */
+  refreshHint: string
   auto: string
+  /**
+   * Tooltip behind {@link auto}. It must say auto *what*: the label names no
+   * object, and the poll is easily mistaken for the follow-the-newest-row
+   * behaviour, which is separate and always on (see the layout effect in
+   * view.tsx — its deps carry no `auto`).
+   */
+  autoHint: string
   time: string
   model: string
   ttft: string

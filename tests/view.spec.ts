@@ -10,7 +10,7 @@ import { describe, expect, it } from 'vitest'
 
 ;(globalThis as { require?: NodeRequire }).require = createRequire(import.meta.url)
 
-const { prevIdsOf, reconcileCalls, summarize } = await import('../src/client/view.tsx')
+const { prevIdsOf, pinnedToBottom, reconcileCalls, showTopBtn, summarize } = await import('../src/client/view.tsx')
 type Entry = import('../src/shared/types').CallIndexEntry
 
 function entryOf(overrides: Partial<Entry> & { id: string }): Entry {
@@ -76,6 +76,25 @@ describe('reconcileCalls', () => {
   })
 })
 
+describe('showTopBtn', () => {
+  it('appears only after a real amount of downward travel', () => {
+    expect(showTopBtn(0)).toBe(false)
+    expect(showTopBtn(320)).toBe(false) // exactly at the threshold is not past it
+    expect(showTopBtn(321)).toBe(true)
+  })
+})
+
+describe('pinnedToBottom', () => {
+  it('is true only within the pin threshold of the newest row', () => {
+    const height = 2_000
+    const view = 800
+    expect(pinnedToBottom(height - view, height, view)).toBe(true) // at the bottom
+    expect(pinnedToBottom(height - view - 47, height, view)).toBe(true) // just inside 48px
+    expect(pinnedToBottom(height - view - 49, height, view)).toBe(false) // just outside
+    expect(pinnedToBottom(0, height, view)).toBe(false)
+  })
+})
+
 describe('summarize', () => {
   it('sums billed input (uncached + hits + writes) and skips usage-less rows for token sums', () => {
     const sums = summarize([
@@ -95,5 +114,20 @@ describe('summarize', () => {
     expect(sums.cacheRead).toBe(40)
     expect(sums.cacheWrite).toBe(25)
     expect(sums.output).toBe(22)
+  })
+
+  it('counts failures by kind and retries for the health figures', () => {
+    const sums = summarize([
+      entryOf({ id: 's1', step: 1 }),
+      entryOf({ id: 's1-retry', step: 1, attempt: 2 }), // retry shares step 1
+      entryOf({ id: 's2', step: 2, status: 'error' }),
+      entryOf({ id: 's3', step: 3, status: 'aborted' }),
+      entryOf({ id: 'aux', purpose: 'compaction' }), // auxiliary: no step at all
+      entryOf({ id: 's4', step: 4, status: 'open' }), // in flight: not a failure
+    ])
+    expect(sums.count).toBe(6)
+    expect(sums.errors).toBe(1)
+    expect(sums.aborts).toBe(1)
+    expect(sums.retried).toBe(1)
   })
 })

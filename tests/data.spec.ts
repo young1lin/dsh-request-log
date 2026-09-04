@@ -71,6 +71,14 @@ describe('formatDuration', () => {
     expect(formatDuration(60_000)).toBe('1m0s')
     expect(formatDuration(125_000)).toBe('2m5s')
   })
+  it('renders hours with zero-padded minutes above an hour, seconds dropped', () => {
+    expect(formatDuration(3_600_000)).toBe('1h00m')
+    expect(formatDuration(5_000_000)).toBe('1h23m')
+    expect(formatDuration(45_360_000)).toBe('12h36m')
+  })
+  it('rounds TOTAL minutes, so 1h59m40s never prints 1h60m', () => {
+    expect(formatDuration(3_600_000 + 59 * 60_000 + 40_000)).toBe('2h00m')
+  })
   it('dashes when unknown', () => {
     expect(formatDuration(undefined)).toBe(DASH)
   })

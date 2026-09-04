@@ -57,13 +57,17 @@ for (let step = 1; step <= 48; step += 1) {
   const errored = step === 7 || step === 19
   const compacted = step === 23 || step === 40
   if (compacted) contextTokens = 14_000 + Math.round(rand() * 3_000)
+  const out = Math.round(300 + rand() * 1_600)
   const usage = errored
     ? undefined
     : {
         inputTokens: Math.round(contextTokens * (0.06 + rand() * 0.04)),
-        outputTokens: Math.round(300 + rand() * 1_600),
+        outputTokens: out,
         cacheReadTokens: Math.round(contextTokens * (compacted ? rand() * 0.15 : step === 1 ? 0 : 0.82 + rand() * 0.15)),
         ...(rand() > 0.75 ? { cacheWriteTokens: Math.round(500 + rand() * 4_000) } : {}),
+        // Roughly half the turns are reasoning turns — the band must show up
+        // in the demo fixtures beside plain answer-only turns.
+        ...(rand() > 0.45 ? { reasoningTokens: Math.round(out * (0.3 + rand() * 0.45)) } : {}),
       }
   calls.push(entryOf({
     id: 'call-' + String(step),
@@ -92,11 +96,15 @@ const dict: Dict = {
   time: 'Time', model: 'Model', ttft: 'TTFT', totalTime: 'Total',
   colSpeed: 'Speed', speedHint: '', colBilledInput: 'Total in', colIn: 'In',
   colCacheRead: 'Cache hit', hitRateHint: '', colHitRate: 'Hit %',
-  colCacheWrite: 'Cache write', colOut: 'Out', size: 'Msg/Calls', sizeHint: '',
-  retryOf: '', sumCalls: 'Calls', sumCallsOf: 'of {total} calls', sumBilledInput: 'Total in', sumBilledInputHint: '',
+  colCacheWrite: 'Cache write', colOut: 'Out', colReasoning: 'Reasoning', colAnswer: 'Answer',
+  size: 'Msg/Calls', sizeHint: '',
+  retryOf: '', sumCalls: 'Calls', sumCallsOf: 'of {total} calls',
+  sumFailed: 'Failed', sumFailedHint: '{errors} errors · {aborts} aborted',
+  sumRetried: 'Retried', sumRetriedHint: '',
+  sumBilledInput: 'Total in', sumBilledInputHint: '',
   sumInput: 'Input', sumUncached: 'uncached', sumCached: 'cached', sumWritten: 'written', sumHitRate: 'Hit rate',
   sumCacheWrite: 'Cache write', sumOutput: 'Output',
-  sumStorage: 'Disk added', sumStorageHint: '', loadMore: '',
+  sumStorage: 'Disk added', sumStorageHint: '', loadMore: '', backToTop: '', toLatest: '',
   charts: {
     toggle: 'Charts', toggleHint: '',
     groupHitRate: 'Hit rate', groupTokens: 'Tokens', groupLatency: 'Latency', groupSpeed: 'Speed',

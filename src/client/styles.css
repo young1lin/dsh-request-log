@@ -4,6 +4,8 @@
 .rl-root {
   padding: 16px 20px 32px;
   overflow-y: auto;
+  /* Containing block for .rl-float, which is placed by script — see there. */
+  position: relative;
   height: 100%;
   box-sizing: border-box;
   color: var(--dsw-alias-label-primary);
@@ -147,6 +149,25 @@
 
 .rl-metric-hit .rl-metric-value { color: var(--dsw-alias-state-success-primary); }
 
+/* Failure is the ONE alarm in the strip, and it renders only when non-zero,
+   so the red is never cried wolf. Retries deliberately carry no colour: a
+   retry that then succeeded is not a fault, and the amber it used to wear
+   (#f59e0b on #fff, ~2.1:1) failed contrast while reading as a second alarm
+   beside the red — three coloured figures out of seven left the hit rate,
+   which is the number people actually scan for, no longer findable. */
+.rl-metric-bad .rl-metric-value { color: var(--dsw-alias-state-error-primary); }
+
+/* dsh's own status bar separates groups with '|' and members with '·'. Row
+   counts and token totals are different kinds of quantity: with no break,
+   '41 8 6 2.77M' reads as one run of figures. */
+.rl-stats-div {
+  align-self: stretch;
+  width: 1px;
+  margin: 2px 0;
+  background: var(--dsw-alias-border-l2);
+  flex: none;
+}
+
 /* No rule above this line: it would span the full ledger width to underline a
    sentence that ends around a third of the way across. dsh's own status bar
    and dsh-context's .lc-foot both separate a meta line by space alone. */
@@ -201,9 +222,54 @@
   flex: none;
 }
 
+/* Floating scroll pair: ↑ back to the summary, ↓ to the newest call — the
+   jump-to-latest affordance dsh's chat carries. Sticky, not fixed: it rides
+   whichever box actually scrolls (the root or an ancestor pane) with no JS
+   positioning. White chip + border-l2 + a soft shadow is dsh's own Session
+   log button recipe; the negative top margin keeps the sticky slot from
+   adding tail space below the last row. */
+/* Icon variant of .rl-btn: a square cell in the segmented group, sized so the
+   13px chevron sits on the same 22px optical row as the text buttons beside
+   it. Disabled means "nowhere to jump", not "broken", so it dims rather than
+   disappearing — a toolbar that changes width while you scroll is worse than
+   a greyed control. */
+.rl-btn-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  padding: 4px 0;
+}
+
+.rl-btn-icon svg { display: block; }
+
+.rl-btn-icon:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.rl-btn-icon:disabled:hover { color: var(--dsw-alias-label-secondary); }
+
 .rl-table {
-  /* time · model · 9 metrics (ttft total speed total-in in hit hit% write out) · msg/tools */
-  --rl-cols: 60px minmax(120px, 1.4fr) repeat(9, minmax(56px, 1fr)) 64px;
+  /* time · model · ttft total speed · total-in in hit hit% write out · msg/tools
+     Every numeric column is FIXED at the width its own content needs, and the
+     model column takes all the slack. On `repeat(9, minmax(56px, 1fr))` the
+     nine metrics shared the leftover width equally and sat ~99px apart, so a
+     figure never lined up against the one beside it and the eye had to cross
+     50px of dead space per hop. TTFT and Total hold the narrowest content in
+     the table ('185ms', '1m33s') and were paying the widest toll, so they
+     halve to 52px. Speed keeps 74px for the '≈ 0.00 t/s' form; the two cache
+     columns keep 64px because their English headers, not their figures, set
+     the floor. Below ~950px the table scrolls horizontally rather than
+     squeezing any of them.
+     The trailing 1fr is a SPACER track with no cell in it: on a wide window
+     the twelve columns need well under the full width, and that surplus has
+     to land somewhere. Handing it to the model column instead (its natural
+     home, since model names are the one thing that truncates) opened ~380px
+     of white between the model name and the first figure — a void in the
+     middle of every row is far worse to read across than the same space
+     parked past the last column. */
+  --rl-cols: 56px minmax(150px, 280px) 52px 52px 74px 60px 58px 64px 56px 64px 58px 58px 1fr;
   background: var(--dsw-alias-bg-layer-1);
   border: 1px solid var(--dsw-alias-border-l1);
   border-radius: 10px;
@@ -685,12 +751,15 @@
   font-variant-numeric: tabular-nums;
 }
 
-/* Series color roles — chart-scoped aliases over the theme system. */
+/* Series color roles — chart-scoped aliases over the theme system. The
+   reasoning role carries dsh's own blue (state-business-primary): the palette
+   has no fifth hue, and red already means failure everywhere in this UI. */
 .rl-ls-brand { stroke: var(--dsw-alias-brand-primary, var(--dsw-alias-label-secondary)); }
 .rl-ls-success { stroke: var(--dsw-alias-state-success-primary); }
 .rl-ls-warn { stroke: var(--dsw-alias-state-warn-primary); }
 .rl-ls-error { stroke: var(--dsw-alias-state-error-primary); }
 .rl-ls-neutral { stroke: var(--dsw-alias-label-primary); }
+.rl-ls-reasoning { stroke: var(--dsw-alias-state-business-primary, var(--dsw-alias-brand-primary)); }
 
 .rl-line {
   fill: none;
@@ -704,6 +773,7 @@
   fill: currentColor;
 }
 .rl-dot.rl-ls-brand { color: var(--dsw-alias-brand-primary, var(--dsw-alias-label-secondary)); }
+.rl-dot.rl-ls-reasoning, .rl-mark.rl-ls-reasoning, .rl-focus.rl-ls-reasoning { color: var(--dsw-alias-state-business-primary, var(--dsw-alias-brand-primary)); }
 .rl-dot.rl-ls-success, .rl-mark.rl-ls-success, .rl-focus.rl-ls-success { color: var(--dsw-alias-state-success-primary); }
 .rl-dot.rl-ls-warn, .rl-mark.rl-ls-warn, .rl-focus.rl-ls-warn { color: var(--dsw-alias-state-warn-primary); }
 .rl-dot.rl-ls-error, .rl-mark.rl-ls-error, .rl-focus.rl-ls-error { color: var(--dsw-alias-state-error-primary); }
@@ -718,6 +788,7 @@
   shape-rendering: crispEdges;
 }
 .rl-bar.rl-ls-brand { color: var(--dsw-alias-brand-primary, var(--dsw-alias-label-secondary)); }
+.rl-bar.rl-ls-reasoning { color: var(--dsw-alias-state-business-primary, var(--dsw-alias-brand-primary)); }
 .rl-bar.rl-ls-success { color: var(--dsw-alias-state-success-primary); }
 .rl-bar.rl-ls-warn { color: var(--dsw-alias-state-warn-primary); }
 .rl-bar.rl-ls-error { color: var(--dsw-alias-state-error-primary); }
@@ -731,6 +802,7 @@
   fill-opacity: 0.72;
 }
 .rl-area.rl-ls-brand { color: var(--dsw-alias-brand-primary, var(--dsw-alias-label-secondary)); }
+.rl-area.rl-ls-reasoning { color: var(--dsw-alias-state-business-primary, var(--dsw-alias-brand-primary)); }
 .rl-area.rl-ls-success { color: var(--dsw-alias-state-success-primary); }
 .rl-area.rl-ls-warn { color: var(--dsw-alias-state-warn-primary); }
 .rl-area.rl-ls-error { color: var(--dsw-alias-state-error-primary); }
@@ -789,6 +861,7 @@
   background: currentColor;
 }
 .rl-tip-swatch.rl-ls-brand { background: var(--dsw-alias-brand-primary, var(--dsw-alias-label-secondary)); }
+.rl-tip-swatch.rl-ls-reasoning { background: var(--dsw-alias-state-business-primary, var(--dsw-alias-brand-primary)); }
 .rl-tip-swatch.rl-ls-success { background: var(--dsw-alias-state-success-primary); }
 .rl-tip-swatch.rl-ls-warn { background: var(--dsw-alias-state-warn-primary); }
 .rl-tip-swatch.rl-ls-error { background: var(--dsw-alias-state-error-primary); }

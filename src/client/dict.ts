@@ -137,12 +137,26 @@ export interface ViewDict {
   colHitRate: string
   colCacheWrite: string
   colOut: string
+  /** Token-chart series labels: reasoning is a subset of output, so the
+   *  chart's output band decomposes into these two, never three totals. */
+  colReasoning: string
+  colAnswer: string
   size: string
   sizeHint: string
   retryOf: string
+  /** Attempt-count headline. Steps and LLM time are deliberately NOT strip
+   *  figures: dsh's own footer already carries both for the session. */
   sumCalls: string
   /** Calls label while only part of the session is loaded; {total} = all of it. */
   sumCallsOf: string
+  /** Failure figure — rendered ONLY when non-zero. */
+  sumFailed: string
+  /** Tooltip behind {@link sumFailed}: {errors}, {aborts}. */
+  sumFailedHint: string
+  /** Retry figure — rendered ONLY when non-zero. */
+  sumRetried: string
+  /** Tooltip behind {@link sumRetried}. */
+  sumRetriedHint: string
   sumBilledInput: string
   /** Tooltip: what the billed-input total counts. */
   sumBilledInputHint: string
@@ -166,6 +180,10 @@ export interface ViewDict {
   sumStorageHint: string
   /** Load-older button label; {count} = entries not yet loaded. */
   loadMore: string
+  /** Tooltip of the floating back-to-top button. */
+  backToTop: string
+  /** Tooltip of the floating jump-to-newest button. */
+  toLatest: string
   charts: ChartsDict
   detail: DetailDict
 }

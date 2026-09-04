@@ -122,6 +122,38 @@ describe('buildChartModel slots', () => {
   })
 })
 
+describe('tokens reasoning decomposition', () => {
+  it('splits the output band into reasoning + answer, keeping the stack sum invariant', () => {
+    // step 1: out 10 of which 4 reasoning → answer 6; step 2: out 7, none reported.
+    const group = buildChartModel([
+      entryOf({ id: 'a', step: 1, usage: { inputTokens: 10, outputTokens: 10, reasoningTokens: 4 } }),
+      entryOf({ id: 'b', step: 2, usage: usage(100, 0, undefined, 7) }),
+    ], 'step').groups.find(g => g.key === 'tokens')!
+    const byKey = new Map(group.series.map(s => [s.key, s]))
+    // Unreported reasoning is a REAL zero band, not a gap.
+    expect(byKey.get('reasoning')!.points.map(p => p.y)).toEqual([4, 0])
+    expect(byKey.get('out')!.points.map(p => p.y)).toEqual([6, 7])
+    // The decomposition sits inside the old output band: the stacked top of
+    // step 1 is still billed + OUTPUT (10 + 10), not billed + output + reasoning.
+    const stacked = stackSerieses(group)
+    const top = stacked[stacked.length - 1]!
+    expect(top.key).toBe('out')
+    expect(top.points[0]!.y).toBe(20)
+    expect(top.points[1]!.y).toBe(107)
+  })
+
+  it('clamps reasoning to the reported output, so answer never goes negative', () => {
+    // Wire semantics say reasoning ⊆ output; a provider violating that must
+    // not produce a negative answer layer — reasoning caps at output.
+    const group = buildChartModel([
+      entryOf({ id: 'weird', step: 1, usage: { inputTokens: 5, outputTokens: 3, reasoningTokens: 9 } }),
+    ], 'step').groups.find(g => g.key === 'tokens')!
+    const byKey = new Map(group.series.map(s => [s.key, s]))
+    expect(byKey.get('reasoning')!.points[0]!.y).toBe(3)
+    expect(byKey.get('out')!.points[0]!.y).toBe(0)
+  })
+})
+
 describe('stackSerieses', () => {
   function tokenGroup(): ReturnType<typeof buildChartModel>['groups'][number] {
     return buildChartModel([

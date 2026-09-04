@@ -73,15 +73,26 @@ function sig3(n: number): string {
   return n.toFixed(2)
 }
 
-/** Format a duration in milliseconds: sub-second stays ms, seconds get two decimals under 10s. */
+/**
+ * Format a duration in milliseconds: sub-second stays ms, seconds get two
+ * decimals under 10s, hours drop the seconds ('1h23m') \u2014 a session's summed
+ * model time runs past an hour, and '83m20s' stops reading as time there.
+ * Minutes inside an hour are zero-padded so the figure keeps one shape.
+ */
 export function formatDuration(ms: number | undefined): string {
   if (ms === undefined) return '\u2013'
   if (ms < 1000) return String(Math.round(ms)) + 'ms'
   if (ms < 10_000) return (ms / 1000).toFixed(2) + 's'
   if (ms < 60_000) return (ms / 1000).toFixed(1) + 's'
-  const minutes = Math.floor(ms / 60_000)
-  const seconds = Math.round((ms % 60_000) / 1000)
-  return String(minutes) + 'm' + String(seconds) + 's'
+  if (ms < 3_600_000) {
+    const minutes = Math.floor(ms / 60_000)
+    const seconds = Math.round((ms % 60_000) / 1000)
+    return String(minutes) + 'm' + String(seconds) + 's'
+  }
+  // Round the TOTAL minutes first: flooring h/m separately would print
+  // '1h60m' for 1h59m40s.
+  const totalMinutes = Math.round(ms / 60_000)
+  return String(Math.floor(totalMinutes / 60)) + 'h' + String(totalMinutes % 60).padStart(2, '0') + 'm'
 }
 
 /**

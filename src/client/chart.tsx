@@ -83,7 +83,10 @@ function seriesLabel(dict: ViewDict, key: string): string {
     case 'in': return dict.colIn
     case 'cacheRead': return dict.colCacheRead
     case 'cacheWrite': return dict.colCacheWrite
-    case 'out': return dict.colOut
+    // The token chart's output band decomposes: reasoning + answer (the
+    // ledger's Out column keeps showing the total).
+    case 'reasoning': return dict.colReasoning
+    case 'out': return dict.colAnswer
     case 'duration': return dict.totalTime
     case 'ttfb': return dict.ttft
     case 'speed': return dict.colSpeed

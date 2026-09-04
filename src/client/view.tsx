@@ -31,6 +31,42 @@ function useDict(source: DictSource): ViewDict {
 
 const NO_CALLS: CallIndexEntry[] = []
 
+/** How far down the ledger must travel before the back-to-top button shows. */
+export const TOP_BTN_PX = 320
+
+/** The back-to-top affordance appears only past real travel, not on jitter. */
+export function showTopBtn(scrollTop: number): boolean {
+  return scrollTop > TOP_BTN_PX
+}
+
+/** Within this distance of the newest row, auto-refresh keeps pinning. */
+export const PIN_PX = 48
+
+/** True when the viewport sits at (or within {@link PIN_PX} of) the bottom. */
+export function pinnedToBottom(scrollTop: number, scrollHeight: number, clientHeight: number): boolean {
+  return scrollHeight - scrollTop - clientHeight < PIN_PX
+}
+
+/**
+ * Chevron for the floating scroll buttons. dsh draws every icon button with an
+ * SVG; a text '↑' picks up the body font's arrow glyph, whose weight and
+ * baseline match nothing else on the page and which is missing outright from
+ * some CJK fallback faces.
+ */
+function chevron(dir: 'up' | 'down'): React.ReactElement {
+  return h('svg', {
+    width: 13,
+    height: 13,
+    viewBox: '0 0 14 14',
+    'aria-hidden': true,
+    fill: 'none',
+    stroke: 'currentColor',
+    strokeWidth: 1.6,
+    strokeLinecap: 'round',
+    strokeLinejoin: 'round',
+  }, h('path', { d: dir === 'up' ? 'M3.5 8.25 7 4.75l3.5 3.5' : 'M3.5 5.75 7 9.25l3.5-3.5' }))
+}
+
 /** The element that actually scrolls for this ledger: .rl-root itself or a bounded ancestor pane. */
 function findScroller(root: HTMLElement): HTMLElement {
   let node: HTMLElement | null = root
@@ -109,9 +145,19 @@ export function prevIdsOf(calls: CallIndexEntry[]): Map<string, string | undefin
   return result
 }
 
-/** Sum the loaded window's usage into the overview card. */
+/**
+ * Sum the loaded window into the overview strip: token accounting plus the
+ * health figures dsh's own footer has no equivalent of — failures and
+ * retries. Anything dsh already shows for the session (steps, LLM time) is
+ * deliberately NOT repeated here.
+ */
 export function summarize(calls: CallIndexEntry[]): {
   count: number
+  /** Terminal failures by kind; 'open' is in flight, never a failure. */
+  errors: number
+  aborts: number
+  /** Attempts that re-sent a previous request (attempt > 1). */
+  retried: number
   /** Billed input = uncached input + cache hits + cache writes, per call. */
   billed: number
   input: number
@@ -124,7 +170,13 @@ export function summarize(calls: CallIndexEntry[]): {
   let cacheRead = 0
   let cacheWrite = 0
   let output = 0
+  let errors = 0
+  let aborts = 0
+  let retried = 0
   for (const call of calls) {
+    if (call.status === 'error') errors += 1
+    else if (call.status === 'aborted') aborts += 1
+    if (call.attempt > 1) retried += 1
     const usage = call.usage
     if (usage === undefined) continue
     const read = usage.cacheReadTokens ?? 0
@@ -135,7 +187,7 @@ export function summarize(calls: CallIndexEntry[]): {
     billed += (usage.inputTokens ?? 0) + read + write
     output += usage.outputTokens ?? 0
   }
-  return { count: calls.length, billed, input, cacheRead, cacheWrite, output }
+  return { count: calls.length, errors, aborts, retried, billed, input, cacheRead, cacheWrite, output }
 }
 
 // Memoized: a 3s poll re-renders the whole ledger, but an unchanged row
@@ -271,6 +323,12 @@ export function makeRequestLogView(source: DictSource): (props: { sessionId?: st
     const scrollRef = React.useRef<HTMLDivElement | null>(null)
     const stickToBottom = React.useRef(true)
     const pinnedRef = React.useRef<HTMLElement | null>(null)
+    // Float-button visibility rides the same scroll events; state flips only
+    // on threshold crossing so a scroll drag never re-renders per tick.
+    const [showTop, setShowTop] = React.useState(false)
+    const showTopRef = React.useRef(false)
+    const [showBottom, setShowBottom] = React.useState(false)
+    const showBottomRef = React.useRef(false)
     // Set right before "Load older" prepends rows: after the update lands,
     // the layout effect grows scrollTop by the added height so the viewport
     // stays anchored on the row the reader was looking at.
@@ -278,13 +336,33 @@ export function makeRequestLogView(source: DictSource): (props: { sessionId?: st
     const onScroll = React.useCallback((event?: { target?: EventTarget | null }): void => {
       const el = (event?.target ?? scrollRef.current) as HTMLElement | null
       if (el === null || el === undefined) return
-      stickToBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 48
+      stickToBottom.current = pinnedToBottom(el.scrollTop, el.scrollHeight, el.clientHeight)
+      const away = showTopBtn(el.scrollTop)
+      if (away !== showTopRef.current) {
+        showTopRef.current = away
+        setShowTop(away)
+      }
+      const offBottom = !stickToBottom.current
+      if (offBottom !== showBottomRef.current) {
+        showBottomRef.current = offBottom
+        setShowBottom(offBottom)
+      }
     }, [])
     React.useLayoutEffect(() => {
       if (state.kind !== 'ready') return
       const root = scrollRef.current
       if (root === null) return
       const target = findScroller(root)
+      // .rl-root declares `overflow-y: auto` so it CAN be the scroller when the
+      // host gives the ledger a bounded pane. But that declaration also makes
+      // it the containing block for its own `position: sticky` children in
+      // every layout — including dsh's default one, where an ancestor pane
+      // scrolls and .rl-root never does. The summary strip then stuck to a
+      // scrollport that never moves, i.e. not at all: measured at y=-508 with
+      // the pane scrolled 600px, exactly the totals-off-screen case the sticky
+      // wrapper exists to prevent. Hand the overflow back when we are not the
+      // scroller, and the strip pins to the box that really scrolls.
+      root.style.overflowY = target === root ? '' : 'visible'
       if (pinnedRef.current !== target) {
         if (pinnedRef.current !== null) pinnedRef.current.removeEventListener('scroll', onScroll)
         target.addEventListener('scroll', onScroll, { passive: true })
@@ -537,9 +615,8 @@ export function makeRequestLogView(source: DictSource): (props: { sessionId?: st
           // what that is.
           h('div', { className: 'rl-stats-top' },
            h('div', { className: 'rl-stats-row' },
-            // The panel title used to repeat this count beside it; folding the
-            // total into the label drops the duplication AND says what the
-            // other figures are summed over, which the bare '100+' never did.
+            // The count is ATTEMPTS (rows: retries and auxiliary calls ride
+            // along); the partial-load note rides the label as before.
             metric(
               dict.sumCalls,
               String(sums.count),
@@ -547,9 +624,31 @@ export function makeRequestLogView(source: DictSource): (props: { sessionId?: st
               undefined,
               sums.count < state.total ? interp(dict.sumCallsOf, { total: String(state.total) }) : undefined,
             ),
+            // Health renders only when non-zero: a clean session owes the
+            // strip no red, and a rough one cannot hide behind token totals.
+            // This — not steps or LLM time, which dsh's own footer already
+            // carries — is what only the recorded log can tell you.
+            sums.errors + sums.aborts === 0 ? null : metric(
+              dict.sumFailed,
+              String(sums.errors + sums.aborts),
+              'rl-metric-bad',
+              interp(dict.sumFailedHint, { errors: String(sums.errors), aborts: String(sums.aborts) }),
+            ),
+            // No colour: a retry that then succeeded is not a fault, and amber
+            // beside the red read as a second alarm (see .rl-metric-bad).
+            sums.retried === 0 ? null : metric(
+              dict.sumRetried,
+              String(sums.retried),
+              undefined,
+              dict.sumRetriedHint,
+            ),
+            // Row counts end here; token totals begin. dsh's status bar marks
+            // exactly this kind of seam with '|'.
+            h('span', { className: 'rl-stats-div', key: 'div' }),
             metric(dict.sumBilledInput, formatTokens(sums.billed), undefined, dict.sumBilledInputHint),
             // The hit rate is the figure people actually scan, and the only
-            // one carrying colour — which is what makes it findable.
+            // colour here besides a non-zero failure count — which is what
+            // keeps it findable.
             metric(dict.sumHitRate, formatPct(sums.cacheRead, sums.billed), 'rl-metric-hit'),
             metric(dict.sumOutput, formatTokens(sums.output)),
             // Marginal, not the transcript's weight — the tooltip carries the
@@ -563,6 +662,37 @@ export function makeRequestLogView(source: DictSource): (props: { sessionId?: st
                   pct: formatPct(state.storage.logicalBytes, state.storage.maxFileBytes),
                 }))),
             h('span', { className: 'rl-head-actions' },
+              // Jump controls live in the toolbar rather than in a floating
+              // chip over the ledger. A bottom-right float is unreachable
+              // here: dsh draws the composer over the bottom ~130px of this
+              // pane, so the chip landed underneath it (measured y=1283 in a
+              // 1000px window). The toolbar rides the sticky summary strip,
+              // which is always on screen, and needs no guess about what the
+              // host paints on top. Disabled rather than hidden, so the
+              // toolbar's width never changes as you scroll.
+              h('button', {
+                className: 'rl-btn rl-btn-icon',
+                title: dict.backToTop,
+                'aria-label': dict.backToTop,
+                disabled: !showTop,
+                onClick: () => {
+                  const scroller = pinnedRef.current ?? scrollRef.current
+                  if (scroller !== null) scroller.scrollTo({ top: 0 })
+                },
+              }, chevron('up')),
+              h('button', {
+                className: 'rl-btn rl-btn-icon',
+                title: dict.toLatest,
+                'aria-label': dict.toLatest,
+                disabled: !showBottom,
+                onClick: () => {
+                  // Jumping to the end also re-arms the pin: auto-refresh
+                  // keeps following the newest call from here on.
+                  stickToBottom.current = true
+                  const scroller = pinnedRef.current ?? scrollRef.current
+                  if (scroller !== null) scroller.scrollTo({ top: scroller.scrollHeight })
+                },
+              }, chevron('down')),
               h('button', {
                 className: 'rl-btn' + (charts.open ? ' rl-btn-on' : ''),
                 title: dict.charts.toggleHint,

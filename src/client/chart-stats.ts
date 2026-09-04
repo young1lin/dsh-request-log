@@ -34,7 +34,7 @@ export interface MetricSeries {
   key: string
   /** Dict key carrying the display label (stats stays i18n-free). */
   labelKey: string
-  colorRole: 'brand' | 'success' | 'warn' | 'error' | 'neutral'
+  colorRole: 'brand' | 'success' | 'warn' | 'error' | 'neutral' | 'reasoning'
   /** Ascending by x; y === null marks a gap slot. */
   points: SeriesPoint[]
 }
@@ -92,13 +92,17 @@ const TOKENS_GROUP: MetricGroup = {
   key: 'tokens',
   labelKey: 'groupTokens',
   unit: 'tokens',
-  stackOrder: ['in', 'cacheRead', 'cacheWrite', 'out'],
+  // The output band decomposes: reasoning + answer, stacked adjacently, so
+  // the two layers always sum to the reported output and the stack top stays
+  // billed + output — the decomposition adds visibility, never tokens.
+  stackOrder: ['in', 'cacheRead', 'cacheWrite', 'reasoning', 'out'],
   cumulable: true,
   series: [
     { key: 'in', labelKey: 'colIn', colorRole: 'brand', points: [] },
     { key: 'cacheRead', labelKey: 'colCacheRead', colorRole: 'success', points: [] },
     { key: 'cacheWrite', labelKey: 'colCacheWrite', colorRole: 'warn', points: [] },
-    { key: 'out', labelKey: 'colOut', colorRole: 'neutral', points: [] },
+    { key: 'reasoning', labelKey: 'colReasoning', colorRole: 'reasoning', points: [] },
+    { key: 'out', labelKey: 'colAnswer', colorRole: 'neutral', points: [] },
   ],
 }
 
@@ -139,7 +143,12 @@ function readValue(entry: CallIndexEntry, group: MetricGroupKey, seriesKey: stri
         case 'in': return usage.inputTokens
         case 'cacheRead': return usage.cacheReadTokens ?? 0
         case 'cacheWrite': return usage.cacheWriteTokens ?? 0
-        case 'out': return usage.outputTokens
+        // Wire semantics (both providers): reasoning ⊆ output. Unreported
+        // reasoning is a REAL zero-height band, not a gap — the model answered
+        // without thinking. A provider overshooting output is clamped so the
+        // two layers sum to the reported output, never past it.
+        case 'reasoning': return Math.min(usage.reasoningTokens ?? 0, usage.outputTokens)
+        case 'out': return Math.max(0, usage.outputTokens - (usage.reasoningTokens ?? 0))
         default: return null
       }
     case 'latency':

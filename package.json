@@ -1,6 +1,6 @@
 {
   "name": "dsh-request-log",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "DeepSeek Harness plugin that records every LLM provider request/response, viewable per call in the web UI.",
   "author": "young1lin",
   "repository": {

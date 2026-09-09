@@ -100,6 +100,11 @@ export interface ChartsDict {
   xAxisToStep: string
   xAxisToTime: string
   xAxisHint: string
+  /** X-axis toggle: the third position, and the bucket-size control. */
+  xAxisToBucket: string
+  bucketSize: string
+  bucketCustom: string
+  bucketHint: string
   /** Shown when no plotted value exists anywhere. */
   emptyTitle: string
   emptyHint: string

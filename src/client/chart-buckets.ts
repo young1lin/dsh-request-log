@@ -56,6 +56,7 @@ export function bucketTokens(
     labelKey: 'groupTokens',
     unit: 'tokens',
     stackOrder: BUCKET_STACK_ORDER,
+    bucketable: true,
     series: BUCKET_STACK_ORDER.map(key => ({
       key,
       labelKey: key === 'in' ? 'colIn'

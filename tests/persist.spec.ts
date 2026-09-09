@@ -44,7 +44,7 @@ describe('fresh defaults', () => {
       auto: true,
       model: null,
       detail: { side: 'request', format: null },
-      charts: { open: true, group: 'hitrate', stacks: false, cumulative: true, xMode: 'time' },
+      charts: { open: true, group: 'hitrate', stacks: false, cumulative: true, xMode: 'time', bucketMinutes: 5 },
     })
   })
 })
@@ -60,7 +60,7 @@ describe('in-page round-trip', () => {
       auto: false,
       model: null,
       detail: { side: 'response', format: 'openai-responses' },
-      charts: { open: true, group: 'hitrate', stacks: false, cumulative: true, xMode: 'time' },
+      charts: { open: true, group: 'hitrate', stacks: false, cumulative: true, xMode: 'time', bucketMinutes: 5 },
     })
     expect(loadViewMemory('s2')).toEqual(freshViewMemory())
   })
@@ -164,8 +164,27 @@ describe('sessionStorage write-through', () => {
       auto: true,
       model: null,
       detail: { side: 'request', format: null },
-      charts: { open: true, group: 'hitrate', stacks: false, cumulative: true, xMode: 'time' },
+      charts: { open: true, group: 'hitrate', stacks: false, cumulative: true, xMode: 'time', bucketMinutes: 5 },
     })
+  })
+
+  it('remembers the bucket size and clamps a hostile one', () => {
+    const store = fakeStorage()
+    vi.stubGlobal('sessionStorage', store)
+    updateViewMemory('s3', { charts: { ...loadViewMemory('s3').charts, xMode: 'bucket', bucketMinutes: 10 } })
+    const back = loadViewMemory('s3').charts
+    expect(back.xMode).toBe('bucket')
+    expect(back.bucketMinutes).toBe(10)
+    // A seeded page per id: zero, negative, absurd and non-integer windows
+    // all fall back to the default — the control must never divide by a
+    // hostile bucket.
+    for (const [id, minutes] of [['b0', 0], ['bneg', -5], ['bbig', 99_999], ['btext', '5']] as const) {
+      store.setItem('dsh-request-log:view:' + id, JSON.stringify({
+        charts: { xMode: 'bucket', bucketMinutes: minutes },
+      }))
+      expect(loadViewMemory(id).charts.bucketMinutes).toBe(5)
+      expect(loadViewMemory(id).charts.xMode).toBe('bucket')
+    }
   })
 
   it('coerces chart prefs narrowly and keeps valid ones', () => {
@@ -175,15 +194,15 @@ describe('sessionStorage write-through', () => {
       charts: { open: false, group: 'tokens', stacks: 3, cumulative: 'nope', xMode: 'sideways' },
     }))
     const loaded = loadViewMemory('s1')
-    expect(loaded.charts).toEqual({ open: false, group: 'tokens', stacks: false, cumulative: true, xMode: 'time' })
+    expect(loaded.charts).toEqual({ open: false, group: 'tokens', stacks: false, cumulative: true, xMode: 'time', bucketMinutes: 5 })
     store.setItem('dsh-request-log:view:s2', JSON.stringify({
       charts: { open: true, group: 'galaxy' },
     }))
     // An uncached session id reads through to storage; s1 stays in-page.
-    expect(loadViewMemory('s2').charts).toEqual({ open: true, group: 'hitrate', stacks: false, cumulative: true, xMode: 'time' })
+    expect(loadViewMemory('s2').charts).toEqual({ open: true, group: 'hitrate', stacks: false, cumulative: true, xMode: 'time', bucketMinutes: 5 })
     // A partial patch rides the merge without dropping untouched fields.
-    updateViewMemory('s1', { charts: { group: 'latency', open: false, stacks: false, cumulative: false, xMode: 'step' } })
-    expect(loadViewMemory('s1').charts).toEqual({ open: false, group: 'latency', stacks: false, cumulative: false, xMode: 'step' })
+    updateViewMemory('s1', { charts: { group: 'latency', open: false, stacks: false, cumulative: false, xMode: 'step', bucketMinutes: 5 } })
+    expect(loadViewMemory('s1').charts).toEqual({ open: false, group: 'latency', stacks: false, cumulative: false, xMode: 'step', bucketMinutes: 5 })
   })
 
   it('drops a selection whose id is not a string', () => {

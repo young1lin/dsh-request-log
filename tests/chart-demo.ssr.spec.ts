@@ -83,7 +83,13 @@ for (let step = 1; step <= 48; step += 1) {
     usage,
   }))
 }
-calls.push(entryOf({ id: 'title-aux', purpose: 'session-title', status: 'ok', messageCount: 2 }))
+calls.push(entryOf({
+  id: 'title-aux', purpose: 'session-title', status: 'ok', messageCount: 2,
+  // Anchored inside the demo window — a stray Date.now() here once put the
+  // fixture's newest call 15 months after its oldest, and bucket mode (which
+  // synthesizes a slot per window in between) turned that into 134k points.
+  startedAt: BASE + 30 * 95_000,
+}))
 calls.push(entryOf({
   id: 'compact-aux', purpose: 'compaction', status: 'ok', messageCount: 60,
   startedAt: BASE + 23 * 90_000, durationMs: 48_000, ttfbMs: 900,
@@ -110,7 +116,8 @@ const dict: Dict = {
     groupHitRate: 'Hit rate', groupTokens: 'Tokens', groupLatency: 'Latency', groupSpeed: 'Speed',
     stacks: 'Stacked', stacksHint: '',
     cumulative: 'Cumulative', cumulativeHint: '',
-    xAxisToStep: 'By step', xAxisToTime: 'By time', xAxisHint: '',
+    xAxisToStep: 'By step', xAxisToTime: 'By time', xAxisToBucket: 'By bucket', xAxisHint: '',
+    bucketSize: 'Window', bucketCustom: 'Custom', bucketHint: '',
     emptyTitle: 'Nothing to plot yet', emptyHint: '', allNull: '',
     speedApproxHint: 'Approximate.',
     excludedShort: '{count} aux',
@@ -165,18 +172,23 @@ describe('stats panel screenshot fixtures', () => {
   it('renders every metric group to .tmp/*.html', () => {
     mkdirSync('.tmp', { recursive: true })
     const variants: { name: string; prefs: import('../src/client/persist').ChartsPrefs }[] = [
-      { name: 'hitrate', prefs: { open: true, group: 'hitrate', stacks: false, cumulative: true, xMode: 'step' } },
-      { name: 'tokens-lines', prefs: { open: true, group: 'tokens', stacks: false, cumulative: false, xMode: 'step' } },
-      { name: 'tokens-cumulative', prefs: { open: true, group: 'tokens', stacks: false, cumulative: true, xMode: 'step' } },
-      { name: 'tokens-cumulative-stacked', prefs: { open: true, group: 'tokens', stacks: true, cumulative: true, xMode: 'step' } },
-      { name: 'tokens-stacked', prefs: { open: true, group: 'tokens', stacks: true, cumulative: false, xMode: 'step' } },
-      { name: 'latency', prefs: { open: true, group: 'latency', stacks: false, cumulative: true, xMode: 'step' } },
-      { name: 'speed', prefs: { open: true, group: 'speed', stacks: false, cumulative: true, xMode: 'step' } },
+      { name: 'hitrate', prefs: { open: true, group: 'hitrate', stacks: false, cumulative: true, xMode: 'step', bucketMinutes: 5 } },
+      { name: 'tokens-lines', prefs: { open: true, group: 'tokens', stacks: false, cumulative: false, xMode: 'step', bucketMinutes: 5 } },
+      { name: 'tokens-cumulative', prefs: { open: true, group: 'tokens', stacks: false, cumulative: true, xMode: 'step', bucketMinutes: 5 } },
+      { name: 'tokens-cumulative-stacked', prefs: { open: true, group: 'tokens', stacks: true, cumulative: true, xMode: 'step', bucketMinutes: 5 } },
+      { name: 'tokens-stacked', prefs: { open: true, group: 'tokens', stacks: true, cumulative: false, xMode: 'step', bucketMinutes: 5 } },
+      { name: 'latency', prefs: { open: true, group: 'latency', stacks: false, cumulative: true, xMode: 'step', bucketMinutes: 5 } },
+      { name: 'speed', prefs: { open: true, group: 'speed', stacks: false, cumulative: true, xMode: 'step', bucketMinutes: 5 } },
       // The clock axis: idle gaps become distance, cumulative becomes an area.
-      { name: 'time-hitrate', prefs: { open: true, group: 'hitrate', stacks: false, cumulative: true, xMode: 'time' } },
-      { name: 'time-tokens-lines', prefs: { open: true, group: 'tokens', stacks: false, cumulative: false, xMode: 'time' } },
-      { name: 'time-tokens-area', prefs: { open: true, group: 'tokens', stacks: false, cumulative: true, xMode: 'time' } },
-      { name: 'time-latency', prefs: { open: true, group: 'latency', stacks: false, cumulative: true, xMode: 'time' } },
+      { name: 'time-hitrate', prefs: { open: true, group: 'hitrate', stacks: false, cumulative: true, xMode: 'time', bucketMinutes: 5 } },
+      { name: 'time-tokens-lines', prefs: { open: true, group: 'tokens', stacks: false, cumulative: false, xMode: 'time', bucketMinutes: 5 } },
+      { name: 'time-tokens-area', prefs: { open: true, group: 'tokens', stacks: false, cumulative: true, xMode: 'time', bucketMinutes: 5 } },
+      { name: 'time-latency', prefs: { open: true, group: 'latency', stacks: false, cumulative: true, xMode: 'time', bucketMinutes: 5 } },
+      // Bucket mode: per-window stacked columns; a stored bucket choice on a
+      // non-token group renders as by-time without losing the stored mode.
+      { name: 'tokens-bucket', prefs: { open: true, group: 'tokens', stacks: false, cumulative: true, xMode: 'bucket', bucketMinutes: 5 } },
+      { name: 'tokens-bucket-hour', prefs: { open: true, group: 'tokens', stacks: false, cumulative: false, xMode: 'bucket', bucketMinutes: 30 } },
+      { name: 'latency-bucket-falls-back', prefs: { open: true, group: 'latency', stacks: false, cumulative: true, xMode: 'bucket', bucketMinutes: 5 } },
     ]
     for (const variant of variants) {
       const html = page(variant.name, renderToStaticMarkup(

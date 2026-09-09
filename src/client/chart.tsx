@@ -25,14 +25,17 @@
 
 import { React, h } from './react'
 import type { CallIndexEntry } from '../shared/types'
+import { BUCKET_MAX_MINUTES, BUCKET_MIN_MINUTES, BUCKET_PRESETS, bucketTokens } from './chart-buckets'
 import { formatAxisTime, formatDuration, formatLedgerTime, formatTokens } from './data'
 import {
   buildChartModel,
   cumulateSerieses,
   stackSerieses,
+  type ChartModel,
   type MetricGroup,
   type MetricGroupKey,
   type MetricSeries,
+  type XMode,
 } from './chart-stats'
 import {
   extentOf,
@@ -132,11 +135,33 @@ export function StatsPanel(props: {
   // Auxiliary calls carry no step, so the numbered axis can never hold them;
   // the time axis can, and a compaction is usually what explains a hit-rate
   // cliff. buildChartModel ignores the option in step mode.
-  const model = React.useMemo(
-    () => buildChartModel(props.calls, props.prefs.xMode, { auxCalls: 'include' }),
-    [props.calls, props.prefs.xMode],
+  //
+  // The bucket position means something only on the token group — everywhere
+  // else it renders as by-time WITHOUT discarding the stored choice, so the
+  // reader can hop to Latency and back without the mode evaporating.
+  const effXMode: XMode = props.prefs.xMode === 'bucket' && props.prefs.group !== 'tokens'
+    ? 'time'
+    : props.prefs.xMode
+  const base = React.useMemo(
+    () => buildChartModel(props.calls, effXMode, { auxCalls: 'include' }),
+    [props.calls, effXMode],
   )
-  const timeMode = model.xMode === 'time'
+  const bucketed = React.useMemo(
+    () => bucketTokens(props.calls, props.prefs.bucketMinutes),
+    [props.calls, props.prefs.bucketMinutes],
+  )
+  const model: ChartModel = effXMode === 'bucket'
+    ? {
+      ...base,
+      slots: bucketed.slots,
+      groups: base.groups.map(entry => entry.key === 'tokens' ? bucketed.group : entry),
+    }
+    : base
+  // The bucket axis is wall-clock like the time axis (same ticks, same
+  // tooltip title form); only the plotted values change from per-call to
+  // per-window sums.
+  const timeMode = model.xMode === 'time' || model.xMode === 'bucket'
+  const bucketMode = model.xMode === 'bucket'
   const group: MetricGroup =
     model.groups.find(entry => entry.key === props.prefs.group) ?? model.groups[0]!
 
@@ -184,22 +209,26 @@ export function StatsPanel(props: {
   // — the Cursor-dashboard form: one column per step, its top at the
   // cumulative usage so far, color segments breaking that down by token
   // kind. Line stacking applies only OUTSIDE cumulative mode.
-  const cumulative = props.prefs.cumulative && group.cumulable === true
+  // Bucket mode draws the same stacked-column machinery on per-window sums;
+  // a per-bucket sum and a running total answer different questions, so the
+  // cumulative toggle is hidden there rather than forced either way.
+  const bars = bucketMode || (props.prefs.cumulative && group.cumulable === true)
+  const cumulative = !bucketMode && props.prefs.cumulative && group.cumulable === true
   const based = cumulative ? cumulateSerieses(group) : group.series
-  const stacking = !cumulative && props.prefs.stacks && group.stackOrder !== undefined
+  const stacking = !cumulative && !bucketMode && props.prefs.stacks && group.stackOrder !== undefined
   // Bars re-stack the VISIBLE series only, so a hidden legend chip truly
   // removes its segment from every column (stacked lines keep the legacy
   // hide-the-line-only semantics).
-  const barSource = cumulative ? based.filter(series => !hidden.has(series.key)) : based
-  const stacked = stacking || cumulative
+  const barSource = bars ? based.filter(series => !hidden.has(series.key)) : based
+  const stacked = stacking || bars
     ? stackSerieses({ ...group, series: barSource })
     : barSource
-  const visible: MetricSeries[] = cumulative
+  const visible: MetricSeries[] = bars
     ? stacked
     : stacked.length <= 1 ? stacked : stacked.filter(series => !hidden.has(series.key))
   // Tooltip rows read PER-SERIES values — own cumulative totals in bar mode,
   // stacked layer tops when stacking lines (legacy semantics).
-  const tipSource = cumulative ? barSource : visible
+  const tipSource = bars ? barSource : visible
 
   // --- layout ---------------------------------------------------------------
   const plotW = Math.max(width - 74, 120)
@@ -225,7 +254,9 @@ export function StatsPanel(props: {
 
   const reference = visible[0]?.points ?? []
   const xsAll = reference.map(p => p.x)
-  const xMinRaw = xsAll.length > 0 ? Math.min(...xsAll) : 0
+  // Loop, not spread: bucket mode can legitimately hold six figures of
+  // slots, and Math.min(...xs) over that many arguments blows the stack.
+  const xMinRaw = xMinOf(xsAll)
   const xSpanRaw = xsAll.length > 1 ? xMaxOf(xsAll) - xMinRaw : 1
   const xDomain = padDomain(xMinRaw - xSpanRaw * 0.04, xMinRaw + xSpanRaw * 1.04, 'span')
   const height = CHART_HEIGHT
@@ -240,12 +271,12 @@ export function StatsPanel(props: {
   // at most one column per ~pixel, keeping the bucket's TALLEST (last
   // non-null) slot so a hover snap reads exact full-resolution values.
   const decimateTo = Math.max(80, Math.round(plotW / 2))
-  const rendered = cumulative ? [] : visible.map(series => ({
+  const rendered = bars ? [] : visible.map(series => ({
     series,
     points: series.points.length > 200 ? lttbDecimate(series.points, decimateTo) : series.points,
   }))
   const barDrawn: { x: number; idx: number }[] = []
-  if (cumulative) {
+  if (bars) {
     const maxBars = Math.max(40, Math.floor(plotW))
     const step = Math.max(1, Math.ceil(reference.length / maxBars))
     for (let i = 0; i < reference.length; i += step) {
@@ -267,7 +298,7 @@ export function StatsPanel(props: {
   // FULL-resolution first visible series so the returned ordinal indexes
   // the same arrays the tooltip/crosshair reads — decimation stays
   // drawing-only, as the module header promises.
-  const hoverXs: number[] = cumulative
+  const hoverXs: number[] = bars
     ? barDrawn.map(column => sx(column.x))
     : visible[0]?.points.map(p => sx(p.x)) ?? []
 
@@ -292,7 +323,7 @@ export function StatsPanel(props: {
         const pointerY = event.clientY - rect.top
         let bestDistance = Number.POSITIVE_INFINITY
         for (const candidate of tied) {
-          const slotIndex = cumulative ? barDrawn[candidate]!.idx : candidate
+          const slotIndex = bars ? barDrawn[candidate]!.idx : candidate
           for (const series of visible) {
             const y = series.points[slotIndex]?.y
             if (y === null || y === undefined || !Number.isFinite(y)) continue
@@ -307,8 +338,8 @@ export function StatsPanel(props: {
     }
     // Bars carry their exact full-resolution slot index; lines keep the
     // drawn-set ordinal the tooltip code below has always consumed.
-    return cumulative ? barDrawn[ordinal]!.idx : ordinal
-  }, [hoverXs, cumulative, barDrawn, visible, sy])
+    return bars ? barDrawn[ordinal]!.idx : ordinal
+  }, [hoverXs, bars, barDrawn, visible, sy])
   const onMove = React.useCallback((event: { clientX?: number; clientY?: number }): void => {
     const index = snapIndex(event)
     setHover(index < 0 ? null : { index })
@@ -398,7 +429,7 @@ export function StatsPanel(props: {
       flushRun()
     }
   }
-  if (cumulative && !cumulativeArea) {
+  if (bars && !cumulativeArea) {
     // Column geometry: width from drawn-column spacing, clamped to [1, 22].
     const spacing = barDrawn.length > 1
       ? (sx(barDrawn[barDrawn.length - 1]!.x) - sx(barDrawn[0]!.x)) / (barDrawn.length - 1)
@@ -482,7 +513,7 @@ export function StatsPanel(props: {
         }
       }
       // Bars highlight the whole hovered column instead of dot tops.
-      if (!cumulative) {
+      if (!bars) {
         focusDots.push(h('circle', {
           key: 'fd-' + series.key,
           className: 'rl-focus rl-ls-' + series.colorRole,
@@ -518,8 +549,11 @@ export function StatsPanel(props: {
         // asked — and names the turn behind it, or the auxiliary call's
         // purpose for the rows that have no step at all. spansDays keeps the
         // title honest on a multi-day axis, seconds included (the axis ticks
-        // drop them for space; a tooltip can afford them).
-        timeMode
+        // drop them for space; a tooltip can afford them). A bucket's title
+        // names the WINDOW (start plus width), not a representative call.
+        bucketMode
+          ? formatLedgerTime(slot, spansDays) + ' · ' + bucketLabel(props.prefs.bucketMinutes)
+        : timeMode
           ? formatLedgerTime(slot, spansDays) + (meta?.step !== undefined
               ? ' · #' + String(meta.step)
               : meta?.purpose === undefined ? '' : ' · ' + meta.purpose)
@@ -560,19 +594,54 @@ export function StatsPanel(props: {
             seriesLabel(dict, series.key))))
     : null
   // The label names the axis you switch TO, so the button reads as an action
-  // rather than as an on/off state with no obvious "on".
+  // rather than as an on/off state with no obvious "on". On the token group
+  // the cycle gains the bucket position; everywhere else it stays a toggle,
+  // and a stored bucket choice renders as by-time until the reader returns.
+  const nextXMode = (): XMode => {
+    if (model.xMode === 'time') return 'step'
+    if (model.xMode === 'step') return group.bucketable === true ? 'bucket' : 'time'
+    return 'time'
+  }
   const xAxisToggle = h('button', {
-    className: 'rl-btn',
+    className: 'rl-btn' + (bucketMode ? ' rl-btn-on' : ''),
     title: charts.xAxisHint,
-    onClick: () => props.onPrefs({ xMode: timeMode ? 'step' : 'time' }),
-  }, timeMode ? charts.xAxisToStep : charts.xAxisToTime)
-  const cumulativeToggle = group.cumulable !== true ? null : h('button', {
+    onClick: () => props.onPrefs({ xMode: nextXMode() }),
+  }, model.xMode === 'time'
+    ? charts.xAxisToStep
+    : model.xMode === 'step' && group.bucketable === true ? charts.xAxisToBucket : charts.xAxisToTime)
+  // Window width: preset chips plus a clamped custom field. One control, one
+  // axis position — the bucket mode's whole surface.
+  const bucketControl = !bucketMode ? null : h('span', { className: 'rl-bucket-ctrl' },
+    h('span', { className: 'rl-bucket-label' }, charts.bucketSize),
+    ...BUCKET_PRESETS.map(minutes => h('button', {
+      key: 'bucket-' + String(minutes),
+      className: 'rl-chip' + (props.prefs.bucketMinutes === minutes ? ' rl-chip-on' : ''),
+      title: charts.bucketHint,
+      onClick: () => props.onPrefs({ bucketMinutes: minutes }),
+    }, bucketLabel(minutes))),
+    h('input', {
+      className: 'rl-bucket-input',
+      type: 'number',
+      min: BUCKET_MIN_MINUTES,
+      max: BUCKET_MAX_MINUTES,
+      title: charts.bucketCustom,
+      'aria-label': charts.bucketCustom,
+      placeholder: charts.bucketCustom,
+      value: BUCKET_PRESETS.includes(props.prefs.bucketMinutes) ? '' : String(props.prefs.bucketMinutes),
+      onChange: (event: { target: { value: string } }) => {
+        const next = Math.round(Number(event.target.value))
+        if (Number.isFinite(next) && next >= BUCKET_MIN_MINUTES && next <= BUCKET_MAX_MINUTES) {
+          props.onPrefs({ bucketMinutes: next })
+        }
+      },
+    }))
+  const cumulativeToggle = group.cumulable !== true || bucketMode ? null : h('button', {
     className: 'rl-btn' + (cumulative ? ' rl-btn-on' : ''),
     title: charts.cumulativeHint,
     onClick: () => props.onPrefs({ cumulative: !props.prefs.cumulative }),
   }, charts.cumulative)
   // Stacking is implicit in the bar form — the toggle only exists for lines.
-  const stacksToggle = group.stackOrder === undefined || cumulative ? null : h('button', {
+  const stacksToggle = group.stackOrder === undefined || bars ? null : h('button', {
     className: 'rl-btn' + (stacking ? ' rl-btn-on' : ''),
     title: charts.stacksHint,
     onClick: () => props.onPrefs({ stacks: !props.prefs.stacks }),
@@ -597,7 +666,7 @@ export function StatsPanel(props: {
     y1: y0, y2: y1,
   }))
   if (focusDots.length > 0) bodyChildren.push(h('g', { key: 'focus' }, ...focusDots))
-  if (cumulative && !cumulativeArea && hover !== null && xsAll.length > 0 && barDrawn.length > 0) {
+  if (bars && !cumulativeArea && hover !== null && xsAll.length > 0 && barDrawn.length > 0) {
     // Wide translucent wash over the hovered column — bars have no dot tops.
     const slotX = sx(xsAll[Math.min(hover.index, xsAll.length - 1)]!)
     const washW = Math.min(Math.max(barDrawn.length > 1
@@ -637,6 +706,7 @@ export function StatsPanel(props: {
       h('span', { className: 'rl-chart-tabs-space' }),
       legend,
       xAxisToggle,
+      bucketControl,
       cumulativeToggle,
       stacksToggle,
       note),
@@ -650,6 +720,17 @@ export function StatsPanel(props: {
           ? h('div', { className: 'rl-chart-hint' }, charts.allNull)
           : null,
       tooltip))
+}
+
+/** Chip/tooltip label for a window width in minutes (60 → "1h"). */
+function bucketLabel(minutes: number): string {
+  return minutes >= 60 && minutes % 60 === 0 ? String(minutes / 60) + 'h' : String(minutes) + 'm'
+}
+
+function xMinOf(values: number[]): number {
+  let min = values[0] ?? 0
+  for (const v of values) if (v < min) min = v
+  return min
 }
 
 function xMaxOf(values: number[]): number {

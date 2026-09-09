@@ -24,6 +24,7 @@
 
 import { WIRE_PROTOCOLS, type WireProtocol } from '../wire'
 import type { MetricGroupKey, XMode } from './chart-stats'
+import { BUCKET_MAX_MINUTES, BUCKET_MIN_MINUTES } from './chart-buckets'
 
 export type DetailSide = 'request' | 'response'
 
@@ -52,9 +53,12 @@ export interface ChartsPrefs {
   cumulative: boolean
   /**
    * Which x axis the panel draws: wall-clock time (the default — it answers
-   * "when did I ask for what") or the numbered conversation step.
+   * "when did I ask for what"), the numbered conversation step, or token
+   * bars summed per time window (token group only).
    */
   xMode: XMode
+  /** Token group, bucket x-mode: the window width in minutes. */
+  bucketMinutes: number
 }
 
 export interface ViewMemory {
@@ -80,7 +84,7 @@ const VALID_FORMATS: readonly string[] = ['neutral', ...WIRE_PROTOCOLS.map(entry
 const memory = new Map<string, ViewMemory>()
 
 const VALID_GROUPS: readonly MetricGroupKey[] = ['hitrate', 'tokens', 'latency', 'speed']
-const VALID_X_MODES: readonly XMode[] = ['time', 'step']
+const VALID_X_MODES: readonly XMode[] = ['time', 'step', 'bucket']
 
 export function freshViewMemory(): ViewMemory {
   return {
@@ -89,7 +93,7 @@ export function freshViewMemory(): ViewMemory {
     auto: true,
     model: null,
     detail: { side: 'request', format: null },
-    charts: { open: true, group: 'hitrate', stacks: false, cumulative: true, xMode: 'time' },
+    charts: { open: true, group: 'hitrate', stacks: false, cumulative: true, xMode: 'time', bucketMinutes: 5 },
   }
 }
 
@@ -183,6 +187,12 @@ function coerceMemory(raw: unknown): ViewMemory | null {
     xMode: VALID_X_MODES.includes(chartsRaw.xMode as XMode)
       ? chartsRaw.xMode as XMode
       : fresh.charts.xMode,
+    bucketMinutes: typeof chartsRaw.bucketMinutes === 'number'
+      && Number.isInteger(chartsRaw.bucketMinutes)
+      && chartsRaw.bucketMinutes >= BUCKET_MIN_MINUTES
+      && chartsRaw.bucketMinutes <= BUCKET_MAX_MINUTES
+      ? chartsRaw.bucketMinutes
+      : fresh.charts.bucketMinutes,
   }
 
   return {

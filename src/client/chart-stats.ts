@@ -51,6 +51,8 @@ export interface MetricGroup {
   stackOrder?: string[]
   /** Token group: offers the cumulative (running-total) mode — see cumulateSerieses. */
   cumulable?: boolean
+  /** Token group: offers the by-time-window bar mode — see chart-buckets. */
+  bucketable?: boolean
   series: MetricSeries[]
 }
 
@@ -76,7 +78,7 @@ export interface ChartSlot {
   purpose?: string
 }
 
-export type XMode = 'step' | 'time'
+export type XMode = 'step' | 'time' | 'bucket'
 
 export interface ChartOptions {
   /**
@@ -108,6 +110,7 @@ const TOKENS_GROUP: MetricGroup = {
   // billed + output — the decomposition adds visibility, never tokens.
   stackOrder: ['in', 'cacheRead', 'cacheWrite', 'reasoning', 'out'],
   cumulable: true,
+  bucketable: true,
   series: [
     { key: 'in', labelKey: 'colIn', colorRole: 'brand', points: [] },
     { key: 'cacheRead', labelKey: 'colCacheRead', colorRole: 'success', points: [] },

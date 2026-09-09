@@ -174,6 +174,56 @@ describe('CallStore', () => {
     expect(entry.durationMs).toBeUndefined()
   })
 
+  it('lists only the requested model and tallies every model in the session', async () => {
+    const directory = await tempDir()
+    const store = new CallStore({ directory, retentionDays: 14, maxCallsPerSession: 100, maxFileBytes: 8 * 1024 * 1024 })
+    await store.append(recordOf({ id: 'a', provider: 'openai-codex', model: 'gpt-5.6-sol', requestHash: 'h1' }))
+    await store.append(recordOf({ id: 'b', provider: 'zai-coding-cn', model: 'glm-5.3', requestHash: 'h2' }))
+    await store.append(recordOf({ id: 'c', provider: 'zai-coding-cn', model: 'glm-5.3', requestHash: 'h3' }))
+
+    const all = await store.listIndex('sess-1', 50, 0)
+    expect(all.total).toBe(3)
+    expect(all.models).toEqual([
+      { provider: 'openai-codex', model: 'gpt-5.6-sol', calls: 1 },
+      { provider: 'zai-coding-cn', model: 'glm-5.3', calls: 2 },
+    ])
+
+    const filtered = await store.listIndex('sess-1', 50, 0, 'glm-5.3')
+    expect(filtered.total).toBe(2)
+    expect(filtered.calls.map(call => call.id)).toEqual(['c', 'b'])
+    // The rollup describes the SESSION, not the filtered page: the chip row
+    // must still offer the model you would switch back to.
+    expect(filtered.models).toHaveLength(2)
+  })
+
+  it('keeps session step numbering under a model filter', async () => {
+    const directory = await tempDir()
+    const store = new CallStore({ directory, retentionDays: 14, maxCallsPerSession: 100, maxFileBytes: 8 * 1024 * 1024 })
+    await store.append(recordOf({ id: 'a', model: 'a', requestHash: 'h1' }))
+    await store.append(recordOf({ id: 'b', model: 'b', requestHash: 'h2' }))
+    await store.append(recordOf({ id: 'c', model: 'a', requestHash: 'h3' }))
+
+    const filtered = await store.listIndex('sess-1', 50, 0, 'a')
+    expect(filtered.calls.map(call => call.step)).toEqual([3, 1])
+  })
+
+  it('pages a filtered set without gaps', async () => {
+    const directory = await tempDir()
+    const store = new CallStore({ directory, retentionDays: 14, maxCallsPerSession: 100, maxFileBytes: 8 * 1024 * 1024 })
+    for (let i = 0; i < 6; i += 1) {
+      await store.append(recordOf({
+        id: 'r' + String(i),
+        model: i % 2 === 0 ? 'even' : 'odd',
+        requestHash: 'h' + String(i),
+        timing: { startedAt: 1_000 + i },
+      }))
+    }
+    // Offset counts within the FILTERED set, or a client paging by offset
+    // would walk records the filter already removed.
+    expect((await store.listIndex('sess-1', 2, 0, 'even')).calls.map(call => call.id)).toEqual(['r4', 'r2'])
+    expect((await store.listIndex('sess-1', 2, 2, 'even')).calls.map(call => call.id)).toEqual(['r0'])
+  })
+
   it('trims a session file to the newest maxCallsPerSession records', async () => {
     const directory = await tempDir()
     const store = new CallStore({ directory, retentionDays: 14, maxCallsPerSession: 3, maxFileBytes: 8 * 1024 * 1024 })

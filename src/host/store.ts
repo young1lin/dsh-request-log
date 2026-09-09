@@ -239,6 +239,28 @@ export interface SweepStatus {
 }
 
 /**
+ * Every model the session called, in first-appearance order, with the
+ * attempts each accounts for. Provider and model together identify a row:
+ * the same model name served by two providers is two different calls to
+ * make, and collapsing them would hide a routing change.
+ */
+export function tallyModels(entries: readonly CallIndexEntry[]): SessionModelTally[] {
+  const order: string[] = []
+  const tallies = new Map<string, SessionModelTally>()
+  for (const entry of entries) {
+    const key = entry.provider + '\u0000' + entry.model
+    const existing = tallies.get(key)
+    if (existing === undefined) {
+      order.push(key)
+      tallies.set(key, { provider: entry.provider, model: entry.model, calls: 1 })
+    } else {
+      existing.calls += 1
+    }
+  }
+  return order.map(key => tallies.get(key)!)
+}
+
+/**
  * Stamp logical-call steps onto a chronological entry list (see
  * {@link CallIndexEntry.step}). Ordinary calls consume a step each — attempt 1
  * opens a new one, retries share the step they retry — while auxiliary calls
@@ -1037,21 +1059,30 @@ export class CallStore {
   }
 
   /**
-   * Newest-first index page for one session.
+   * Newest-first index page for one session, optionally narrowed to one
+   * model.
+   *
+   * The filter runs BEFORE paging, so `total` counts the filtered set and a
+   * client paging on offset walks that set without gaps. Step numbers are
+   * assigned by `entriesOf` over the whole session, so a filtered row still
+   * names its place in the conversation rather than its place in the filter.
    */
-  async listIndex(sessionId: string, limit: number, offset: number): Promise<CallIndexResponse> {
+  async listIndex(sessionId: string, limit: number, offset: number, model?: string): Promise<CallIndexResponse> {
     const { entries, footprint } = await this.entriesOf(sessionId)
-    const total = entries.length
+    const models = tallyModels(entries)
+    const scoped = model === undefined ? entries : entries.filter(entry => entry.model === model)
+    const total = scoped.length
     // Newest-first paging without materializing a reversed copy of the whole
     // session: the requested window is a slice off the tail, reversed.
     const end = Math.max(total - offset, 0)
     const start = Math.max(end - limit, 0)
-    const calls = entries.slice(start, end).reverse()
+    const calls = scoped.slice(start, end).reverse()
     return {
       calls,
       total,
       offset,
       limit,
+      models,
       storage: {
         envelopeBytes: footprint.envelope,
         objectBytes: footprint.object,

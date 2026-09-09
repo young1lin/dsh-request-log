@@ -184,14 +184,34 @@ export interface SessionStorageFootprint {
   maxFileBytes: number
 }
 
+/**
+ * One model this session called, with the attempts it accounts for.
+ *
+ * Computed over ALL of a session's entries, never over the returned page: a
+ * chip row built from one page would hide a model that has not been paged in
+ * yet, and offer the reader no way to reach it.
+ */
+export interface SessionModelTally {
+  provider: string
+  model: string
+  calls: number
+}
+
 /** Paged index response. */
 export interface CallIndexResponse {
   calls: CallIndexEntry[]
+  /** Records matching the request — the FILTERED count when a model is named. */
   total: number
   offset: number
   limit: number
   /** Absent only from responses built before the field existed. */
   storage?: SessionStorageFootprint
+  /**
+   * Every model the session called, in first-appearance order — unaffected
+   * by a model filter, so the chip you would switch back to stays offered.
+   * Absent only from responses built before the field existed.
+   */
+  models?: SessionModelTally[]
 }
 
 /** Health probe response. */

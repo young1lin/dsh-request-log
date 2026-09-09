@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { BUCKET_PRESETS, bucketTokens } from '../src/client/chart-buckets.ts'
+import { TOKENS_STACK_ORDER } from '../src/client/chart-stats.ts'
 import type { CallIndexEntry } from '../src/shared/types'
 
 const at = (clock: string): number => new Date('2026-09-09T' + clock).getTime()
@@ -19,7 +20,9 @@ describe('bucketTokens', () => {
       call('10:00:10', { inputTokens: 100, outputTokens: 10, cacheReadTokens: 900, cacheWriteTokens: 5, reasoningTokens: 4 }),
       call('10:03:00', { inputTokens: 50, outputTokens: 20 }),
     ], 5)
-    expect(group.stackOrder).toEqual(['cacheRead', 'in', 'cacheWrite', 'reasoning', 'out'])
+    // Identity, not just equality: the bucket group and the shipped token
+    // group read ONE shared constant, so the two orders cannot drift apart.
+    expect(group.stackOrder).toBe(TOKENS_STACK_ORDER)
     const y = (key: string): (number | null)[] =>
       group.series.find(series => series.key === key)!.points.map(point => point.y)
     // Both calls land in the 10:00-10:05 window.

@@ -48,7 +48,7 @@ export interface MetricGroup {
   /** Hit-rate group: fixed [0,100] axis, ticks every 25, never auto-scaled. */
   percentAxis?: boolean
   /** Token group: legend chips may stack the lines per slot (see stackSerieses). */
-  stackOrder?: string[]
+  stackOrder?: readonly string[]
   /** Token group: offers the cumulative (running-total) mode — see cumulateSerieses. */
   cumulable?: boolean
   /** Token group: offers the by-time-window bar mode — see chart-buckets. */
@@ -101,14 +101,22 @@ const HIT_RATE_GROUP: MetricGroup = {
   }],
 }
 
+/**
+ * The ONE bottom-to-top segment order of the token stack, shared by the
+ * per-step/cumulative modes and the by-window buckets so the same session
+ * reads the same in every x position. Cache hits floor the bar — they are
+ * the part of the input you did not pay full freight for, so the height
+ * above the green band is what the call really cost — and the output band
+ * stays decomposed adjacently (reasoning + answer always sum to the
+ * reported output, so the stack top stays billed + output).
+ */
+export const TOKENS_STACK_ORDER: readonly string[] = ['cacheRead', 'in', 'cacheWrite', 'reasoning', 'out']
+
 const TOKENS_GROUP: MetricGroup = {
   key: 'tokens',
   labelKey: 'groupTokens',
   unit: 'tokens',
-  // The output band decomposes: reasoning + answer, stacked adjacently, so
-  // the two layers always sum to the reported output and the stack top stays
-  // billed + output — the decomposition adds visibility, never tokens.
-  stackOrder: ['in', 'cacheRead', 'cacheWrite', 'reasoning', 'out'],
+  stackOrder: TOKENS_STACK_ORDER,
   cumulable: true,
   bucketable: true,
   series: [

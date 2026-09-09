@@ -165,9 +165,22 @@ describe('stackSerieses', () => {
   it('cumulates in stackOrder while usage exists', () => {
     const stacked = stackSerieses(tokenGroup())
     const byKey = new Map(stacked.map(series => [series.key, series]))
-    expect(byKey.get('cacheRead')!.points.map(p => p.y)).toEqual([30, 100]) // 10+20 · 100+0
+    // Cache hits are the floor now: the green band is its own value, and the
+    // height ABOVE it (in stacked on top) is what the call really cost.
+    expect(byKey.get('cacheRead')!.points.map(p => p.y)).toEqual([20, 0]) // floor · floor
+    expect(byKey.get('in')!.points.map(p => p.y)).toEqual([30, 100]) // 20+10 · 0+100
     expect(byKey.get('cacheWrite')!.points.map(p => p.y)).toEqual([35, 100])
     expect(byKey.get('out')!.points.map(p => p.y)).toEqual([38, 107])
+  })
+
+  it('stacks the token bands in the order the buckets use, floor-up', () => {
+    const group = tokenGroup()
+    const stacked = stackSerieses(group)
+    // One order for every x position of the token group: the series pile up
+    // bottom-to-top cacheRead, in, cacheWrite, reasoning, out — exactly the
+    // bucket group's order, because both read one shared constant.
+    expect(stacked.map(series => series.key)).toEqual(['cacheRead', 'in', 'cacheWrite', 'reasoning', 'out'])
+    expect(group.stackOrder).toEqual(['cacheRead', 'in', 'cacheWrite', 'reasoning', 'out'])
   })
 
 
@@ -218,7 +231,10 @@ describe('cumulateSerieses', () => {
     // The out layer tops at the grand cumulative total: 38 = 10+20+5+3,
     // 145 = (10+100)+(20+0)+(5+0)+(3+7), then flat 145 over the error slot.
     expect(byKey.get('out')!.points.map(p => p.y)).toEqual([38, 145, 145])
-    expect(byKey.get('in')!.points.map(p => p.y)).toEqual([10, 110, 110])
+    // The floor band is the cumulated cache hits alone; the input band tops
+    // above it — the same bands the by-step stack draws, in the same order.
+    expect(byKey.get('cacheRead')!.points.map(p => p.y)).toEqual([20, 20, 20])
+    expect(byKey.get('in')!.points.map(p => p.y)).toEqual([30, 130, 130])
   })
 })
 

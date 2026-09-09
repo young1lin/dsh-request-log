@@ -218,8 +218,17 @@ export function StatsPanel(props: {
   const stacking = !cumulative && !bucketMode && props.prefs.stacks && group.stackOrder !== undefined
   // Bars re-stack the VISIBLE series only, so a hidden legend chip truly
   // removes its segment from every column (stacked lines keep the legacy
-  // hide-the-line-only semantics).
-  const barSource = bars ? based.filter(series => !hidden.has(series.key)) : based
+  // hide-the-line-only semantics). The bar rows — bands AND tooltip rows —
+  // follow the stack order, so what piles up and what the tooltip lists are
+  // the same column, top-down; the legend keeps the group's series order.
+  const stackRank = group.stackOrder
+  const barSource = bars
+    ? (stackRank === undefined
+        ? based.filter(series => !hidden.has(series.key))
+        : stackRank
+          .map(key => based.find(series => series.key === key && !hidden.has(series.key)))
+          .filter((series): series is MetricSeries => series !== undefined))
+    : based
   const stacked = stacking || bars
     ? stackSerieses({ ...group, series: barSource })
     : barSource

@@ -14,6 +14,7 @@
  */
 
 import type { CallIndexEntry } from '../shared/types'
+import { TOKENS_STACK_ORDER } from './chart-stats'
 import type { ChartSlot, MetricGroup } from './chart-stats'
 
 /** Bucket sizes offered as chips, in minutes; any other value is custom. */
@@ -22,14 +23,6 @@ export const BUCKET_PRESETS: readonly number[] = [1, 5, 10, 30]
 /** Smallest and largest custom bucket the control accepts, in minutes. */
 export const BUCKET_MIN_MINUTES = 1
 export const BUCKET_MAX_MINUTES = 1440
-
-/**
- * Bottom-to-top segment order. Cache hits floor the bar because they are
- * the part of the input you did not pay full freight for; the output band
- * decomposes into reasoning and answer, which always sum to the reported
- * output, so the stack top stays billed + output.
- */
-const BUCKET_STACK_ORDER = ['cacheRead', 'in', 'cacheWrite', 'reasoning', 'out']
 
 /**
  * Start of the window `startedAt` falls in, anchored to a local midnight so
@@ -55,9 +48,11 @@ export function bucketTokens(
     key: 'tokens',
     labelKey: 'groupTokens',
     unit: 'tokens',
-    stackOrder: BUCKET_STACK_ORDER,
+    // The shared token stack order — the buckets must not invent a second
+    // one (same session, same reader, one meaning for the green band).
+    stackOrder: TOKENS_STACK_ORDER,
     bucketable: true,
-    series: BUCKET_STACK_ORDER.map(key => ({
+    series: TOKENS_STACK_ORDER.map(key => ({
       key,
       labelKey: key === 'in' ? 'colIn'
         : key === 'cacheRead' ? 'colCacheRead'

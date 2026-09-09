@@ -11,7 +11,7 @@
 
 import { ErrorBoundary, React, h } from './react'
 import type { CallIndexEntry, SessionStorageFootprint } from '../shared/types'
-import { ApiError, fetchCalls, formatBytes, formatDateTime, formatDuration, formatLedgerTime, formatPct, formatToolDispatches, formatTokens, formatTps, speedReading, splitMeasure } from './data'
+import { ApiError, fetchCalls, fetchWindow, formatBytes, formatDateTime, formatDuration, formatLedgerTime, formatPct, formatToolDispatches, formatTokens, formatTps, speedReading, splitMeasure } from './data'
 import { chevron, makeCallDetail } from './detail'
 import { StatsPanel } from './chart'
 import { interp, type ViewDict } from './dict'
@@ -426,7 +426,7 @@ export function makeRequestLogView(source: DictSource): (props: { sessionId?: st
       const abort = new AbortController()
       const load = async (): Promise<void> => {
         try {
-          const page = await fetchCalls(sessionId, limit, 0, abort.signal)
+          const page = await fetchWindow(sessionId, limit, undefined, abort.signal)
           if (cancelled) return
           // The API pages newest-first; the ledger renders oldest-first so
           // the newest call sits at the bottom, like the Trajectory tab.
@@ -465,7 +465,7 @@ export function makeRequestLogView(source: DictSource): (props: { sessionId?: st
       const abort = new AbortController()
       const probe = async (): Promise<void> => {
         try {
-          const page = await fetchCalls(sessionId, Math.min(PAGE_SIZE, limit), 0, abort.signal)
+          const page = await fetchCalls(sessionId, Math.min(PAGE_SIZE, limit), 0, undefined, abort.signal)
           if (cancelled) return
           setState(prev => {
             if (prev.kind !== 'ready') {

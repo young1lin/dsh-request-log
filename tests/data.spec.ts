@@ -10,6 +10,7 @@ import {
   ApiError,
   fetchCall,
   fetchCalls,
+  fetchWindow,
   formatDateTime,
   formatAxisTime,
   formatLedgerTime,
@@ -56,6 +57,56 @@ describe('fetch layer', () => {
       new Response(JSON.stringify({ id: 'c1' }), { status: 200, headers: { 'content-type': 'application/json' } }))
     const record = await fetchCall('s', 'c1')
     expect(record.id).toBe('c1')
+  })
+})
+
+/** A server that clamps limit the way api.ts does, over `total` records. */
+function clampingServer(total: number, maxLimit: number) {
+  const seen: { limit: number; offset: number }[] = []
+  const fetchMock = vi.fn(async (url: string): Promise<Response> => {
+    const params = new URL(url, 'http://x').searchParams
+    const limit = Math.min(Number(params.get('limit')), maxLimit)
+    const offset = Number(params.get('offset'))
+    seen.push({ limit, offset })
+    const end = Math.max(total - offset, 0)
+    const start = Math.max(end - limit, 0)
+    const page: { id: string }[] = []
+    for (let i = end - 1; i >= start; i -= 1) page.push({ id: 'c' + String(i) })
+    return new Response(JSON.stringify({ calls: page, total, offset, limit }), { status: 200 })
+  })
+  return { fetchMock, seen }
+}
+
+describe('fetchWindow', () => {
+  it('pages past the server limit clamp to reach the whole window', async () => {
+    const { fetchMock, seen } = clampingServer(2121, 2000)
+    vi.stubGlobal('fetch', fetchMock)
+    const page = await fetchWindow('s1', 2500, undefined)
+    expect(page.calls).toHaveLength(2121)
+    expect(page.total).toBe(2121)
+    // Newest first, no duplicates, no gaps.
+    expect(page.calls[0].id).toBe('c2120')
+    expect(page.calls[2120].id).toBe('c0')
+    expect(new Set(page.calls.map(call => call.id)).size).toBe(2121)
+    expect(seen.length).toBeGreaterThan(1)
+  })
+
+  it('stops at the target without walking the whole session', async () => {
+    const { fetchMock } = clampingServer(5000, 2000)
+    vi.stubGlobal('fetch', fetchMock)
+    const page = await fetchWindow('s1', 100, undefined)
+    expect(page.calls).toHaveLength(100)
+    expect(page.total).toBe(5000)
+  })
+
+  it('carries the model filter on every page it fetches', async () => {
+    const seen: string[] = []
+    vi.stubGlobal('fetch', vi.fn(async (url: string): Promise<Response> => {
+      seen.push(url)
+      return new Response(JSON.stringify({ calls: [], total: 0, offset: 0, limit: 100 }), { status: 200 })
+    }))
+    await fetchWindow('s1', 100, 'glm-5.3')
+    expect(seen[0]).toContain('model=glm-5.3')
   })
 })
 

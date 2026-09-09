@@ -27,9 +27,63 @@ async function getJson<T>(path: string, signal?: AbortSignal): Promise<T> {
   return await response.json() as T
 }
 
-export function fetchCalls(sessionId: string, limit: number, offset: number, signal?: AbortSignal): Promise<CallIndexResponse> {
-  const path = PREFIX + '/sessions/' + encodeURIComponent(sessionId) + '/calls?limit=' + String(limit) + '&offset=' + String(offset)
+export function fetchCalls(
+  sessionId: string,
+  limit: number,
+  offset: number,
+  model?: string,
+  signal?: AbortSignal,
+): Promise<CallIndexResponse> {
+  const path = PREFIX + '/sessions/' + encodeURIComponent(sessionId)
+    + '/calls?limit=' + String(limit) + '&offset=' + String(offset)
+    + (model === undefined ? '' : '&model=' + encodeURIComponent(model))
   return getJson(path, signal)
+}
+
+/**
+ * How many calls one request asks for. The server clamps `limit` to its own
+ * maxCallsPerSession, so a window wider than that can only be reached by
+ * paging on OFFSET — which is also why a 3000-call window never rides in a
+ * single 1.5 MB response.
+ */
+const WINDOW_CHUNK = 1000
+
+/**
+ * The newest `target` calls, paged on offset until the target is met or the
+ * session is exhausted. Records settle once and never change, so pages
+ * stitched from separate requests cannot disagree; a call appended between
+ * two pages shifts the offset window toward the newer end, which can repeat
+ * a record but can never skip one — so the stitch de-duplicates by id.
+ */
+export async function fetchWindow(
+  sessionId: string,
+  target: number,
+  model: string | undefined,
+  signal?: AbortSignal,
+): Promise<CallIndexResponse> {
+  const first = await fetchCalls(sessionId, Math.min(target, WINDOW_CHUNK), 0, model, signal)
+  const calls = first.calls.slice()
+  const seen = new Set(calls.map(call => call.id))
+  while (calls.length < Math.min(target, first.total)) {
+    const page = await fetchCalls(
+      sessionId,
+      Math.min(target - calls.length, WINDOW_CHUNK),
+      calls.length,
+      model,
+      signal,
+    )
+    // A server that cannot advance (an older build, an empty tail) must not
+    // spin this loop: stop the moment a page adds nothing.
+    let added = 0
+    for (const call of page.calls) {
+      if (seen.has(call.id)) continue
+      seen.add(call.id)
+      calls.push(call)
+      added += 1
+    }
+    if (added === 0) break
+  }
+  return { ...first, calls }
 }
 
 export function fetchCall(sessionId: string, callId: string, signal?: AbortSignal): Promise<CallRecord> {

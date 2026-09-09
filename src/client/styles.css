@@ -272,7 +272,12 @@
      that content width, centered in the pane. Below the content floor it
      still scrolls horizontally rather than dropping or squeezing a field. */
   display: grid;
-  grid-template-columns: repeat(12, max-content);
+  /* Derived, never declared — see track-widths.ts. The view measures a
+     hidden grid of the widest candidate per column and publishes the
+     resolved list here. The var()'s FALLBACK is the degradation path: with
+     no measurement (first paint, or an effect that never ran) the table
+     sizes itself exactly as it did before, across every row. */
+  grid-template-columns: var(--rl-tracks, repeat(12, max-content));
   column-gap: 10px;
   width: fit-content;
   max-width: 100%;
@@ -287,8 +292,11 @@
 .rl-row {
   display: grid;
   /* Tracks belong to .rl-table; the row adopts them (and its gaps) verbatim,
-     so every row's columns align by construction, not by a shared px list. */
-  grid-template-columns: subgrid;
+     so every row's columns align by construction, not by a shared px list.
+     The same explicit list every row over aligns them just as well; the
+     fallback is the subgrid that aligned them when the table itself was
+     measuring max-content. */
+  grid-template-columns: var(--rl-tracks, subgrid);
   grid-column: 1 / -1;
   align-items: center;
   box-sizing: border-box;
@@ -302,6 +310,24 @@
   color: var(--dsw-alias-label-primary);
   cursor: pointer;
   font-family: inherit;
+}
+
+/* Off-flow, unmeasured by anything else, and always max-content: this is
+   the only place the browser sizes columns from content. aria-hidden in the
+   markup keeps it out of the accessibility tree; `visibility: hidden` keeps
+   it out of find-in-page while still being laid out (display:none would not
+   be measured at all). */
+.rl-measure {
+  --rl-tracks: initial;
+  position: absolute;
+  top: 0;
+  left: 0;
+  visibility: hidden;
+  pointer-events: none;
+  width: max-content;
+  max-width: none;
+  overflow: visible;
+  border: none;
 }
 
 .rl-row:last-child { border-bottom: none; }

@@ -12,6 +12,7 @@
 import { ErrorBoundary, React, h } from './react'
 import type { CallIndexEntry, SessionStorageFootprint } from '../shared/types'
 import { ApiError, fetchCalls, fetchWindow, formatBytes, formatDateTime, formatDuration, formatLedgerTime, formatPct, formatToolDispatches, formatTokens, formatTps, speedReading, splitMeasure } from './data'
+import { candidateRows } from './track-widths'
 import { chevron, makeCallDetail } from './detail'
 import { StatsPanel } from './chart'
 import { interp, type ViewDict } from './dict'
@@ -175,6 +176,63 @@ export function summarize(calls: CallIndexEntry[]): {
   return { count: calls.length, errors, aborts, retried, billed, input, cacheRead, cacheWrite, output }
 }
 
+/**
+ * The twelve formatted cell values of one row, in column order — the same
+ * strings CallRow renders. Kept beside CallRow so the two cannot drift: a
+ * column added to one must be added to the other. The model entry joins the
+ * name and the badges that cell stacks (the status dot renders no text), so
+ * the hidden measuring grid sees the widest content the column can hold.
+ */
+function ledgerCells(call: CallIndexEntry, withDate: boolean): string[] {
+  const usage = call.usage
+  const billed = usage === undefined
+    ? undefined
+    : usage.inputTokens + (usage.cacheReadTokens ?? 0) + (usage.cacheWriteTokens ?? 0)
+  const speedRead = speedReading(usage?.outputTokens, call.durationMs, call.ttfbMs)
+  return [
+    formatLedgerTime(call.startedAt, withDate),
+    // The model cell's parts, NUL-joined like the store's composite keys:
+    // the measuring grid splits them back and renders the real dot + name
+    // + badge structure (the plain join underestimated it by the badge
+    // chrome — a 28 px miss on the live session).
+    [
+      call.model,
+      call.step === undefined ? '' : '#' + String(call.step),
+      call.purpose ?? '',
+      call.attempt > 1 ? '×' + String(call.attempt) : '',
+    ].filter(text => text !== '').join('\u0000'),
+    formatDuration(call.ttfbMs),
+    formatDuration(call.durationMs),
+    speedRead === null ? '\u2013'
+      : (speedRead.approx ? '\u2248 ' : '') + formatTps(speedRead.tokensPerSecond),
+    billed === undefined ? '\u2013' : formatTokens(billed),
+    formatTokens(usage?.inputTokens),
+    formatTokens(usage?.cacheReadTokens),
+    formatPct(usage?.cacheReadTokens, billed),
+    formatTokens(usage?.cacheWriteTokens),
+    formatTokens(usage?.outputTokens),
+    String(call.messageCount) + '/' + String(call.toolCalls ?? '\u2013'),
+  ]
+}
+
+/** The twelve header cells, shared by the ledger and the measuring grid. */
+function headerCells(dict: ViewDict): React.ReactElement[] {
+  return [
+    h('span', { className: 'rl-cell rl-c-time' }, dict.time),
+    h('span', { className: 'rl-cell rl-c-model' }, dict.model),
+    h('span', { className: 'rl-cell rl-c-num' }, dict.ttft),
+    h('span', { className: 'rl-cell rl-c-num' }, dict.totalTime),
+    h('span', { className: 'rl-cell rl-c-num' }, dict.colSpeed),
+    h('span', { className: 'rl-cell rl-c-num' }, dict.colBilledInput),
+    h('span', { className: 'rl-cell rl-c-num' }, dict.colIn),
+    h('span', { className: 'rl-cell rl-c-num rl-th-hit' }, dict.colCacheRead),
+    h('span', { className: 'rl-cell rl-c-num rl-th-hit' }, dict.colHitRate),
+    h('span', { className: 'rl-cell rl-c-num' }, dict.colCacheWrite),
+    h('span', { className: 'rl-cell rl-c-num rl-th-out' }, dict.colOut),
+    h('span', { className: 'rl-cell rl-c-size' }, dict.size),
+  ]
+}
+
 // Memoized: a 3s poll re-renders the whole ledger, but an unchanged row
 // (same call object reference, same dict) skips its subtree diff entirely.
 const CallRow = React.memo(function CallRow(props: {
@@ -189,26 +247,19 @@ const CallRow = React.memo(function CallRow(props: {
   const call = props.call
   const dict = props.dict
   const usage = call.usage
-  const billed = usage === undefined
-    ? undefined
-    : usage.inputTokens + (usage.cacheReadTokens ?? 0) + (usage.cacheWriteTokens ?? 0)
+  // One definition of what a cell says: the hidden measuring grid lays out
+  // the same strings this row renders (see track-widths.ts).
+  const cells = ledgerCells(call, props.withDate)
+  const [time, , ttft, total, speed, billed, input, hit, hitPct, write, out, size] = cells
   const DASH = '\u2013'
   const numCls = (text: string, extra?: string): string =>
     'rl-cell rl-c-num'
     + (extra === undefined ? '' : ' ' + extra)
     + (text === DASH ? ' rl-none' : '')
-  const ttft = formatDuration(call.ttfbMs)
-  const total = formatDuration(call.durationMs)
   // Same reading the chart plots (chart-stats): exact over the stream phase,
   // ≈ over the whole call when that phase is unmeasurable — one number, one
   // meaning, instead of the ledger's old '–' where the chart showed ≈.
   const speedRead = speedReading(usage?.outputTokens, call.durationMs, call.ttfbMs)
-  const speed = speedRead === null ? DASH
-    : (speedRead.approx ? '\u2248 ' : '') + formatTps(speedRead.tokensPerSecond)
-  const input = formatTokens(usage?.inputTokens)
-  const hit = formatTokens(usage?.cacheReadTokens)
-  const write = formatTokens(usage?.cacheWriteTokens)
-  const out = formatTokens(usage?.outputTokens)
   const called = formatToolDispatches(call.calledTools)
   return h('button', {
     id: ledgerRowId(call.id),
@@ -221,7 +272,7 @@ const CallRow = React.memo(function CallRow(props: {
       // A bare clock is ambiguous across midnight (and across a multi-day
       // window — hence withDate); hover shows the full moment, zone included.
       title: formatDateTime(call.startedAt),
-    }, formatLedgerTime(call.startedAt, props.withDate)),
+    }, time),
     h('span', { className: 'rl-cell rl-c-model' },
       h(StatusDot, { status: call.status }),
       h('span', { className: 'rl-model-name', title: call.provider + ' · ' + call.model }, call.model),
@@ -250,15 +301,15 @@ const CallRow = React.memo(function CallRow(props: {
     // call (uncached + cache hits + cache writes) — the number the In /
     // Cache-hit columns decompose.
     h('span', {
-      className: numCls(billed === undefined ? DASH : formatTokens(billed)),
+      className: numCls(billed),
       title: dict.sumBilledInputHint,
-    }, billed === undefined ? DASH : formatTokens(billed)),
+    }, billed),
     h('span', { className: numCls(input) }, input),
     h('span', { className: numCls(hit, 'rl-td-hit') }, hit),
     h('span', {
-      className: numCls(formatPct(usage?.cacheReadTokens, billed), 'rl-td-hit'),
+      className: numCls(hitPct, 'rl-td-hit'),
       title: dict.hitRateHint,
-    }, formatPct(usage?.cacheReadTokens, billed)),
+    }, hitPct),
     h('span', { className: numCls(write) }, write),
     h('span', { className: numCls(out, 'rl-td-out') }, out),
     h('span', {
@@ -269,7 +320,7 @@ const CallRow = React.memo(function CallRow(props: {
           ? ''
           : ' · ' + call.toolNames.join(', ')),
     },
-      String(call.messageCount) + '/' + String(call.toolCalls ?? '\u2013')))
+      size))
 })
 
 export function makeRequestLogView(source: DictSource): (props: { sessionId?: string }) => React.ReactElement {
@@ -548,6 +599,48 @@ export function makeRequestLogView(source: DictSource): (props: { sessionId?: st
       return opener
     }
 
+    // The twelve formatted cell values of every loaded row, in column order
+    // — the same strings CallRow renders (ledgerCells), from which the track
+    // floor's candidates are picked.
+    const cellsOf = React.useMemo(
+      () => readyCalls.map(call => ledgerCells(call, spansDays)),
+      [readyCalls, spansDays],
+    )
+    const measureRows = React.useMemo(() => candidateRows(cellsOf), [cellsOf])
+    const [tracks, setTracks] = React.useState<string | null>(null)
+    const measureRef = React.useRef<HTMLDivElement | null>(null)
+    React.useLayoutEffect(() => {
+      const el = measureRef.current
+      if (el === null || typeof getComputedStyle !== 'function') return
+      const read = (): void => {
+        let next: string
+        try {
+          const resolved = getComputedStyle(el).gridTemplateColumns
+          // A browser that reports the keyword rather than resolved pixels
+          // cannot feed the real table. Publish the degenerate list — the
+          // inline value identical to the CSS fallback — so the rows never
+          // wait on a measurement that will not come; the table then sizes
+          // itself exactly as it did before this change existed.
+          next = resolved === '' || resolved === 'none' || resolved.includes('max-content')
+            ? 'repeat(12, max-content)'
+            : resolved
+        } catch {
+          next = 'repeat(12, max-content)'
+        }
+        setTracks(prev => (prev === next ? prev : next))
+      }
+      read()
+      if (typeof ResizeObserver !== 'function') return
+      // Fonts finish loading, the reader zooms, the locale switches: all of
+      // them resize this grid, and none of them has to be known about here.
+      const observer = new ResizeObserver(() => read())
+      observer.observe(el)
+      return () => observer.disconnect()
+    }, [measureRows])
+    // The overview strip's sums re-ran on every render, including every
+    // scroll threshold flip; the window only changes when the calls do.
+    const sums = React.useMemo(() => summarize(readyCalls), [readyCalls])
+
     if (selected !== null) {
       // Keyed per call: switching calls REMOUNTS the detail, so no state
       // (the chained-previous fetch above all) can leak from one call into
@@ -589,7 +682,6 @@ export function makeRequestLogView(source: DictSource): (props: { sessionId?: st
           h('div', { className: 'rl-empty-hint' }, dict.emptyHint)))
     }
 
-    const sums = summarize(state.calls)
     // A headline figure: the number leads, its name sits under it. A trailing
     // unit ('2.86 MB') is set smaller so the digits stay the thing you read.
     const metric = (
@@ -752,28 +844,54 @@ export function makeRequestLogView(source: DictSource): (props: { sessionId?: st
               },
             }, interp(dict.loadMore, { count: state.total - state.calls.length })))
         : null,
-      h('div', { className: 'rl-table' },
-        h('div', { className: 'rl-row rl-row-head' },
-          h('span', { className: 'rl-cell rl-c-time' }, dict.time),
-          h('span', { className: 'rl-cell rl-c-model' }, dict.model),
-          h('span', { className: 'rl-cell rl-c-num' }, dict.ttft),
-          h('span', { className: 'rl-cell rl-c-num' }, dict.totalTime),
-          h('span', { className: 'rl-cell rl-c-num' }, dict.colSpeed),
-          h('span', { className: 'rl-cell rl-c-num' }, dict.colBilledInput),
-          h('span', { className: 'rl-cell rl-c-num' }, dict.colIn),
-          h('span', { className: 'rl-cell rl-c-num rl-th-hit' }, dict.colCacheRead),
-          h('span', { className: 'rl-cell rl-c-num rl-th-hit' }, dict.colHitRate),
-          h('span', { className: 'rl-cell rl-c-num' }, dict.colCacheWrite),
-          h('span', { className: 'rl-cell rl-c-num rl-th-out' }, dict.colOut),
-          h('span', { className: 'rl-cell rl-c-size' }, dict.size)),
-        state.calls.map(call => h(CallRow, {
-          key: call.id,
-          call,
-          dict,
-          withDate: spansDays,
-          located: call.id === locatedCallId,
-          onOpen: openerOf(call),
-        }))))
+      // The measuring grid sits as a sibling BEFORE the table, so the
+      // variable set on the table below never reaches it (its own class
+      // resets --rl-tracks anyway — belt and braces).
+      measureRows.length === 0 ? null : h('div', {
+        className: 'rl-table rl-measure',
+        ref: measureRef,
+        'aria-hidden': 'true',
+      },
+        h('div', { className: 'rl-row rl-row-head' }, ...headerCells(dict)),
+        ...measureRows.map((row, index) => h('div', { className: 'rl-row', key: 'm' + String(index) },
+          ...row.map((text, column) => h('span', {
+            className: column === 1 ? 'rl-cell rl-c-model' : 'rl-cell',
+            key: column,
+          },
+            // The model column is a flex cell: dot, gaps, 10px badges with
+            // padding and borders. Render the parts structurally — the same
+            // classes the real cell wears — or the track misses the chrome.
+            column === 1
+              ? [
+                  h(StatusDot, { key: 'dot', status: 'ok' }),
+                  ...text.split('\u0000').map((part, partIndex) => h('span', {
+                    key: 'p' + String(partIndex),
+                    className: partIndex === 0 ? 'rl-model-name' : 'rl-badge rl-badge-step',
+                  }, part)),
+                ]
+              : text))))),
+      h('div', {
+        className: 'rl-table',
+        ...(tracks === null ? {} : { style: { '--rl-tracks': tracks } as React.CSSProperties }),
+      },
+        h('div', { className: 'rl-row rl-row-head' }, ...headerCells(dict)),
+        // Rows wait one commit for the measuring grid to publish the track
+        // floor: laid out against the var() fallback they would size twelve
+        // max-content tracks across every row — the exact cost this change
+        // removes, paid on every mount. Where measurement cannot happen (no
+        // DOM, SSR string render) they render immediately against the CSS
+        // fallback, which is today's behavior; the effect above always
+        // publishes SOMETHING, so the wait is one commit, never a hang.
+        (typeof document === 'object' && measureRows.length > 0 && tracks === null
+          ? []
+          : state.calls.map(call => h(CallRow, {
+            key: call.id,
+            call,
+            dict,
+            withDate: spansDays,
+            located: call.id === locatedCallId,
+            onOpen: openerOf(call),
+          })))))
   }
 
   return RequestLogView

@@ -62,6 +62,8 @@ export interface ViewMemory {
   /** How many of the newest calls the ledger window covers. */
   limit: number
   auto: boolean
+  /** Model filter chip in force, or null for "all models". */
+  model: string | null
   detail: DetailPrefs
   charts: ChartsPrefs
 }
@@ -85,6 +87,7 @@ export function freshViewMemory(): ViewMemory {
     selected: null,
     limit: PAGE_SIZE,
     auto: true,
+    model: null,
     detail: { side: 'request', format: null },
     charts: { open: true, group: 'hitrate', stacks: false, cumulative: true, xMode: 'time' },
   }
@@ -162,6 +165,10 @@ function coerceMemory(raw: unknown): ViewMemory | null {
     ? record.limit
     : fresh.limit
 
+  // An empty string is not the name of a model — it is what a cleared chip
+  // would serialize to, and it must read back as "all".
+  const model = typeof record.model === 'string' && record.model !== '' ? record.model : null
+
   const chartsRaw = typeof record.charts === 'object' && record.charts !== null
     ? record.charts as Record<string, unknown>
     : {}
@@ -182,6 +189,7 @@ function coerceMemory(raw: unknown): ViewMemory | null {
     selected,
     limit,
     auto: typeof record.auto === 'boolean' ? record.auto : fresh.auto,
+    model,
     detail: { side, format },
     charts,
   }
@@ -202,6 +210,7 @@ export function loadViewMemory(sessionId: string): ViewMemory {
     selected: entry.selected === null ? null : { ...entry.selected },
     limit: entry.limit,
     auto: entry.auto,
+    model: entry.model,
     detail: { ...entry.detail },
     charts: { ...entry.charts },
   }
@@ -217,6 +226,7 @@ export function updateViewMemory(sessionId: string, patch: Partial<ViewMemory>):
     selected: patch.selected !== undefined ? patch.selected : entry.selected,
     limit: patch.limit !== undefined ? patch.limit : entry.limit,
     auto: patch.auto !== undefined ? patch.auto : entry.auto,
+    model: patch.model !== undefined ? patch.model : entry.model,
     detail: patch.detail !== undefined ? patch.detail : entry.detail,
     charts:
       patch.charts !== undefined

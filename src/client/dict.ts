@@ -135,6 +135,9 @@ export interface ViewDict {
   autoHint: string
   time: string
   model: string
+  /** Model filter: the "no filter" chip, and the row's tooltip ({count} models). */
+  modelAll: string
+  modelFilterHint: string
   ttft: string
   totalTime: string
   colSpeed: string

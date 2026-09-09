@@ -42,6 +42,7 @@ describe('fresh defaults', () => {
       selected: null,
       limit: PAGE_SIZE,
       auto: true,
+      model: null,
       detail: { side: 'request', format: null },
       charts: { open: true, group: 'hitrate', stacks: false, cumulative: true, xMode: 'time' },
     })
@@ -57,6 +58,7 @@ describe('in-page round-trip', () => {
       selected: { id: 'call-7', prevId: 'call-6' },
       limit: PAGE_SIZE * 2,
       auto: false,
+      model: null,
       detail: { side: 'response', format: 'openai-responses' },
       charts: { open: true, group: 'hitrate', stacks: false, cumulative: true, xMode: 'time' },
     })
@@ -132,6 +134,21 @@ describe('sessionStorage write-through', () => {
     expect(loadViewMemory('s1')).toEqual(freshViewMemory())
   })
 
+  it('remembers the model filter and rejects a non-string or empty one', () => {
+    const store = fakeStorage()
+    vi.stubGlobal('sessionStorage', store)
+    updateViewMemory('s1', { model: 'glm-5.3' })
+    expect(loadViewMemory('s1').model).toBe('glm-5.3')
+    updateViewMemory('s1', { model: null })
+    expect(loadViewMemory('s1').model).toBeNull()
+    // A freshly seeded page per id: 42 is not a model name, and '' is what
+    // a cleared chip serializes to — both must read back as "all models".
+    store.setItem('dsh-request-log:view:s42', JSON.stringify({ model: 42 }))
+    expect(loadViewMemory('s42').model).toBeNull()
+    store.setItem('dsh-request-log:view:sempty', JSON.stringify({ model: '' }))
+    expect(loadViewMemory('sempty').model).toBeNull()
+  })
+
   it('coerces untrusted stored fields narrowly', () => {
     const store = fakeStorage()
     vi.stubGlobal('sessionStorage', store)
@@ -145,6 +162,7 @@ describe('sessionStorage write-through', () => {
       selected: { id: 'ok' },
       limit: PAGE_SIZE,
       auto: true,
+      model: null,
       detail: { side: 'request', format: null },
       charts: { open: true, group: 'hitrate', stacks: false, cumulative: true, xMode: 'time' },
     })

@@ -257,6 +257,36 @@
 
 .rl-btn-icon:disabled:hover { color: var(--dsw-alias-label-secondary); }
 
+/* Model filter chips: one row above the summary strip. The tokens are the
+   ones .rl-btn already uses; the shape is dsh's pill — radius 999px, hairline
+   border, label-secondary until selected. */
+.rl-models {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 0 0 8px;
+}
+
+.rl-chip {
+  font: inherit;
+  font-size: 12px;
+  line-height: 20px;
+  padding: 0 10px;
+  border-radius: 999px;
+  border: 1px solid var(--dsw-alias-border-l1);
+  background: transparent;
+  color: var(--dsw-alias-label-secondary);
+  cursor: pointer;
+}
+
+.rl-chip:hover { background: var(--dsw-alias-interactive-bg-hover); }
+
+.rl-chip-on {
+  background: var(--dsw-alias-interactive-bg-active);
+  color: var(--dsw-alias-label-primary);
+  border-color: var(--dsw-alias-border-l2);
+}
+
 .rl-table {
   /* time · model · ttft total speed · total-in in hit hit% write out · msg/tools
      ONE grid for the whole table, every row subgridded into it, so each

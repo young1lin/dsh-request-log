@@ -10,7 +10,7 @@
  */
 
 import { ErrorBoundary, React, h } from './react'
-import type { CallIndexEntry, SessionStorageFootprint } from '../shared/types'
+import type { CallIndexEntry, SessionModelTally, SessionStorageFootprint } from '../shared/types'
 import { ApiError, fetchCalls, fetchWindow, formatBytes, formatDateTime, formatDuration, formatLedgerTime, formatPct, formatToolDispatches, formatTokens, formatTps, speedReading, splitMeasure } from './data'
 import { candidateRows } from './track-widths'
 import { chevron, makeCallDetail } from './detail'
@@ -90,6 +90,8 @@ type LoadState =
       total: number
       /** Session disk footprint, absent against a server too old to report it. */
       storage?: SessionStorageFootprint
+      /** Every model in the session with its attempt count; absent on servers pre-dating the rollup. */
+      models?: SessionModelTally[]
       /** Set when the LAST refresh failed and the data shown is stale. */
       warning?: string
     }
@@ -360,6 +362,15 @@ export function makeRequestLogView(source: DictSource): (props: { sessionId?: st
     // loaded window consistent (the server caps it at its own MAX_LIMIT).
     // Restored from memory so a paged-in window survives a tab switch.
     const [limit, setLimit] = React.useState(initial.limit)
+    const [model, setModel] = React.useState<string | null>(initial.model)
+    const onModel = React.useCallback((next: string | null): void => {
+      // A filter change re-pages from the newest call: the window it had
+      // paged in belonged to the other aperture.
+      stickToBottom.current = true
+      setModel(next)
+      setLimit(PAGE_SIZE)
+      updateViewMemory(sessionId, { model: next, limit: PAGE_SIZE })
+    }, [sessionId])
     // Latest detail reading position, mirroring the per-session memory: a
     // newly opened call mounts with the side/format the reader last used.
     const prefsRef = React.useRef<DetailPrefs>(initial.detail)
@@ -477,13 +488,13 @@ export function makeRequestLogView(source: DictSource): (props: { sessionId?: st
       const abort = new AbortController()
       const load = async (): Promise<void> => {
         try {
-          const page = await fetchWindow(sessionId, limit, undefined, abort.signal)
+          const page = await fetchWindow(sessionId, limit, model ?? undefined, abort.signal)
           if (cancelled) return
           // The API pages newest-first; the ledger renders oldest-first so
           // the newest call sits at the bottom, like the Trajectory tab.
           setState(previous => previous.kind === 'ready'
-            ? { kind: 'ready', calls: reconcileCalls(page.calls, previous.calls), total: page.total, storage: page.storage }
-            : { kind: 'ready', calls: reconcileCalls(page.calls, undefined), total: page.total, storage: page.storage })
+            ? { kind: 'ready', calls: reconcileCalls(page.calls, previous.calls), total: page.total, storage: page.storage, models: page.models }
+            : { kind: 'ready', calls: reconcileCalls(page.calls, undefined), total: page.total, storage: page.storage, models: page.models })
         } catch (error) {
           if (cancelled || abort.signal.aborted) return
           const message = error instanceof ApiError ? error.message : String(error)
@@ -491,7 +502,7 @@ export function makeRequestLogView(source: DictSource): (props: { sessionId?: st
           // loaded ledger — the data stays and a banner marks it stale. Only
           // a session with nothing loaded yet degrades to the error screen.
           setState(prev => prev.kind === 'ready'
-            ? { kind: 'ready', calls: prev.calls, total: prev.total, storage: prev.storage, warning: message }
+            ? { kind: 'ready', calls: prev.calls, total: prev.total, storage: prev.storage, models: prev.models, warning: message }
             : { kind: 'error', message })
         }
       }
@@ -500,7 +511,7 @@ export function makeRequestLogView(source: DictSource): (props: { sessionId?: st
         cancelled = true
         abort.abort()
       }
-    }, [sessionId, tick, limit])
+    }, [sessionId, tick, limit, model])
 
     // Auto-refresh probe: fetch only the newest PAGE and splice it into the
     // loaded window — a 3s poll on a session paged in 2000-deep costs one
@@ -516,11 +527,11 @@ export function makeRequestLogView(source: DictSource): (props: { sessionId?: st
       const abort = new AbortController()
       const probe = async (): Promise<void> => {
         try {
-          const page = await fetchCalls(sessionId, Math.min(PAGE_SIZE, limit), 0, undefined, abort.signal)
+          const page = await fetchCalls(sessionId, Math.min(PAGE_SIZE, limit), 0, model ?? undefined, abort.signal)
           if (cancelled) return
           setState(prev => {
             if (prev.kind !== 'ready') {
-              return { kind: 'ready', calls: reconcileCalls(page.calls, undefined), total: page.total, storage: page.storage }
+              return { kind: 'ready', calls: reconcileCalls(page.calls, undefined), total: page.total, storage: page.storage, models: page.models }
             }
             const probeIds = new Set(page.calls.map(call => call.id))
             const prevById = new Map(prev.calls.map(call => [call.id, call]))
@@ -528,13 +539,13 @@ export function makeRequestLogView(source: DictSource): (props: { sessionId?: st
             // reuse entry objects for the rows it does (memo identity).
             const older = prev.calls.filter(call => !probeIds.has(call.id))
             const spliced = page.calls.slice().reverse().map(call => prevById.get(call.id) ?? call)
-            return { kind: 'ready', calls: [...older, ...spliced], total: page.total, storage: page.storage }
+            return { kind: 'ready', calls: [...older, ...spliced], total: page.total, storage: page.storage, models: page.models }
           })
         } catch (error) {
           if (cancelled || abort.signal.aborted) return
           const message = error instanceof ApiError ? error.message : String(error)
           setState(prev => prev.kind === 'ready'
-            ? { kind: 'ready', calls: prev.calls, total: prev.total, storage: prev.storage, warning: message }
+            ? { kind: 'ready', calls: prev.calls, total: prev.total, storage: prev.storage, models: prev.models, warning: message }
             : prev)
         }
       }
@@ -543,7 +554,7 @@ export function makeRequestLogView(source: DictSource): (props: { sessionId?: st
         cancelled = true
         abort.abort()
       }
-    }, [sessionId, probeTick, limit])
+    }, [sessionId, probeTick, limit, model])
 
     React.useEffect(() => {
       if (!auto || selected !== null) return
@@ -714,6 +725,27 @@ export function makeRequestLogView(source: DictSource): (props: { sessionId?: st
       h('div', { className: 'rl-fixed-head' },
         state.warning === undefined ? null : h('div', { className: 'rl-warn', title: state.warning },
           dict.stale),
+        // One aperture for the summary, the charts and the ledger: two
+        // filters on one screen would need explaining, and the reader would
+        // have to remember which half moved. Only rendered at two or more
+        // models — a single-model session gains no control it never uses.
+        // The chips come from the server's rollup over every entry, so the
+        // model to switch BACK to is offered even when its calls have not
+        // been paged in.
+        (state.models === undefined || state.models.length < 2) ? null : h('div', {
+          className: 'rl-models',
+          title: interp(dict.modelFilterHint, { count: String(state.models.length) }),
+        },
+          h('button', {
+            className: 'rl-chip' + (model === null ? ' rl-chip-on' : ''),
+            onClick: () => onModel(null),
+          }, dict.modelAll),
+          ...state.models.map(tally => h('button', {
+            key: tally.provider + '/' + tally.model,
+            className: 'rl-chip' + (model === tally.model ? ' rl-chip-on' : ''),
+            title: tally.provider + ' · ' + String(tally.calls),
+            onClick: () => onModel(tally.model),
+          }, tally.model))),
         h('div', { className: 'rl-stats' },
           // Figures and controls share one line: the figures read as a group
           // only when something holds the far edge, and the controls are

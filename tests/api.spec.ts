@@ -271,6 +271,29 @@ describe('read API', () => {
     dispose()
   })
 
+  it('filters the index by ?model=, treating an empty value as no filter', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dsh-request-log-api-'))
+    dirs.push(directory)
+    const store = new CallStore({ directory, retentionDays: 14, maxCallsPerSession: 100, maxFileBytes: 8 * 1024 * 1024 })
+    await store.append(recordOf())
+    await store.append(recordOf({ id: 'call-2', model: 'other-model', timing: { startedAt: 2_000 } }))
+    const { handler, dispose } = await makeHandler(store)
+
+    const filtered = await handle(handler, 'GET', '/dsh-request-log/sessions/sess-1/calls?model=other-model')
+    expect(filtered.status).toBe(200)
+    const body = filtered.body as CallIndexResponse
+    expect(body.total).toBe(1)
+    expect(body.calls.every(call => call.model === 'other-model')).toBe(true)
+    // The rollup describes the session, not the filter: a chip row built from
+    // the filtered page would lose the model you would switch back to.
+    expect(body.models).toHaveLength(2)
+
+    // An empty param is not a model named '' — it means "no filter".
+    const unfiltered = await handle(handler, 'GET', '/dsh-request-log/sessions/sess-1/calls?model=')
+    expect((unfiltered.body as CallIndexResponse).total).toBe(2)
+    dispose()
+  })
+
   it('maps store failures to 500', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'dsh-request-log-api-'))
     dirs.push(directory)

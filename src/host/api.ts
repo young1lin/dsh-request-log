@@ -197,8 +197,12 @@ export function installApi(ctx: Context, store: CallStore, version: string, opti
           const offsetRaw = Number(url.searchParams.get('offset') ?? 0)
           const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(Math.trunc(limitRaw), 1), MAX_LIMIT) : DEFAULT_LIMIT
           const offset = Number.isFinite(offsetRaw) ? Math.max(Math.trunc(offsetRaw), 0) : 0
+          // An absent OR empty param means "no filter": '' is not the
+          // name of a model, and a client clearing its chip sends it.
+          const modelRaw = url.searchParams.get('model')
+          const model = modelRaw === null || modelRaw === '' ? undefined : modelRaw
           try {
-            sendJson(res, 200, await store.listIndex(sessionId, limit, offset))
+            sendJson(res, 200, await store.listIndex(sessionId, limit, offset, model))
           } catch (error) {
             logger?.warn('dsh-request-log: index read failed: %s', errorTextOf(error))
             sendJson(res, 500, { error: 'index read failed' })

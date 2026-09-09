@@ -57,7 +57,13 @@ export interface Config {
 
 export const DEFAULTS: Required<Pick<Config, 'retentionDays' | 'maxCallsPerSession' | 'maxFileBytes'>> = {
   retentionDays: 14,
-  maxCallsPerSession: 2000,
+  // A line-count guard, not the real bound: measured on a live store,
+  // 2,034 calls cost 5.6 MB of objects against a 128 MB maxFileBytes — the
+  // old 2,000 line cap deleted history roughly 23x earlier than the byte
+  // bound that is supposed to do the bounding. Reads stay incremental
+  // (mtime+size cache, tail-only parse), so 20,000 lines is a one-time full
+  // parse per restart, not a per-poll cost.
+  maxCallsPerSession: 20_000,
   maxFileBytes: 128 * 1024 * 1024,
 }
 

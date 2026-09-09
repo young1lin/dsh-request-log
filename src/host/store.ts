@@ -162,6 +162,12 @@ interface IndexCacheEntry {
    * footprint costs the poll no extra read.
    */
   footprint: LineFootprint
+  /**
+   * Model rollup of exactly those entries — a pure function of the same
+   * lines, computed when they are parsed and served from the cache after:
+   * a poll must not re-walk a 20,000-entry session to rebuild it.
+   */
+  models: SessionModelTally[]
 }
 
 /** Validated logical-bytes marker, bound to the file state it was counted at. */
@@ -1011,19 +1017,20 @@ export class CallStore {
    * Chronological index entries for one session, served from the (mtime, size)
    * cache when the file is unchanged since the last projection. A grown file
    * parses only its appended tail — the 3s poll on a long session costs a
-   * stat plus the new lines, never a re-parse of the whole history.
+   * stat plus the new lines, never a re-parse of the whole history. The model
+   * rollup rides the same cache for the same reason.
    */
-  private async entriesOf(sessionId: string): Promise<ParsedLines> {
+  private async entriesOf(sessionId: string): Promise<ParsedLines & { models: SessionModelTally[] }> {
     let info
     try {
       info = await stat(this.pathOf(sessionId))
     } catch {
       this.indexCache.delete(sessionId)
-      return { entries: [], footprint: { envelope: 0, object: 0 } }
+      return { entries: [], footprint: { envelope: 0, object: 0 }, models: [] }
     }
     const cached = this.indexCache.get(sessionId)
     if (cached !== undefined && cached.mtimeMs === info.mtimeMs && cached.size === info.size) {
-      return { entries: cached.entries, footprint: cached.footprint }
+      return { entries: cached.entries, footprint: cached.footprint, models: cached.models }
     }
     let entries: CallIndexEntry[]
     let footprint: LineFootprint
@@ -1054,8 +1061,9 @@ export class CallStore {
       const oldest = this.indexCache.keys().next().value
       if (oldest !== undefined) this.indexCache.delete(oldest)
     }
-    this.indexCache.set(sessionId, { mtimeMs: info.mtimeMs, size: info.size, entries, parsedBytes, footprint })
-    return { entries, footprint }
+    const models = tallyModels(entries)
+    this.indexCache.set(sessionId, { mtimeMs: info.mtimeMs, size: info.size, entries, parsedBytes, footprint, models })
+    return { entries, footprint, models }
   }
 
   /**
@@ -1068,8 +1076,7 @@ export class CallStore {
    * names its place in the conversation rather than its place in the filter.
    */
   async listIndex(sessionId: string, limit: number, offset: number, model?: string): Promise<CallIndexResponse> {
-    const { entries, footprint } = await this.entriesOf(sessionId)
-    const models = tallyModels(entries)
+    const { entries, footprint, models } = await this.entriesOf(sessionId)
     const scoped = model === undefined ? entries : entries.filter(entry => entry.model === model)
     const total = scoped.length
     // Newest-first paging without materializing a reversed copy of the whole

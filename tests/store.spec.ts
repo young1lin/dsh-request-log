@@ -196,6 +196,28 @@ describe('CallStore', () => {
     expect(filtered.models).toHaveLength(2)
   })
 
+  it('serves the model rollup from the index cache across incremental appends', async () => {
+    const directory = await tempDir()
+    const store = new CallStore({ directory, retentionDays: 14, maxCallsPerSession: 100, maxFileBytes: 8 * 1024 * 1024 })
+    await store.append(recordOf({ id: 'a', provider: 'zai-coding-cn', model: 'glm-5.3', requestHash: 'h1' }))
+    await store.listIndex('sess-1', 50, 0) // warm the cache at one model
+
+    // A grown file takes the tail-parse path; the rollup must grow with it
+    // rather than serving the stale cached one.
+    await store.append(recordOf({ id: 'b', provider: 'zai-coding-cn', model: 'glm-5.3', requestHash: 'h2' }))
+    await store.append(recordOf({ id: 'c', provider: 'openai-codex', model: 'gpt-5.6-sol', requestHash: 'h3' }))
+    const page = await store.listIndex('sess-1', 50, 0)
+    expect(page.models).toEqual([
+      { provider: 'zai-coding-cn', model: 'glm-5.3', calls: 2 },
+      { provider: 'openai-codex', model: 'gpt-5.6-sol', calls: 1 },
+    ])
+
+    // An unchanged file is a pure cache hit — the same tally object comes
+    // back without re-walking the entries.
+    const again = await store.listIndex('sess-1', 50, 0)
+    expect(again.models).toBe(page.models)
+  })
+
   it('keeps session step numbering under a model filter', async () => {
     const directory = await tempDir()
     const store = new CallStore({ directory, retentionDays: 14, maxCallsPerSession: 100, maxFileBytes: 8 * 1024 * 1024 })

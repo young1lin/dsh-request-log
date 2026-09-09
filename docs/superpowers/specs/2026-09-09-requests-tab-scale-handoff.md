@@ -32,8 +32,9 @@ Branch `requests-tab-scale`, cut from `main` at `0237907`.
 
 ### What is done, precisely
 
-Uncommitted in the working tree (deliberately — the next implementer should
-finish Task 1 and commit it as one unit, per the plan's Step 10):
+Committed on the branch (the plan folds this into one commit with the API
+half; it was committed early rather than handed over as an uncommitted tree,
+so the plan's Task 1 Step 10 is already partly done):
 
 - `src/shared/types.ts` — added `SessionModelTally`; `CallIndexResponse`
   gained `models?`, and its `total` is now documented as the *filtered* count.

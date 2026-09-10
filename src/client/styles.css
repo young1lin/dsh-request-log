@@ -19,6 +19,24 @@
 .rl-root::-webkit-scrollbar-thumb { background: var(--dsw-alias-scrollbar-bg-l2); border-radius: 5px; }
 .rl-root::-webkit-scrollbar-thumb:hover { background: var(--dsw-alias-scrollbar-hover-l2); }
 
+/* dsh's ConversationRoot hangs two 40px `col-resize` strips over the
+   conversation column — the chat-width drag added in dsh 0.1.2-alpha.1
+   ("adaptive content width") — and hides them only for a view that marks
+   itself `data-conversation-composer-overlay` (Trajectory does). That marker
+   is not a mere opt-out: it also hands the view the scrollport and floats the
+   composer over it, and this ledger deliberately lets the ancestor pane scroll
+   instead (see the overflow hand-back in view.tsx). So drop the strips
+   directly. They are inert here — nothing in the ledger reads
+   --dsh-chat-content-width — yet they paint a hover glow down the table and
+   win the hit test on every row beneath them. Both attributes are dsh's own
+   cross-package seams: ui-chat targets [data-conversation-scroll] the same
+   way, and the strips carry [data-width-handle] for exactly this kind of
+   outside addressing; they are .body's trailing children, siblings of the
+   scrollport. */
+[data-conversation-scroll]:has(.rl-root) ~ [data-width-handle] {
+  display: none;
+}
+
 .rl-head {
   display: flex;
   align-items: center;

@@ -98,7 +98,7 @@ dsh plugin --profile web add .
 
 ## Compatibility
 
-Built against `@deepseek-ai/dsh` 0.1.1-rc.2 (`@deepseek-ai/dsh-llm` 0.1.1-rc.2 wire types). The client UI uses CSS `subgrid` for the ledger table, so the browser needs Chrome/Edge 117+, Safari 16+, or Firefox 71+ (all 2023).
+Built against `@deepseek-ai/dsh` 0.1.1-rc.2 (`@deepseek-ai/dsh-llm` 0.1.1-rc.2 wire types). The client UI uses CSS `subgrid` for the ledger table and `:has()` to suppress dsh's chat-width drag strips over the ledger, so the browser needs Chrome/Edge 117+, Safari 16+, or Firefox 121+ (all 2023 — `:has()` is what raises the Firefox floor).
 
 ## License
 

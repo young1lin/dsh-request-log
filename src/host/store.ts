@@ -49,7 +49,8 @@
  */
 
 import { appendFile, mkdir, open, readdir, readFile, rename, rm, stat, truncate, writeFile } from 'node:fs/promises'
-import { join } from 'node:path'
+import { homedir } from 'node:os'
+import { join, resolve, sep } from 'node:path'
 import type { CallEnvelope, CallEnvelopeV3, CallIndexEntry, CallIndexResponse, CallRecord, RecordedMessage, RecordedRequest, RecordedResponse, SessionModelTally } from '../shared/types'
 import { RECORD_SCHEMA, RECORD_SCHEMA_V2, RECORD_SCHEMA_V3, entryFromEnvelope, envelopeSumOf, toIndexEntry } from '../shared/types'
 import { BlobStore, DEFAULT_GC_GRACE_MS, hashOfContent } from './blob'
@@ -120,6 +121,25 @@ const REACHABLE_HASH = /[0-9a-f]{64}/g
 
 /** Tree hashes specifically: only these get walked for transitive marks. */
 const REACHABLE_TREE = /"tree":"([0-9a-f]{64})"/g
+
+/**
+ * The store path as a READER is shown it: absolute, with the home prefix
+ * written as `~`. Two jobs at once — it fits the summary strip, and the host
+ * account name never crosses the wire into a browser tab or a screenshot.
+ *
+ * The prefix must end at a separator, or `C:\Users\adam` would be read as
+ * living under `C:\Users\ada`; a path outside home is returned unchanged.
+ * Win32 compares case-insensitively — a `C:\users\...` spelling must still
+ * shorten, since failing to would leak exactly the name this strips.
+ */
+export function displayPathOf(path: string, home: string | undefined = homedir()): string {
+  if (home === undefined || home === '') return path
+  const base = home.endsWith(sep) ? home.slice(0, -sep.length) : home
+  const fold = (text: string): string => process.platform === 'win32' ? text.toLowerCase() : text
+  if (fold(path) === fold(base)) return '~'
+  if (!fold(path).startsWith(fold(base) + sep)) return path
+  return '~' + path.slice(base.length)
+}
 
 /** Sanitize a session id into one safe path segment (ids are uuid-like already). */
 export function fileNameOf(sessionId: string): string {
@@ -1087,6 +1107,9 @@ export class CallStore {
         objectBytes: footprint.object,
         logicalBytes: footprint.envelope + footprint.object,
         maxFileBytes: this.config.maxFileBytes,
+        // `resolve` because a relatively-configured directory is legal and a
+        // relative path is meaningless to a browser, which has no cwd.
+        path: displayPathOf(resolve(this.pathOf(sessionId))),
       },
     }
   }

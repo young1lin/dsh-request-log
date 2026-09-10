@@ -179,6 +179,26 @@ export function summarize(calls: CallIndexEntry[]): {
 }
 
 /**
+ * The storage metric's tooltip: the marginal-figure caveat, and under it —
+ * when the server names the file — where those bytes actually landed. The
+ * location is its own paragraph, never a clause spliced into the caveat: the
+ * caveat is the part a reader must not skim past.
+ *
+ * A server too old to report the path yields the tooltip byte-for-byte as it
+ * was, trailing blank line included — i.e. not one.
+ */
+export function storageHintOf(dict: ViewDict, storage: SessionStorageFootprint): string {
+  const hint = interp(dict.sumStorageHint, {
+    envelope: formatBytes(storage.envelopeBytes),
+    objects: formatBytes(storage.objectBytes),
+    cap: formatBytes(storage.maxFileBytes),
+    pct: formatPct(storage.logicalBytes, storage.maxFileBytes),
+  })
+  if (storage.path === undefined) return hint
+  return hint + '\n\n' + interp(dict.sumStoragePath, { path: storage.path })
+}
+
+/**
  * The twelve formatted cell values of one row, in column order — the same
  * strings CallRow renders. Kept beside CallRow so the two cannot drift: a
  * column added to one must be added to the other. The model entry joins the
@@ -381,6 +401,27 @@ export function makeRequestLogView(source: DictSource): (props: { sessionId?: st
     const showTopRef = React.useRef(false)
     const [showBottom, setShowBottom] = React.useState(false)
     const showBottomRef = React.useRef(false)
+    // Clicking the storage figure copies the path its tooltip names; the
+    // label flashes the outcome, the same contract as the detail view's
+    // Copy JSON button (a refused or absent clipboard is SHOWN, not swallowed).
+    const [pathCopy, setPathCopy] = React.useState<'idle' | 'copied' | 'failed'>('idle')
+    const pathCopyTimer = React.useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
+    React.useEffect(() => () => {
+      if (pathCopyTimer.current !== undefined) clearTimeout(pathCopyTimer.current)
+    }, [])
+    const copyStoragePath = React.useCallback((path: string): void => {
+      const flash = (next: 'copied' | 'failed'): void => {
+        setPathCopy(next)
+        if (pathCopyTimer.current !== undefined) clearTimeout(pathCopyTimer.current)
+        pathCopyTimer.current = setTimeout(() => { setPathCopy('idle') }, 1500)
+      }
+      const clipboard = navigator.clipboard
+      if (clipboard === undefined || typeof clipboard.writeText !== 'function') {
+        flash('failed')
+        return
+      }
+      void clipboard.writeText(path).then(() => { flash('copied') }).catch(() => { flash('failed') })
+    }, [])
     // Set right before "Load older" prepends rows: after the update lands,
     // the layout effect grows scrollTop by the added height so the viewport
     // stays anchored on the row the reader was looking at.
@@ -700,6 +741,9 @@ export function makeRequestLogView(source: DictSource): (props: { sessionId?: st
           h('div', { className: 'rl-empty-hint' }, dict.emptyHint)))
     }
 
+    // Where this session's bytes landed, when the server is new enough to
+    // say. Absent means the figure stays a plain, unclickable metric.
+    const storagePath = state.storage?.path
     // A headline figure: the number leads, its name sits under it. A trailing
     // unit ('2.86 MB') is set smaller so the digits stay the thing you read.
     const metric = (
@@ -708,11 +752,26 @@ export function makeRequestLogView(source: DictSource): (props: { sessionId?: st
       cls?: string,
       title?: string,
       labelOverride?: string,
+      onClick?: () => void,
     ): React.ReactElement => {
       const { value, unit } = splitMeasure(text)
       return h('div', {
-        className: 'rl-metric' + (cls === undefined ? '' : ' ' + cls),
+        className: 'rl-metric' + (cls === undefined ? '' : ' ' + cls)
+          + (onClick === undefined ? '' : ' rl-metric-act'),
         ...title === undefined ? {} : { title },
+        // A div rather than a button: the figure's type scale is the point,
+        // and a button here would inherit dsh's control metrics. The ARIA
+        // pair plus the key handler is what a button would have given.
+        ...onClick === undefined ? {} : {
+          role: 'button',
+          tabIndex: 0,
+          onClick,
+          onKeyDown: (event: { key: string; preventDefault: () => void }) => {
+            if (event.key !== 'Enter' && event.key !== ' ') return
+            event.preventDefault()
+            onClick()
+          },
+        },
       },
         h('span', { className: 'rl-metric-value' },
           value,
@@ -799,12 +858,20 @@ export function makeRequestLogView(source: DictSource): (props: { sessionId?: st
             // whole caveat, so the label says ADDED and never "total".
             state.storage === undefined
               ? null
-              : metric(dict.sumStorage, formatBytes(state.storage.logicalBytes), undefined, interp(dict.sumStorageHint, {
-                  envelope: formatBytes(state.storage.envelopeBytes),
-                  objects: formatBytes(state.storage.objectBytes),
-                  cap: formatBytes(state.storage.maxFileBytes),
-                  pct: formatPct(state.storage.logicalBytes, state.storage.maxFileBytes),
-                }))),
+              : metric(
+                  dict.sumStorage,
+                  formatBytes(state.storage.logicalBytes),
+                  undefined,
+                  storageHintOf(dict, state.storage),
+                  // The outcome rides the LABEL, not the figure: the number
+                  // is what the eye is on, and swapping it for a word would
+                  // jump the row's width. Generic clipboard wording, borrowed
+                  // from the detail dict rather than duplicated per surface.
+                  pathCopy === 'copied' ? dict.detail.copied
+                    : pathCopy === 'failed' ? dict.detail.copyFailed
+                    : undefined,
+                  storagePath === undefined ? undefined : () => { copyStoragePath(storagePath) },
+                )),
             h('span', { className: 'rl-head-actions' },
               // Jump controls live in the toolbar rather than in a floating
               // chip over the ledger. A bottom-right float is unreachable

@@ -184,6 +184,11 @@ export interface ViewDict {
    * bills nothing — or readers will read it as the transcript's weight.
    */
   sumStorageHint: string
+  /**
+   * Tail of {@link sumStorageHint} when the server names the file: {path}.
+   * Home is written `~`, so this never carries the host account name.
+   */
+  sumStoragePath: string
   /** Load-older button label; {count} = entries not yet loaded. */
   /** Tooltip of the floating back-to-top button. */
   backToTop: string

@@ -182,6 +182,16 @@ export interface SessionStorageFootprint {
   logicalBytes: number
   /** The cap in force, so a client can render a share without guessing it. */
   maxFileBytes: number
+  /**
+   * Where the session's `.jsonl` lives, as a reader is shown it: absolute,
+   * but with the home prefix written `~` — so the figure above answers
+   * “where did those bytes go?” without the host account name crossing the
+   * wire. The compressed objects sit beside it under `objects/`.
+   *
+   * Named even before the first append (it is where the file WILL be).
+   * Absent only from responses built before the field existed.
+   */
+  path?: string
 }
 
 /**

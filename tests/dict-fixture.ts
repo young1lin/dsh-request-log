@@ -21,7 +21,7 @@ export const demoDict: ViewDict = {
   sumBilledInput: 'Total in', sumBilledInputHint: '',
   sumInput: 'Input', sumUncached: 'uncached', sumCached: 'cached', sumWritten: 'written', sumHitRate: 'Hit rate',
   sumCacheWrite: 'Cache write', sumOutput: 'Output',
-  sumStorage: 'Disk added', sumStorageHint: '', backToTop: '', toLatest: '',
+  sumStorage: 'Disk added', sumStorageHint: '', sumStoragePath: '', backToTop: '', toLatest: '',
   charts: {
     toggle: 'Charts', toggleHint: '',
     groupHitRate: 'Hit rate', groupTokens: 'Tokens', groupLatency: 'Latency', groupSpeed: 'Speed',

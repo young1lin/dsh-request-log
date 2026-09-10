@@ -7,10 +7,11 @@
 
 import { createRequire } from 'node:module'
 import { describe, expect, it } from 'vitest'
+import { demoDict } from './dict-fixture'
 
 ;(globalThis as { require?: NodeRequire }).require = createRequire(import.meta.url)
 
-const { ledgerRowId, prevIdsOf, pinnedToBottom, reconcileCalls, showTopBtn, summarize } = await import('../src/client/view.tsx')
+const { ledgerRowId, prevIdsOf, pinnedToBottom, reconcileCalls, showTopBtn, storageHintOf, summarize } = await import('../src/client/view.tsx')
 
 describe('ledgerRowId', () => {
   it('makes arbitrary call ids safe and stable as chart navigation targets', () => {
@@ -135,5 +136,36 @@ describe('summarize', () => {
     expect(sums.errors).toBe(1)
     expect(sums.aborts).toBe(1)
     expect(sums.retried).toBe(1)
+  })
+})
+
+describe('storageHintOf', () => {
+  const dict = {
+    ...demoDict,
+    sumStorageHint: 'added {envelope} + {objects} = {pct} of {cap}',
+    sumStoragePath: 'stored at {path}',
+  }
+
+  it('appends where the bytes landed when the server names the file', () => {
+    const hint = storageHintOf(dict, {
+      envelopeBytes: 1024,
+      objectBytes: 3072,
+      logicalBytes: 4096,
+      maxFileBytes: 8192,
+      path: '~/.dsh/request-log/s.jsonl',
+    })
+    // The caveat comes first and survives intact; the location is a
+    // separate paragraph under it, not a clause spliced into the middle.
+    expect(hint.split('\n\n')[0]).toBe('added 1.00 KB + 3.00 KB = 50.0% of 8.00 KB')
+    expect(hint).toBe('added 1.00 KB + 3.00 KB = 50.0% of 8.00 KB\n\nstored at ~/.dsh/request-log/s.jsonl')
+  })
+
+  it('leaves the tooltip exactly as it was against a server too old to name it', () => {
+    const hint = storageHintOf(dict, {
+      envelopeBytes: 1024, objectBytes: 3072, logicalBytes: 4096, maxFileBytes: 8192,
+    })
+    // No trailing blank line: an old server must read as if the field had
+    // never been added.
+    expect(hint).toBe('added 1.00 KB + 3.00 KB = 50.0% of 8.00 KB')
   })
 })

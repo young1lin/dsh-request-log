@@ -174,6 +174,25 @@
 
 .rl-metric-hit .rl-metric-value { color: var(--dsw-alias-state-success-primary); }
 
+/* The storage figure is the one metric you can act on: clicking it copies the
+   path its tooltip names. Nothing at rest -- a strip of figures with one
+   wearing a button's clothes reads as a mistake -- so the affordance arrives
+   on hover, where the tooltip is already arriving, as the label lifting to
+   the primary token exactly the way .rl-btn:hover does. Keyboard reach gets
+   the same lift plus a ring in the border token, since a pointer's hover is
+   not something a keyboard can produce. */
+.rl-metric-act { cursor: pointer; }
+
+.rl-metric-act:hover .rl-metric-label,
+.rl-metric-act:focus-visible .rl-metric-label { color: var(--dsw-alias-label-primary); }
+
+.rl-metric-act:focus-visible {
+  outline: 2px solid var(--dsw-alias-border-l2);
+  outline-offset: 3px;
+  border-radius: 4px;
+}
+
+
 /* Failure is the ONE alarm in the strip, and it renders only when non-zero,
    so the red is never cried wolf. Retries deliberately carry no colour: a
    retry that then succeeded is not a fault, and the amber it used to wear

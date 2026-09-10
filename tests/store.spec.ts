@@ -5,10 +5,10 @@
 
 import { mkdir, mkdtemp, readFile, readdir, rm, stat, utimes, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import { deflateRawSync, inflateRawSync } from 'node:zlib'
 import { afterEach, describe, expect, it } from 'vitest'
-import { assignSteps, CallStore, fileNameOf, footprintOfLine, packingOrder } from '../src/host/store.ts'
+import { assignSteps, CallStore, displayPathOf, fileNameOf, footprintOfLine, packingOrder } from '../src/host/store.ts'
 import { BlobStore, CODEC_DEFLATE_RAW, decodeFrame, encodeFrame, hashOfContent } from '../src/host/blob.ts'
 import { PackStore } from '../src/host/pack.ts'
 import { TREE_SCHEMA, encodeTree, resolveTree } from '../src/host/tree.ts'
@@ -1820,6 +1820,62 @@ describe('session storage footprint', () => {
     const store = new CallStore({ directory, maxCallsPerSession: 100, maxFileBytes: 1024 })
     const page = await store.listIndex('nobody', 50, 0)
     expect(page.total).toBe(0)
-    expect(page.storage).toEqual({ envelopeBytes: 0, objectBytes: 0, logicalBytes: 0, maxFileBytes: 1024 })
+    expect(page.storage).toEqual({
+      envelopeBytes: 0,
+      objectBytes: 0,
+      logicalBytes: 0,
+      maxFileBytes: 1024,
+      // Named even before the first append: it is where the file WILL be.
+      path: displayPathOf(join(directory, 'nobody.jsonl')),
+    })
+  })
+
+  it('names the session file so the UI can say where the bytes went', async () => {
+    const directory = await tempDir()
+    const store = new CallStore({ directory, maxCallsPerSession: 100, maxFileBytes: 8 * 1024 * 1024 })
+    await store.append(richRecord())
+
+    const { path } = (await store.listIndex('sess-1', 50, 0)).storage!
+    expect(path).toBe(displayPathOf(join(directory, 'sess-1.jsonl')))
+    // What the reader copies must name a file that is actually there.
+    await expect(stat(join(directory, 'sess-1.jsonl'))).resolves.toBeDefined()
+  })
+
+  it('resolves a relatively-configured directory before reporting it', async () => {
+    // A relative `directory` is legal config; a relative path copied out of
+    // the UI is meaningless — the browser has no cwd. Reading a session that
+    // has no file touches no disk, so nothing is written under the cwd here.
+    const store = new CallStore({ directory: 'rel-store', maxCallsPerSession: 100, maxFileBytes: 1024 })
+    const { path } = (await store.listIndex('sess-1', 50, 0)).storage!
+    expect(path).toBe(displayPathOf(resolve('rel-store', 'sess-1.jsonl')))
+    expect(path?.startsWith('rel-store')).toBe(false)
+  })
+})
+
+describe('displayPathOf', () => {
+  const home = join('C:', 'Users', 'ada')
+
+  it('writes the home prefix as ~ so no account name reaches the browser', () => {
+    expect(displayPathOf(join(home, '.dsh', 'request-log', 's.jsonl'), home))
+      .toBe(join('~', '.dsh', 'request-log', 's.jsonl'))
+    expect(displayPathOf(home, home)).toBe('~')
+  })
+
+  it('leaves a path outside home alone', () => {
+    const outside = join('D:', 'logs', 's.jsonl')
+    expect(displayPathOf(outside, home)).toBe(outside)
+  })
+
+  it('does not treat a same-prefix SIBLING directory as home', () => {
+    // 'C:/Users/adam' merely starts with 'C:/Users/ada' — the prefix has to
+    // end at a separator, or a neighbour's path gets a bogus ~.
+    const sibling = join(home + 'm', '.dsh', 's.jsonl')
+    expect(displayPathOf(sibling, home)).toBe(sibling)
+  })
+
+  it('leaves everything alone when there is no home to strip', () => {
+    const path = join('C:', 'Users', 'ada', 's.jsonl')
+    expect(displayPathOf(path, '')).toBe(path)
+    expect(displayPathOf(path, undefined)).toBe(path)
   })
 })

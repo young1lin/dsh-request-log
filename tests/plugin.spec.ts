@@ -26,9 +26,8 @@ describe('plugin identity', () => {
 })
 
 describe('Config schema', () => {
-  it('fills every retention default for an absent config', () => {
+  it('fills every default for an absent config', () => {
     expect(Config.parse(undefined)).toMatchObject({
-      retentionDays: DEFAULTS.retentionDays,
       maxCallsPerSession: DEFAULTS.maxCallsPerSession,
       maxFileBytes: DEFAULTS.maxFileBytes,
       trustedHosts: [],
@@ -40,22 +39,20 @@ describe('Config schema', () => {
     expect(() => Config.parse({ retentionDay: 3 })).toThrow()
   })
 
-  it('bounds retention, call cap and byte cap', () => {
-    expect(() => Config.parse({ retentionDays: 0 })).toThrow()
-    expect(() => Config.parse({ retentionDays: 3651 })).toThrow()
+  it('bounds the call cap and byte cap', () => {
     expect(() => Config.parse({ maxCallsPerSession: 0 })).toThrow()
     // A cap under 1 MiB would trim faster than a single call can be written.
     expect(() => Config.parse({ maxFileBytes: 1024 })).toThrow()
-    expect(Config.parse({ retentionDays: 3650 }).retentionDays).toBe(3650)
   })
 
-  it("takes 'never' as the way to say permanent, and only that word", () => {
-    // dsh itself never deletes a session log; a store that follows it needs a
-    // value that says so, not a 10-year number that quietly expires one day.
+  it('accepts the retired retention key in its old shapes and ignores it', () => {
+    // Retention is gone — files are never deleted by age, like dsh's own
+    // session logs — but a config still carrying the key must not fail the
+    // strict schema (that would brick the boot for stale configs), and the
+    // value must not reach the store either way.
+    expect(Config.parse({ retentionDays: 3650 }).retentionDays).toBe(3650)
     expect(Config.parse({ retentionDays: 'never' }).retentionDays).toBe('never')
-    expect(resolveStoreConfig({ retentionDays: 'never' }).retentionDays).toBe('never')
-    // 0 stays a hard error: "keep nothing" and "keep everything" must not be
-    // one keystroke apart.
+    expect('retentionDays' in resolveStoreConfig({ retentionDays: 1 })).toBe(false)
     expect(() => Config.parse({ retentionDays: 0 })).toThrow()
     expect(() => Config.parse({ retentionDays: 'forever' })).toThrow()
   })
@@ -86,7 +83,6 @@ describe('resolveStoreConfig', () => {
   it('defaults the directory under DSH_HOME and passes the caps through', () => {
     const resolved = resolveStoreConfig(undefined)
     expect(resolved.directory).toMatch(/request-log$/)
-    expect(resolved.retentionDays).toBe(DEFAULTS.retentionDays)
     expect(resolved.maxFileBytes).toBe(DEFAULTS.maxFileBytes)
     expect(resolved.format).toBe('auto')
   })
@@ -118,7 +114,7 @@ describe('scheduleSweep', () => {
     const store = {
       sweep: vi.fn(() => {
         sweeps += 1
-        return sweeps === 1 ? Promise.resolve({ deletedFiles: 0, trimmedFiles: 0, migratedFiles: 0 }) : Promise.reject(new Error('later'))
+        return sweeps === 1 ? Promise.resolve({ trimmedFiles: 0, migratedFiles: 0 }) : Promise.reject(new Error('later'))
       }),
     } as unknown as CallStore
 

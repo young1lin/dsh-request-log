@@ -91,7 +91,7 @@ type nonNull = { handler: (req: IncomingMessage, res: ServerResponse) => Promise
 async function seededStore(): Promise<CallStore> {
   const directory = await mkdtemp(join(tmpdir(), 'dsh-request-log-api-'))
   dirs.push(directory)
-  const store = new CallStore({ directory, retentionDays: 14, maxCallsPerSession: 100, maxFileBytes: 8 * 1024 * 1024 })
+  const store = new CallStore({ directory, maxCallsPerSession: 100, maxFileBytes: 8 * 1024 * 1024 })
   await store.append(recordOf())
   return store
 }
@@ -248,7 +248,7 @@ describe('read API', () => {
     const directory = await mkdtemp(join(tmpdir(), 'dsh-request-log-api-'))
     dirs.push(directory)
     // maxCallsPerSession 100 → MAX_LIMIT 100.
-    const store = new CallStore({ directory, retentionDays: 14, maxCallsPerSession: 100, maxFileBytes: 8 * 1024 * 1024 })
+    const store = new CallStore({ directory, maxCallsPerSession: 100, maxFileBytes: 8 * 1024 * 1024 })
     for (let i = 0; i < 150; i += 1) {
       await store.append(recordOf({ id: 'call-' + String(i), timing: { startedAt: 1_000 + i } }))
     }
@@ -274,7 +274,7 @@ describe('read API', () => {
   it('filters the index by ?model=, treating an empty value as no filter', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'dsh-request-log-api-'))
     dirs.push(directory)
-    const store = new CallStore({ directory, retentionDays: 14, maxCallsPerSession: 100, maxFileBytes: 8 * 1024 * 1024 })
+    const store = new CallStore({ directory, maxCallsPerSession: 100, maxFileBytes: 8 * 1024 * 1024 })
     await store.append(recordOf())
     await store.append(recordOf({ id: 'call-2', model: 'other-model', timing: { startedAt: 2_000 } }))
     const { handler, dispose } = await makeHandler(store)
@@ -297,7 +297,7 @@ describe('read API', () => {
   it('maps store failures to 500', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'dsh-request-log-api-'))
     dirs.push(directory)
-    const base = new CallStore({ directory, retentionDays: 14, maxCallsPerSession: 100, maxFileBytes: 8 * 1024 * 1024 })
+    const base = new CallStore({ directory, maxCallsPerSession: 100, maxFileBytes: 8 * 1024 * 1024 })
     await base.append(recordOf())
     const exploding = {
       maxCallsPerSession: 100,
@@ -314,7 +314,7 @@ describe('read API', () => {
   })
 
   it('is a no-op without a webServer service', () => {
-    const dispose = installApi({} as never, new CallStore({ directory: 'unused', retentionDays: 1, maxCallsPerSession: 1, maxFileBytes: 1024 * 1024 }), 'v')
+    const dispose = installApi({} as never, new CallStore({ directory: 'unused', maxCallsPerSession: 1, maxFileBytes: 1024 * 1024 }), 'v')
     expect(typeof dispose).toBe('function')
   })
 })

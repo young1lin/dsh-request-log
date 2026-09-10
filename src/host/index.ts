@@ -4,7 +4,8 @@
  * A plain Cordis plugin loaded as the `dsh-request-log` loader row. Three
  * effects, each independently disposable:
  *   - `llm/stream` waterfall capture (every provider attempt, every scope),
- *   - JSONL persistence under `$DSH_HOME/request-log/` with retention,
+ *   - JSONL persistence under `$DSH_HOME/request-log/` (files are never
+ *     deleted by age, like dsh's own session logs),
  *   - a same-origin read API on `ctx.webServer` for the browser half.
  *
  * There is no required service: the plugin loads in any composition. The
@@ -21,14 +22,15 @@ import { errorTextOf } from './errtext'
 
 export const name = 'dsh-request-log'
 
-export const VERSION = '0.1.4'
+export const VERSION = '0.1.5'
 
 export interface Config {
   /** Root directory for the per-session JSONL files. */
   directory?: string
   /**
-   * Delete session files untouched for this many days, or `'never'` to keep
-   * them forever — what dsh's own session logs do.
+   * @deprecated Removed in 0.1.5 — session files are never deleted by age
+   * (like dsh's own session logs). The key is still accepted by the config
+   * parser and silently ignored, so a stale config does not fail the boot.
    */
   retentionDays?: number | 'never'
   /** Per-session cap on kept call records (newest kept). */
@@ -55,8 +57,7 @@ export interface Config {
   pack?: 'auto' | 'off'
 }
 
-export const DEFAULTS: Required<Pick<Config, 'retentionDays' | 'maxCallsPerSession' | 'maxFileBytes'>> = {
-  retentionDays: 14,
+export const DEFAULTS: Required<Pick<Config, 'maxCallsPerSession' | 'maxFileBytes'>> = {
   // A line-count guard, not the real bound: measured on a live store,
   // 2,034 calls cost 5.6 MB of objects against a 128 MB maxFileBytes — the
   // old 2,000 line cap deleted history roughly 23x earlier than the byte
@@ -73,10 +74,10 @@ export const Config = z.preprocess(
   v => v ?? {},
   z.object({
     directory: z.string().min(1).optional(),
-    // 'never' is a word, not 0: "keep nothing" and "keep everything" must not
-    // be one keystroke apart, and a 3650-day stand-in would quietly expire.
-    retentionDays: z.union([z.literal('never'), z.number().int().min(1).max(3650)])
-      .default(DEFAULTS.retentionDays),
+    // Deprecated since 0.1.5: retention is gone — files are never deleted by
+    // age. The key stays accepted (and ignored) so a config carrying the old
+    // setting does not fail this strict schema and brick the boot.
+    retentionDays: z.union([z.literal('never'), z.number().int().min(1).max(3650)]).optional(),
     maxCallsPerSession: z.number().int().min(1).default(DEFAULTS.maxCallsPerSession),
     maxFileBytes: z.number().int().min(1024 * 1024).default(DEFAULTS.maxFileBytes),
     trustedHosts: z.array(z.string().regex(TRUSTED_AUTHORITY)).default([]),
@@ -89,7 +90,6 @@ export function resolveStoreConfig(config: Config | undefined): StoreConfig {
   const parsed = Config.parse(config ?? {})
   return {
     directory: parsed.directory ?? dshHomePath('request-log'),
-    retentionDays: parsed.retentionDays,
     maxCallsPerSession: parsed.maxCallsPerSession,
     maxFileBytes: parsed.maxFileBytes,
     format: parsed.format,
@@ -143,7 +143,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     const timer = setInterval(sweep, SWEEP_INTERVAL_MS)
     timer.unref?.()
     return () => clearInterval(timer)
-  }, 'dsh-request-log: retention sweep')
+  }, 'dsh-request-log: daily sweep')
 }
 
 // ---- public type surface -----------------------------------------------------

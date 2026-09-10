@@ -32,9 +32,9 @@
  * trim/sweep rewrite converts surviving lines to v3 (lazy migration riding
  * the trims). `format: 'v1'` freezes the legacy behavior byte-for-byte.
  *
- * Retention: files older than `retentionDays` are deleted on boot and on a
- * daily sweep (`'never'` keeps every file, whatever its age); oversized ones
- * trimmed to the newest records. The sweep also
+ * Session files are never deleted by age — dsh keeps its own session logs
+ * forever and this store follows the host; oversized ones are trimmed to
+ * the newest records. The daily sweep also
  * runs the mark-sweep GC over the object store (reachable hashes extracted
  * from the live files it reads anyway, then expanded transitively through
  * tree chains; unreachable objects and staging debris past a grace floor
@@ -60,8 +60,6 @@ import { type TreeEntry, type TreeState, chooseTreeNode, decodeTree, encodeTree,
 export interface StoreConfig {
   /** Root directory holding the per-session JSONL files. */
   directory: string
-  /** Delete session files whose last write is older than this many days. */
-  retentionDays: number | 'never'
   /** Per-session cap on kept call records (newest kept). */
   maxCallsPerSession: number
   /** Per-session cap on LOGICAL stored bytes (oldest records trimmed first). */
@@ -74,10 +72,7 @@ export interface StoreConfig {
   format?: 'v1' | 'auto'
   /**
    * Source bytes of legacy JSONL the lazy migrator may convert per sweep
-   * cycle. The work is bounded so a sweep never stalls the process, but the
-   * budget must outpace retention: a one-file-per-cycle migrator lets a
-   * backlog expire unconverted, so the dedup win would only ever apply to
-   * sessions written after the upgrade.
+   * cycle. The work is bounded so a sweep never stalls the process.
    */
   migrationBudgetBytes?: number
   /**
@@ -98,8 +93,6 @@ export interface StoreConfig {
   /** Rewriting anything smaller costs more IO than the space it reclaims. */
   repackMinBytes?: number
 }
-
-const DAY_MS = 24 * 60 * 60 * 1000
 
 /** Default per-cycle migration budget: a ~700 MB backlog converts in under a fortnight. */
 export const DEFAULT_MIGRATION_BUDGET_BYTES = 64 * 1024 * 1024
@@ -198,7 +191,7 @@ function requestPieces(record: CallRecord): Piece[] {
 }
 
 /** Coarse sweep phases, published live while a cycle is in flight. */
-export type SweepPhase = 'retention' | 'gc' | 'pack' | 'repack' | 'unpack' | 'migration' | 'done'
+export type SweepPhase = 'scan' | 'gc' | 'pack' | 'repack' | 'unpack' | 'migration' | 'done'
 
 /**
  * The latest sweep cycle's observable outcome, published for /health. While
@@ -218,9 +211,8 @@ export interface SweepStatus {
   finishedAt?: number
   /** Wall-clock duration (ms); absent while running. */
   durationMs?: number
-  /** Session files walked by the retention pass. */
+  /** Session files walked by the scan pass. */
   filesSeen: number
-  deletedFiles: number
   trimmedFiles: number
   /** Files the migrator scanned that still held legacy lines. */
   migrationCandidates: number
@@ -1254,8 +1246,9 @@ export class CallStore {
   }
 
   /**
-   * Enforce retention: delete stale session files, trim oversized ones.
-   * Trims ride the per-file append chain, so a concurrent append can never
+   * Maintain the store: trim oversized session files, GC the object store.
+   * Session files are never deleted by age (see the module header). Trims
+   * ride the per-file append chain, so a concurrent append can never
    * be lost to the rewrite window. The v2 object store rides the same pass:
    * reachable hashes are marked from the files read here anyway, then the GC
    * sweeps unreachable objects and staging debris past a grace floor, and the
@@ -1264,13 +1257,12 @@ export class CallStore {
    * published as {@link CallStore.lastSweepStatus} (for /health), where every
    * fail-soft stage reports what it swallowed instead of going silent.
    */
-  async sweep(now: number = Date.now()): Promise<{ deletedFiles: number; trimmedFiles: number; migratedFiles: number }> {
+  async sweep(now: number = Date.now()): Promise<{ trimmedFiles: number; migratedFiles: number }> {
     const status: SweepStatus = {
       startedAt: Date.now(),
       running: true,
-      phase: 'retention',
+      phase: 'scan',
       filesSeen: 0,
-      deletedFiles: 0,
       trimmedFiles: 0,
       migrationCandidates: 0,
       migratedFiles: 0,
@@ -1301,13 +1293,8 @@ export class CallStore {
         // the next daily cycle. Anything else is real and belongs there.
         if ((error as NodeJS.ErrnoException | null)?.code !== 'ENOENT') swallowed('scan directory', error)
         status.phase = 'done'
-        return { deletedFiles: 0, trimmedFiles: 0, migratedFiles: 0 }
+        return { trimmedFiles: 0, migratedFiles: 0 }
       }
-      // 'never' floors the cutoff below every possible mtime, so the branch
-      // below is dead rather than accidentally-false on a NaN comparison.
-      const cutoff = this.config.retentionDays === 'never'
-        ? Number.NEGATIVE_INFINITY
-        : now - this.config.retentionDays * DAY_MS
       const reachable = new Set<string>()
       const treeRoots = new Set<string>()
       // Any failure below leaves the reachable set partial; the reclaiming
@@ -1324,12 +1311,6 @@ export class CallStore {
         try {
           const info = await stat(path)
           if (this.v2Enabled) migrationCandidates.push({ sessionId, path, mtimeMs: info.mtimeMs, size: info.size })
-          if (info.mtimeMs < cutoff) {
-            await rm(path)
-            this.invalidateCaches(sessionId)
-            status.deletedFiles += 1
-            continue
-          }
           // Line counting needs no parsing: the cap is about file growth, and
           // invalid lines are filtered by the read path regardless.
           const text = await readFile(path, 'utf8')
@@ -1360,7 +1341,7 @@ export class CallStore {
           status.trimmedFiles += 1
         } catch (error) {
           // One unreadable file never blocks the sweep of the others.
-          swallowed(`retention ${name}`, error)
+          swallowed(`scan ${name}`, error)
           markComplete = false
         }
       }
@@ -1435,10 +1416,10 @@ export class CallStore {
           }
         }
         status.phase = 'migration'
-        // Newest first: a fresh session has the most retention life ahead of it,
-        // so converting it buys the most stored-byte-days - and the oldest files
-        // may not survive to the next cycle anyway. But a file that FAILED to
-        // convert still costs its full size against the budget (it was read,
+        // Newest first: an active session is the one whose reads still benefit
+        // from the conversion, while the oldest files sit dormant. But a file
+        // that FAILED to convert still costs its full size against the budget
+        // (it was read,
         // and not charging it would let a directory of failures re-read
         // unboundedly every cycle), so a stubborn file at the head of the order
         // would take the whole budget forever and starve every other one.
@@ -1487,7 +1468,7 @@ export class CallStore {
       }
       status.markComplete = markComplete
       status.phase = 'done'
-      return { deletedFiles: status.deletedFiles, trimmedFiles: status.trimmedFiles, migratedFiles: status.migratedFiles }
+      return { trimmedFiles: status.trimmedFiles, migratedFiles: status.migratedFiles }
     } catch (error) {
       // Unreachable while every stage catches its own; the guard keeps a
       // future edit from reintroducing a silent whole-cycle loss.

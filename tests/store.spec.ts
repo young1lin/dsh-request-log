@@ -1,6 +1,6 @@
 /**
  * Store specs: JSONL round-trip, newest-first paging, per-session cap trim,
- * and stale-file retention.
+ * and the never-delete-by-age invariant.
  */
 
 import { mkdir, mkdtemp, readFile, readdir, rm, stat, utimes, writeFile } from 'node:fs/promises'
@@ -54,7 +54,7 @@ function recordOf(overrides: Partial<CallRecord> = {}): CallRecord {
 describe('CallStore', () => {
   it('appends and reads back records losslessly', async () => {
     const directory = await tempDir()
-    const store = new CallStore({ directory, retentionDays: 14, maxCallsPerSession: 100, maxFileBytes: 8 * 1024 * 1024 })
+    const store = new CallStore({ directory, maxCallsPerSession: 100, maxFileBytes: 8 * 1024 * 1024 })
     await store.append(recordOf({ id: 'a' }))
     await store.append(recordOf({ id: 'b' }))
 
@@ -66,7 +66,7 @@ describe('CallStore', () => {
 
   it('writes v3 envelopes that round-trip the whole record', async () => {
     const directory = await tempDir()
-    const store = new CallStore({ directory, retentionDays: 14, maxCallsPerSession: 100, maxFileBytes: 8 * 1024 * 1024 })
+    const store = new CallStore({ directory, maxCallsPerSession: 100, maxFileBytes: 8 * 1024 * 1024 })
     const original = richRecord()
     await store.append(original)
 
@@ -81,7 +81,7 @@ describe('CallStore', () => {
 
   it('keeps the envelope line flat as the conversation grows', async () => {
     const directory = await tempDir()
-    const store = new CallStore({ directory, retentionDays: 14, maxCallsPerSession: 500, maxFileBytes: 64 * 1024 * 1024 })
+    const store = new CallStore({ directory, maxCallsPerSession: 500, maxFileBytes: 64 * 1024 * 1024 })
     const messages: CallRecord['request']['messages'] = []
     for (let turn = 1; turn <= 40; turn += 1) {
       messages.push({ role: 'user', content: [{ type: 'text', text: 'ask ' + String(turn) }] })
@@ -106,7 +106,7 @@ describe('CallStore', () => {
 
   it('round-trips a compaction that replaced the message list', async () => {
     const directory = await tempDir()
-    const store = new CallStore({ directory, retentionDays: 14, maxCallsPerSession: 100, maxFileBytes: 8 * 1024 * 1024 })
+    const store = new CallStore({ directory, maxCallsPerSession: 100, maxFileBytes: 8 * 1024 * 1024 })
     const grown: CallRecord['request']['messages'] = [
       { role: 'user', content: [{ type: 'text', text: 'one' }] },
       { role: 'assistant', content: [{ type: 'text', text: 'two' }] },
@@ -126,7 +126,7 @@ describe('CallStore', () => {
 
   it('bills a retry nothing: an identical request materializes no new object', async () => {
     const directory = await tempDir()
-    const store = new CallStore({ directory, retentionDays: 14, maxCallsPerSession: 100, maxFileBytes: 8 * 1024 * 1024 })
+    const store = new CallStore({ directory, maxCallsPerSession: 100, maxFileBytes: 8 * 1024 * 1024 })
     const first = recordOf({ id: 'try-1', attempt: 1 })
     await store.append(first)
     await store.append({ ...first, id: 'try-2', attempt: 2 })
@@ -140,7 +140,7 @@ describe('CallStore', () => {
 
   it('degrades one unresolvable tree without losing the record metadata', async () => {
     const directory = await tempDir()
-    const store = new CallStore({ directory, retentionDays: 14, maxCallsPerSession: 100, maxFileBytes: 8 * 1024 * 1024 })
+    const store = new CallStore({ directory, maxCallsPerSession: 100, maxFileBytes: 8 * 1024 * 1024 })
     await store.append(recordOf({ id: 'orphan' }))
     const env = JSON.parse((await readFile(join(directory, 'sess-1.jsonl'), 'utf8')).trim()) as { tree: string }
     await rm(join(directory, 'objects', env.tree.slice(0, 2), env.tree + '.drl'))
@@ -155,7 +155,7 @@ describe('CallStore', () => {
 
   it('pages the index newest-first with totals', async () => {
     const directory = await tempDir()
-    const store = new CallStore({ directory, retentionDays: 14, maxCallsPerSession: 100, maxFileBytes: 8 * 1024 * 1024 })
+    const store = new CallStore({ directory, maxCallsPerSession: 100, maxFileBytes: 8 * 1024 * 1024 })
     for (let i = 0; i < 5; i += 1) {
       await store.append(recordOf({ id: 'r' + String(i), timing: { startedAt: 1_000 + i } }))
     }
@@ -176,7 +176,7 @@ describe('CallStore', () => {
 
   it('lists only the requested model and tallies every model in the session', async () => {
     const directory = await tempDir()
-    const store = new CallStore({ directory, retentionDays: 14, maxCallsPerSession: 100, maxFileBytes: 8 * 1024 * 1024 })
+    const store = new CallStore({ directory, maxCallsPerSession: 100, maxFileBytes: 8 * 1024 * 1024 })
     await store.append(recordOf({ id: 'a', provider: 'openai-codex', model: 'gpt-5.6-sol', requestHash: 'h1' }))
     await store.append(recordOf({ id: 'b', provider: 'zai-coding-cn', model: 'glm-5.3', requestHash: 'h2' }))
     await store.append(recordOf({ id: 'c', provider: 'zai-coding-cn', model: 'glm-5.3', requestHash: 'h3' }))
@@ -198,7 +198,7 @@ describe('CallStore', () => {
 
   it('serves the model rollup from the index cache across incremental appends', async () => {
     const directory = await tempDir()
-    const store = new CallStore({ directory, retentionDays: 14, maxCallsPerSession: 100, maxFileBytes: 8 * 1024 * 1024 })
+    const store = new CallStore({ directory, maxCallsPerSession: 100, maxFileBytes: 8 * 1024 * 1024 })
     await store.append(recordOf({ id: 'a', provider: 'zai-coding-cn', model: 'glm-5.3', requestHash: 'h1' }))
     await store.listIndex('sess-1', 50, 0) // warm the cache at one model
 
@@ -220,7 +220,7 @@ describe('CallStore', () => {
 
   it('keeps session step numbering under a model filter', async () => {
     const directory = await tempDir()
-    const store = new CallStore({ directory, retentionDays: 14, maxCallsPerSession: 100, maxFileBytes: 8 * 1024 * 1024 })
+    const store = new CallStore({ directory, maxCallsPerSession: 100, maxFileBytes: 8 * 1024 * 1024 })
     await store.append(recordOf({ id: 'a', model: 'a', requestHash: 'h1' }))
     await store.append(recordOf({ id: 'b', model: 'b', requestHash: 'h2' }))
     await store.append(recordOf({ id: 'c', model: 'a', requestHash: 'h3' }))
@@ -231,7 +231,7 @@ describe('CallStore', () => {
 
   it('pages a filtered set without gaps', async () => {
     const directory = await tempDir()
-    const store = new CallStore({ directory, retentionDays: 14, maxCallsPerSession: 100, maxFileBytes: 8 * 1024 * 1024 })
+    const store = new CallStore({ directory, maxCallsPerSession: 100, maxFileBytes: 8 * 1024 * 1024 })
     for (let i = 0; i < 6; i += 1) {
       await store.append(recordOf({
         id: 'r' + String(i),
@@ -248,7 +248,7 @@ describe('CallStore', () => {
 
   it('trims a session file to the newest maxCallsPerSession records', async () => {
     const directory = await tempDir()
-    const store = new CallStore({ directory, retentionDays: 14, maxCallsPerSession: 3, maxFileBytes: 8 * 1024 * 1024 })
+    const store = new CallStore({ directory, maxCallsPerSession: 3, maxFileBytes: 8 * 1024 * 1024 })
     for (let i = 0; i < 5; i += 1) {
       await store.append(recordOf({ id: 'r' + String(i), timing: { startedAt: 1_000 + i } }))
     }
@@ -263,7 +263,7 @@ describe('CallStore', () => {
 
   it('stamps conversation-loop steps on the projected index', async () => {
     const directory = await tempDir()
-    const store = new CallStore({ directory, retentionDays: 14, maxCallsPerSession: 100, maxFileBytes: 8 * 1024 * 1024 })
+    const store = new CallStore({ directory, maxCallsPerSession: 100, maxFileBytes: 8 * 1024 * 1024 })
     await store.append(recordOf({ id: 's1', requestHash: 'h1' }))
     await store.append(recordOf({ id: 's1-retry', requestHash: 'h1', attempt: 2 }))
     await store.append(recordOf({ id: 'title', purpose: 'session-title' }))
@@ -292,7 +292,7 @@ describe('CallStore', () => {
 
   it('serves appends incrementally and tolerates torn tails', async () => {
     const directory = await tempDir()
-    const store = new CallStore({ directory, retentionDays: 14, maxCallsPerSession: 100, maxFileBytes: 8 * 1024 * 1024 })
+    const store = new CallStore({ directory, maxCallsPerSession: 100, maxFileBytes: 8 * 1024 * 1024 })
     await store.append(recordOf({ id: 'a' }))
     await store.append(recordOf({ id: 'b' }))
     expect((await store.listIndex('sess-1', 50, 0)).total).toBe(2)
@@ -319,7 +319,7 @@ describe('CallStore', () => {
 
   it('re-reads fully after a trim shrinks the file', async () => {
     const directory = await tempDir()
-    const store = new CallStore({ directory, retentionDays: 14, maxCallsPerSession: 2, maxFileBytes: 8 * 1024 * 1024 })
+    const store = new CallStore({ directory, maxCallsPerSession: 2, maxFileBytes: 8 * 1024 * 1024 })
     await store.append(recordOf({ id: 'a', requestHash: 'h1' }))
     await store.append(recordOf({ id: 'b', requestHash: 'h2' }))
     await store.listIndex('sess-1', 50, 0) // warm the incremental cache
@@ -330,25 +330,26 @@ describe('CallStore', () => {
     expect(page.calls.map(call => call.id)).toEqual(['c', 'b'])
   })
 
-  it('deletes stale session files on sweep', async () => {
+  it('never deletes session files by age', async () => {
     const directory = await tempDir()
-    const store = new CallStore({ directory, retentionDays: 1, maxCallsPerSession: 100, maxFileBytes: 8 * 1024 * 1024 })
+    const store = new CallStore({ directory, maxCallsPerSession: 100, maxFileBytes: 8 * 1024 * 1024 })
     await store.append(recordOf({ id: 'old', sessionId: 'old-sess' }))
-    // Backdate the file past the retention window.
+    // Backdate the file far beyond the retired 14-day retention window.
     const { utimes } = await import('node:fs/promises')
     const stale = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000)
     await utimes(join(directory, 'old-sess.jsonl'), stale, stale)
 
-    const { deletedFiles } = await store.sweep()
-    expect(deletedFiles).toBe(1)
-    // Every session file is gone (v2 keeps an objects/ store alongside).
+    const { trimmedFiles } = await store.sweep()
+    expect(trimmedFiles).toBe(0)
+    // The backdated file survives: retention is gone, and only the per-session
+    // caps ever remove records — never age.
     const leftovers = (await readdir(directory)).filter(name => name.endsWith('.jsonl'))
-    expect(leftovers).toEqual([])
+    expect(leftovers).toEqual(['old-sess.jsonl'])
   })
 
   it('skips corrupt and foreign-schema lines', async () => {
     const directory = await tempDir()
-    const store = new CallStore({ directory, retentionDays: 14, maxCallsPerSession: 100, maxFileBytes: 8 * 1024 * 1024 })
+    const store = new CallStore({ directory, maxCallsPerSession: 100, maxFileBytes: 8 * 1024 * 1024 })
     await store.append(recordOf({ id: 'good' }))
     await writeFile(join(directory, 'sess-1.jsonl'), 'not json\n', { flag: 'a' })
     await writeFile(
@@ -465,7 +466,7 @@ describe('CallStore', () => {
     expect(fileNameOf('trailing.')).toBe('trailing.jsonl')
 
     const directory = await tempDir()
-    const store = new CallStore({ directory, retentionDays: 14, maxCallsPerSession: 100, maxFileBytes: 8 * 1024 * 1024 })
+    const store = new CallStore({ directory, maxCallsPerSession: 100, maxFileBytes: 8 * 1024 * 1024 })
     await store.append(recordOf({ id: 'safe', sessionId: '../evil' }))
     const names = (await readdir(directory)).filter(name => name.endsWith('.jsonl'))
     // The slashes are gone — one safe segment (leading dots alone are harmless).
@@ -477,7 +478,7 @@ describe('CallStore', () => {
   it('creates its directory on the first append', async () => {
     const base = await tempDir()
     const directory = join(base, 'nested', 'deeper')
-    const store = new CallStore({ directory, retentionDays: 14, maxCallsPerSession: 100, maxFileBytes: 8 * 1024 * 1024 })
+    const store = new CallStore({ directory, maxCallsPerSession: 100, maxFileBytes: 8 * 1024 * 1024 })
     await store.append(recordOf({ id: 'first' }))
     // v2 keeps its object store beside the session file.
     expect((await readdir(directory)).filter(name => name.endsWith('.jsonl'))).toEqual(['sess-1.jsonl'])
@@ -498,7 +499,7 @@ describe('CallStore', () => {
         await super.writeLine(path, line)
       }
     }
-    const store = new FlakyStore({ directory, retentionDays: 14, maxCallsPerSession: 100, maxFileBytes: 8 * 1024 * 1024 })
+    const store = new FlakyStore({ directory, maxCallsPerSession: 100, maxFileBytes: 8 * 1024 * 1024 })
     await store.append(recordOf({ id: 'good' }))
     await expect(store.append(recordOf({ id: 'torn' }))).rejects.toThrow('ENOSPC')
 
@@ -513,7 +514,7 @@ describe('CallStore', () => {
 
   it('bounds a session file in bytes, trimming the oldest records', async () => {
     const directory = await tempDir()
-    const store = new CallStore({ directory, retentionDays: 14, maxCallsPerSession: 1000, maxFileBytes: 900 })
+    const store = new CallStore({ directory, maxCallsPerSession: 1000, maxFileBytes: 900 })
     for (let i = 0; i < 8; i += 1) {
       await store.append(recordOf({ id: 'r' + String(i), timing: { startedAt: 1_000 + i } }))
     }
@@ -644,7 +645,7 @@ function growthRecord(callIndex: number): CallRecord {
 describe('CallStore v2 persistence', () => {
   it('projects an index identical to the v1 projection, field for field', async () => {
     const directory = await tempDir()
-    const store = new CallStore({ directory, retentionDays: 14, maxCallsPerSession: 100, maxFileBytes: 8 * 1024 * 1024 })
+    const store = new CallStore({ directory, maxCallsPerSession: 100, maxFileBytes: 8 * 1024 * 1024 })
     const record = richRecord()
     await store.append(record)
     const page = await store.listIndex('sess-1', 50, 0)
@@ -656,7 +657,7 @@ describe('CallStore v2 persistence', () => {
 
   it('reassembles get() deep-equal to the original record', async () => {
     const directory = await tempDir()
-    const store = new CallStore({ directory, retentionDays: 14, maxCallsPerSession: 100, maxFileBytes: 8 * 1024 * 1024 })
+    const store = new CallStore({ directory, maxCallsPerSession: 100, maxFileBytes: 8 * 1024 * 1024 })
     const record = richRecord()
     await store.append(record)
     const fetched = await store.get('sess-1', 'rich-1')
@@ -667,7 +668,7 @@ describe('CallStore v2 persistence', () => {
 
   it('lists mixed v1 and v2 lines side by side', async () => {
     const directory = await tempDir()
-    const store = new CallStore({ directory, retentionDays: 14, maxCallsPerSession: 100, maxFileBytes: 8 * 1024 * 1024 })
+    const store = new CallStore({ directory, maxCallsPerSession: 100, maxFileBytes: 8 * 1024 * 1024 })
     const legacy: CallRecord = { ...recordOf({ id: 'legacy-1' }), timing: { startedAt: 900 } }
     // Seed a raw legacy line as an old binary would have left it.
     await mkdir(directory, { recursive: true })
@@ -682,7 +683,7 @@ describe('CallStore v2 persistence', () => {
 
   it('degrades ONLY the detail slot when a blob is deleted', async () => {
     const directory = await tempDir()
-    const store = new CallStore({ directory, retentionDays: 14, maxCallsPerSession: 100, maxFileBytes: 8 * 1024 * 1024 })
+    const store = new CallStore({ directory, maxCallsPerSession: 100, maxFileBytes: 8 * 1024 * 1024 })
     await store.append(richRecord())
     const text = await readFile(join(directory, 'sess-1.jsonl'), 'utf8')
     const env = JSON.parse(text.trim()) as { resp?: string }
@@ -704,7 +705,7 @@ describe('CallStore v2 persistence', () => {
 
   it('dedups growing histories into far fewer object bytes than v1', async () => {
     const directory = await tempDir()
-    const store = new CallStore({ directory, retentionDays: 14, maxCallsPerSession: 1000, maxFileBytes: 128 * 1024 * 1024 })
+    const store = new CallStore({ directory, maxCallsPerSession: 1000, maxFileBytes: 128 * 1024 * 1024 })
     let v1Equivalent = 0
     for (let i = 0; i < 10; i += 1) {
       const record = growthRecord(i)
@@ -721,7 +722,7 @@ describe('CallStore v2 persistence', () => {
     const directory = await tempDir()
     // Cap large enough that several envelopes coexist, small enough that
     // accumulations cross it mid-run (single-record measures still fit).
-    const store = new CallStore({ directory, retentionDays: 14, maxCallsPerSession: 1000, maxFileBytes: 2400 })
+    const store = new CallStore({ directory, maxCallsPerSession: 1000, maxFileBytes: 2400 })
     for (let i = 0; i < 6; i += 1) await store.append(growthRecord(i))
     const path = join(directory, 'grow.jsonl')
     const logical = await logicalBytesOfSessionFile(path)
@@ -736,7 +737,7 @@ describe('CallStore v2 persistence', () => {
 
   it('sweep GC removes unreachable stale objects, spares referenced and fresh ones', async () => {
     const directory = await tempDir()
-    const store = new CallStore({ directory, retentionDays: 14, maxCallsPerSession: 1000, maxFileBytes: 128 * 1024 * 1024 })
+    const store = new CallStore({ directory, maxCallsPerSession: 1000, maxFileBytes: 128 * 1024 * 1024 })
     await store.append(growthRecord(2))
     const objectsRoot = join(directory, 'objects')
     // Fabricate two unreachable orphans via the documented frame format.
@@ -769,7 +770,7 @@ describe('CallStore v2 persistence', () => {
     await mkdir(directory, { recursive: true })
     const legacyLine = JSON.stringify(recordOf({ id: 'old-1', sessionId: 'frozen' })) + '\n'
     await writeFile(join(directory, 'frozen.jsonl'), legacyLine)
-    const store = new CallStore({ directory, retentionDays: 14, maxCallsPerSession: 100, maxFileBytes: 8 * 1024 * 1024, format: 'v1' })
+    const store = new CallStore({ directory, maxCallsPerSession: 100, maxFileBytes: 8 * 1024 * 1024, format: 'v1' })
     await store.append(recordOf({ id: 'new-1', sessionId: 'frozen' }))
 
     const path = join(directory, 'frozen.jsonl')
@@ -823,7 +824,7 @@ describe('CallStore v2 persistence', () => {
       await utimes(join(objects, hash.slice(0, 2), hash + '.drl'), stale, stale)
     }
 
-    const store = new CallStore({ directory, retentionDays: 14, maxCallsPerSession: 100, maxFileBytes: 8 * 1024 * 1024 })
+    const store = new CallStore({ directory, maxCallsPerSession: 100, maxFileBytes: 8 * 1024 * 1024 })
     await store.sweep()
 
     // Every live piece survived the sweep — loose OR packed, never deleted.
@@ -841,7 +842,7 @@ describe('CallStore v2 persistence', () => {
     const originalB = recordOf({ id: 'plain-2', sessionId: 'sess-1' })
     await mkdir(directory, { recursive: true })
     await writeFile(join(directory, 'sess-1.jsonl'), JSON.stringify(originalA) + '\n' + JSON.stringify(originalB) + '\n')
-    const store = new CallStore({ directory, retentionDays: 14, maxCallsPerSession: 100, maxFileBytes: 8 * 1024 * 1024 })
+    const store = new CallStore({ directory, maxCallsPerSession: 100, maxFileBytes: 8 * 1024 * 1024 })
 
     await store.sweep()
     const migrated = await readFile(join(directory, 'sess-1.jsonl'), 'utf8')
@@ -861,7 +862,7 @@ describe('CallStore v2 persistence', () => {
 
   it('converts a v2 file to v3 without reading a single blob body', async () => {
     const directory = await tempDir()
-    const store = new CallStore({ directory, retentionDays: 14, maxCallsPerSession: 100, maxFileBytes: 8 * 1024 * 1024 })
+    const store = new CallStore({ directory, maxCallsPerSession: 100, maxFileBytes: 8 * 1024 * 1024 })
     const original = richRecord()
     await store.append(original)
     // Rewrite the line back into v2 shape to stand in for a file written by
@@ -900,7 +901,7 @@ describe('CallStore v2 persistence', () => {
       })))
     }
     await writeFile(join(directory, 'sess-1.jsonl'), lines.join('\n') + '\n')
-    const store = new CallStore({ directory, retentionDays: 14, maxCallsPerSession: 100, maxFileBytes: 64 * 1024 * 1024 })
+    const store = new CallStore({ directory, maxCallsPerSession: 100, maxFileBytes: 64 * 1024 * 1024 })
 
     await store.sweep()
 
@@ -921,12 +922,12 @@ describe('CallStore v2 persistence', () => {
     for (const id of ['sess-a', 'sess-b', 'sess-c']) {
       await writeFile(join(directory, id + '.jsonl'), JSON.stringify(recordOf({ id: id + '-1', sessionId: id })) + '\n')
     }
-    const store = new CallStore({ directory, retentionDays: 14, maxCallsPerSession: 100, maxFileBytes: 8 * 1024 * 1024 })
+    const store = new CallStore({ directory, maxCallsPerSession: 100, maxFileBytes: 8 * 1024 * 1024 })
 
     await store.sweep()
 
-    // A one-file-per-day budget never catches up with retention: a backlog of
-    // legacy sessions would be deleted before it was ever converted.
+    // The per-cycle budget must not strand a backlog: with no retention to
+    // remove legacy files, every legacy byte converts eventually.
     for (const id of ['sess-a', 'sess-b', 'sess-c']) {
       const text = await readFile(join(directory, id + '.jsonl'), 'utf8')
       expect(JSON.parse(text.trim()).v).toBe(RECORD_SCHEMA_V3)
@@ -942,14 +943,14 @@ describe('CallStore v2 persistence', () => {
     await utimes(join(directory, 'old.jsonl'), new Date(now - 10 * 86_400_000), new Date(now - 10 * 86_400_000))
     await utimes(join(directory, 'new.jsonl'), new Date(now - 86_400_000), new Date(now - 86_400_000))
     const store = new CallStore({
-      directory, retentionDays: 14, maxCallsPerSession: 100, maxFileBytes: 8 * 1024 * 1024,
+      directory, maxCallsPerSession: 100, maxFileBytes: 8 * 1024 * 1024,
       migrationBudgetBytes: 1,
     })
 
     await store.sweep(now)
 
-    // The newest file has the most retention life left, so converting it buys
-    // the most stored-byte-days; the oldest may not survive to the next cycle.
+    // The newest file is the one still growing and being read, so converting
+    // it first buys the most; the oldest sits dormant either way.
     expect(JSON.parse((await readFile(join(directory, 'new.jsonl'), 'utf8')).trim()).v).toBe(RECORD_SCHEMA_V3)
     expect((await readFile(join(directory, 'old.jsonl'), 'utf8')).startsWith('{"schema":')).toBe(true)
   })
@@ -968,7 +969,7 @@ describe('CallStore v2 persistence', () => {
         await super.writeLine(path, line)
       }
     }
-    const store = new FlakyV2({ directory, retentionDays: 14, maxCallsPerSession: 100, maxFileBytes: 8 * 1024 * 1024 })
+    const store = new FlakyV2({ directory, maxCallsPerSession: 100, maxFileBytes: 8 * 1024 * 1024 })
     await store.append(recordOf({ id: 'good' }))
     await expect(store.append(recordOf({ id: 'torn' }))).rejects.toThrow('ENOSPC')
     // Blobs may already exist for the dropped attempt — harmless orphans the
@@ -1008,7 +1009,7 @@ describe('CallStore v3 compatibility edges', () => {
   it('serves v1, v2 and v3 lines side by side through every read arm', async () => {
     const directory = await tempDir()
     await mkdir(directory, { recursive: true })
-    const store = new CallStore({ directory, retentionDays: 14, maxCallsPerSession: 100, maxFileBytes: 8 * 1024 * 1024 })
+    const store = new CallStore({ directory, maxCallsPerSession: 100, maxFileBytes: 8 * 1024 * 1024 })
     const legacy = recordOf({ id: 'old-1', sessionId: 'sess-1', requestHash: 'h0' })
     const rich = richRecord()
     await store.append(rich)
@@ -1027,7 +1028,7 @@ describe('CallStore v3 compatibility edges', () => {
   it('migrates a mixed file with v3, foreign, empty, identical and v2 lines', async () => {
     const directory = await tempDir()
     await mkdir(directory, { recursive: true })
-    const store = new CallStore({ directory, retentionDays: 14, maxCallsPerSession: 100, maxFileBytes: 8 * 1024 * 1024 })
+    const store = new CallStore({ directory, maxCallsPerSession: 100, maxFileBytes: 8 * 1024 * 1024 })
     const rich = richRecord()
     await store.append(rich) // a genuine v3 keyframe first
     const v3Line = (await readFile(join(directory, 'sess-1.jsonl'), 'utf8')).trim()
@@ -1062,7 +1063,7 @@ describe('CallStore v3 compatibility edges', () => {
 
   it('resets the chain when a migrated v3 line cannot resolve its tree', async () => {
     const directory = await tempDir()
-    const store = new CallStore({ directory, retentionDays: 14, maxCallsPerSession: 100, maxFileBytes: 8 * 1024 * 1024 })
+    const store = new CallStore({ directory, maxCallsPerSession: 100, maxFileBytes: 8 * 1024 * 1024 })
     await store.append(recordOf({ id: 'gone', requestHash: 'h1' }))
     const rich = richRecord() // different shape: its tree is a fresh keyframe
     await store.append(rich)
@@ -1092,7 +1093,7 @@ describe('CallStore v3 compatibility edges', () => {
     // deltaing onto it would push the resolve walk past TREE_MAX_WALK and
     // make that one record unreadable with every object still on disk.
     const directory = await tempDir()
-    const store = new CallStore({ directory, retentionDays: 14, maxCallsPerSession: 10_000, maxFileBytes: 512 * 1024 * 1024 })
+    const store = new CallStore({ directory, maxCallsPerSession: 10_000, maxFileBytes: 512 * 1024 * 1024 })
     const growing = (n: number): CallRecord => recordOf({
       id: `id-${n}`,
       timing: { startedAt: 1_000 + n },
@@ -1127,7 +1128,7 @@ describe('CallStore v3 compatibility edges', () => {
         if (typeof raw === 'string' && when(raw)) throw new Error('EACCES: bake denied')
         return real(hash, raw)
       }
-      return new CallStore({ directory, retentionDays: 14, maxCallsPerSession: 100, maxFileBytes: 8 * 1024 * 1024 }, blobs)
+      return new CallStore({ directory, maxCallsPerSession: 100, maxFileBytes: 8 * 1024 * 1024 }, blobs)
     }
 
     const treeDir = await seed()
@@ -1145,7 +1146,7 @@ describe('CallStore v3 compatibility edges', () => {
 
   it('evicts the least-recent tree state past 64 sessions', async () => {
     const directory = await tempDir()
-    const store = new CallStore({ directory, retentionDays: 14, maxCallsPerSession: 100, maxFileBytes: 8 * 1024 * 1024 })
+    const store = new CallStore({ directory, maxCallsPerSession: 100, maxFileBytes: 8 * 1024 * 1024 })
     for (let i = 0; i < 66; i += 1) {
       await store.append(recordOf({ id: 'c-' + String(i), sessionId: 'sess-' + String(i), requestHash: 'h' + String(i) }))
     }
@@ -1157,7 +1158,7 @@ describe('CallStore v3 compatibility edges', () => {
 
   it('trims under the byte cap in v1 mode without converting anything', async () => {
     const directory = await tempDir()
-    const store = new CallStore({ directory, retentionDays: 14, maxCallsPerSession: 100, maxFileBytes: 1000, format: 'v1' })
+    const store = new CallStore({ directory, maxCallsPerSession: 100, maxFileBytes: 1000, format: 'v1' })
     for (let i = 0; i < 6; i += 1) {
       await store.append(recordOf({ id: 'r' + String(i), requestHash: 'h' + String(i) }))
     }
@@ -1173,7 +1174,7 @@ describe('sweep status observability', () => {
     const directory = await tempDir()
     await mkdir(directory, { recursive: true })
     await writeFile(join(directory, 'legacy.jsonl'), JSON.stringify(recordOf({ id: 'l-1', sessionId: 'legacy' })) + '\n')
-    const store = new CallStore({ directory, retentionDays: 14, maxCallsPerSession: 100, maxFileBytes: 8 * 1024 * 1024 })
+    const store = new CallStore({ directory, maxCallsPerSession: 100, maxFileBytes: 8 * 1024 * 1024 })
 
     await store.sweep()
 
@@ -1181,7 +1182,6 @@ describe('sweep status observability', () => {
       running: false,
       phase: 'done',
       filesSeen: 1,
-      deletedFiles: 0,
       trimmedFiles: 0,
       migrationCandidates: 1,
       migratedFiles: 1,
@@ -1195,17 +1195,19 @@ describe('sweep status observability', () => {
     expect(store.lastSweepStatus).toMatchObject({ migrationCandidates: 0, migratedFiles: 0 })
   })
 
-  it('counts retention deletions and keeps the cycle green', async () => {
+  it('keeps a stale session file and stays green', async () => {
     const directory = await tempDir()
     await mkdir(directory, { recursive: true })
     await writeFile(join(directory, 'stale.jsonl'), JSON.stringify(recordOf({ id: 's-1', sessionId: 'stale' })) + '\n')
     const now = Date.now()
     await utimes(join(directory, 'stale.jsonl'), new Date(now - 20 * 86_400_000), new Date(now - 20 * 86_400_000))
-    const store = new CallStore({ directory, retentionDays: 14, maxCallsPerSession: 100, maxFileBytes: 8 * 1024 * 1024 })
+    const store = new CallStore({ directory, maxCallsPerSession: 100, maxFileBytes: 8 * 1024 * 1024 })
 
     await store.sweep(now)
 
-    expect(store.lastSweepStatus).toMatchObject({ phase: 'done', filesSeen: 1, deletedFiles: 1 })
+    expect(store.lastSweepStatus).toMatchObject({ phase: 'done', filesSeen: 1 })
+    expect(store.lastSweepStatus?.error).toBeUndefined()
+    expect((await readdir(directory)).filter(name => name.endsWith('.jsonl'))).toEqual(['stale.jsonl'])
   })
 
   it('reports a failed blob bake instead of a silent v1 no-op', async () => {
@@ -1216,7 +1218,7 @@ describe('sweep status observability', () => {
     await writeFile(join(directory, 'legacy.jsonl'), JSON.stringify(recordOf({ id: 'l-1', sessionId: 'legacy' })) + '\n')
     const blobs = new BlobStore({ directory: join(directory, 'objects') })
     blobs.put = async () => { throw new Error('EACCES: bake denied') }
-    const store = new CallStore({ directory, retentionDays: 14, maxCallsPerSession: 100, maxFileBytes: 8 * 1024 * 1024 }, blobs)
+    const store = new CallStore({ directory, maxCallsPerSession: 100, maxFileBytes: 8 * 1024 * 1024 }, blobs)
 
     await store.sweep()
 
@@ -1230,7 +1232,7 @@ describe('sweep status observability', () => {
     // BOOT sweep runs before it exists. Publishing that as a sweep error hangs
     // a false failure on /health until the next daily cycle, 24 hours later.
     const directory = join(await tempDir(), 'never-written')
-    const store = new CallStore({ directory, retentionDays: 14, maxCallsPerSession: 100, maxFileBytes: 8 * 1024 * 1024 })
+    const store = new CallStore({ directory, maxCallsPerSession: 100, maxFileBytes: 8 * 1024 * 1024 })
 
     await store.sweep()
 
@@ -1241,7 +1243,7 @@ describe('sweep status observability', () => {
 
   it('passes a v2 line with a malformed ref through instead of baking an invalid tree', async () => {
     const directory = await tempDir()
-    const store = new CallStore({ directory, retentionDays: 14, maxCallsPerSession: 100, maxFileBytes: 8 * 1024 * 1024 })
+    const store = new CallStore({ directory, maxCallsPerSession: 100, maxFileBytes: 8 * 1024 * 1024 })
     await store.append(recordOf({ id: 'good' }))
     const path = join(directory, 'sess-1.jsonl')
     // A v2 envelope whose refs lost their hashes (external damage — the writer
@@ -1269,7 +1271,7 @@ describe('sweep status observability', () => {
 
   it('surfaces a migration scan it could not read instead of silently skipping it', async () => {
     const directory = await tempDir()
-    const store = new CallStore({ directory, retentionDays: 14, maxCallsPerSession: 100, maxFileBytes: 8 * 1024 * 1024 })
+    const store = new CallStore({ directory, maxCallsPerSession: 100, maxFileBytes: 8 * 1024 * 1024 })
     await store.append(recordOf())
     // A directory wearing a session file's name: stat succeeds, so it reaches
     // the migration phase, and every read of it fails. Swallowing that inside
@@ -1285,7 +1287,7 @@ describe('sweep status observability', () => {
   it('stops a file that never converts from monopolizing the migration budget', async () => {
     const directory = await tempDir()
     const store = new CallStore({
-      directory, retentionDays: 14, maxCallsPerSession: 100, maxFileBytes: 8 * 1024 * 1024,
+      directory, maxCallsPerSession: 100, maxFileBytes: 8 * 1024 * 1024,
       migrationBudgetBytes: 1,
     })
     // A line from a schema this build does not understand counts as legacy
@@ -1308,34 +1310,34 @@ describe('sweep status observability', () => {
   })
 })
 
-describe('permanent retention', () => {
-  it("keeps a session file forever when retention is 'never'", async () => {
+describe('no retention', () => {
+  it('keeps an ancient session file and its objects reachable', async () => {
     const directory = await tempDir()
-    // Through the real config path: 'never' has to survive parsing, not just
-    // the store's own field.
+    // Through the real config path — a config still carrying the retired
+    // retentionDays key must parse and be ignored, not brick the boot.
     const store = new CallStore(resolveStoreConfig({ directory, retentionDays: 'never' }))
     await store.append(recordOf({ id: 'ancient', sessionId: 'old-sess' }))
-    // Older than the 3650-day ceiling a number could ever express.
+    // Older than the 3650-day ceiling the old numeric bound could ever express.
     const stale = new Date(Date.now() - 4_000 * 24 * 60 * 60 * 1000)
     await utimes(join(directory, 'old-sess.jsonl'), stale, stale)
 
-    const { deletedFiles } = await store.sweep()
-    expect(deletedFiles).toBe(0)
+    const { trimmedFiles } = await store.sweep()
+    expect(trimmedFiles).toBe(0)
     expect((await readdir(directory)).filter(name => name.endsWith('.jsonl'))).toEqual(['old-sess.jsonl'])
     // A kept file's objects must stay reachable: the GC marks from the files
-    // retention spared, so sparing a file and reaping its bodies would be
+    // the scan kept, so sparing a file and reaping its bodies would be
     // worse than deleting it outright.
     expect((await store.get('old-sess', 'ancient'))?.id).toBe('ancient')
   })
 
-  it('still deletes past a numeric window, so disabling is explicit', async () => {
+  it('ignores a numeric retentionDays from an old config', async () => {
     const directory = await tempDir()
     const store = new CallStore(resolveStoreConfig({ directory, retentionDays: 1 }))
     await store.append(recordOf({ id: 'old', sessionId: 'old-sess' }))
     const stale = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000)
     await utimes(join(directory, 'old-sess.jsonl'), stale, stale)
 
-    expect((await store.sweep()).deletedFiles).toBe(1)
+    expect((await readdir(directory)).filter(name => name.endsWith('.jsonl'))).toEqual(['old-sess.jsonl'])
   })
 })
 
@@ -1764,7 +1766,7 @@ describe('session storage footprint', () => {
 
   it('reports the footprint alongside the index page', async () => {
     const directory = await tempDir()
-    const store = new CallStore({ directory, retentionDays: 14, maxCallsPerSession: 100, maxFileBytes: 8 * 1024 * 1024 })
+    const store = new CallStore({ directory, maxCallsPerSession: 100, maxFileBytes: 8 * 1024 * 1024 })
     await store.append(richRecord())
 
     const page = await store.listIndex('sess-1', 50, 0)
@@ -1781,7 +1783,7 @@ describe('session storage footprint', () => {
 
   it('bills a dedup hit no object bytes — the number is MARGINAL, not content weight', async () => {
     const directory = await tempDir()
-    const store = new CallStore({ directory, retentionDays: 14, maxCallsPerSession: 100, maxFileBytes: 8 * 1024 * 1024 })
+    const store = new CallStore({ directory, maxCallsPerSession: 100, maxFileBytes: 8 * 1024 * 1024 })
     const first = richRecord()
     await store.append(first)
     const after = (await store.listIndex('sess-1', 50, 0)).storage!
@@ -1796,7 +1798,7 @@ describe('session storage footprint', () => {
 
   it('keeps the tally correct across the incremental tail parse and a trim', async () => {
     const directory = await tempDir()
-    const store = new CallStore({ directory, retentionDays: 14, maxCallsPerSession: 3, maxFileBytes: 8 * 1024 * 1024 })
+    const store = new CallStore({ directory, maxCallsPerSession: 3, maxFileBytes: 8 * 1024 * 1024 })
     for (let i = 0; i < 3; i += 1) {
       await store.append(recordOf({ id: 'r' + String(i), timing: { startedAt: 1_000 + i } }))
     }
@@ -1815,7 +1817,7 @@ describe('session storage footprint', () => {
 
   it('reports a zero footprint for a session that has no file', async () => {
     const directory = await tempDir()
-    const store = new CallStore({ directory, retentionDays: 14, maxCallsPerSession: 100, maxFileBytes: 1024 })
+    const store = new CallStore({ directory, maxCallsPerSession: 100, maxFileBytes: 1024 })
     const page = await store.listIndex('nobody', 50, 0)
     expect(page.total).toBe(0)
     expect(page.storage).toEqual({ envelopeBytes: 0, objectBytes: 0, logicalBytes: 0, maxFileBytes: 1024 })

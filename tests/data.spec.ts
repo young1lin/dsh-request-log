@@ -78,10 +78,10 @@ function clampingServer(total: number, maxLimit: number) {
 }
 
 describe('fetchWindow', () => {
-  it('pages past the server limit clamp to reach the whole window', async () => {
+  it('pages past the server limit clamp to reach the whole session', async () => {
     const { fetchMock, seen } = clampingServer(2121, 2000)
     vi.stubGlobal('fetch', fetchMock)
-    const page = await fetchWindow('s1', 2500, undefined)
+    const page = await fetchWindow('s1', undefined)
     expect(page.calls).toHaveLength(2121)
     expect(page.total).toBe(2121)
     // Newest first, no duplicates, no gaps.
@@ -91,12 +91,19 @@ describe('fetchWindow', () => {
     expect(seen.length).toBeGreaterThan(1)
   })
 
-  it('stops at the target without walking the whole session', async () => {
-    const { fetchMock } = clampingServer(5000, 2000)
+  it('reports each page as it lands, so the ledger paints before the last one', async () => {
+    const { fetchMock } = clampingServer(2500, 2000)
     vi.stubGlobal('fetch', fetchMock)
-    const page = await fetchWindow('s1', 100, undefined)
-    expect(page.calls).toHaveLength(100)
-    expect(page.total).toBe(5000)
+    const lengths: number[] = []
+    const page = await fetchWindow('s1', undefined, undefined, part => { lengths.push(part.calls.length) })
+    // The first page is reported before the rest is even requested, and each
+    // report is a superset of the one before it — never a window that shrinks
+    // under a reader who is already looking at it.
+    expect(lengths.length).toBeGreaterThan(1)
+    expect(lengths[0]).toBe(1000)
+    expect(lengths[lengths.length - 1]).toBe(2500)
+    for (let i = 1; i < lengths.length; i += 1) expect(lengths[i]).toBeGreaterThan(lengths[i - 1]!)
+    expect(page.calls).toHaveLength(2500)
   })
 
   it('carries the model filter on every page it fetches', async () => {
@@ -105,7 +112,7 @@ describe('fetchWindow', () => {
       seen.push(url)
       return new Response(JSON.stringify({ calls: [], total: 0, offset: 0, limit: 100 }), { status: 200 })
     }))
-    await fetchWindow('s1', 100, 'glm-5.3')
+    await fetchWindow('s1', 'glm-5.3')
     expect(seen[0]).toContain('model=glm-5.3')
   })
 })

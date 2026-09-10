@@ -357,19 +357,13 @@ export function makeRequestLogView(source: DictSource): (props: { sessionId?: st
     // Auto-refresh drives this probe counter (see the probe effect below);
     // manual refresh drives `tick` and reloads the whole window.
     const [probeTick, setProbeTick] = React.useState(0)
-    // How many of the newest calls the ledger shows; "Load older" grows it.
-    // One fetch of `limit` newest entries keeps refresh simple and the whole
-    // loaded window consistent (the server caps it at its own MAX_LIMIT).
-    // Restored from memory so a paged-in window survives a tab switch.
-    const [limit, setLimit] = React.useState(initial.limit)
     const [model, setModel] = React.useState<string | null>(initial.model)
     const onModel = React.useCallback((next: string | null): void => {
-      // A filter change re-pages from the newest call: the window it had
-      // paged in belonged to the other aperture.
+      // A filter change re-reads the session through the other aperture, and
+      // lands the reader on its newest call.
       stickToBottom.current = true
       setModel(next)
-      setLimit(PAGE_SIZE)
-      updateViewMemory(sessionId, { model: next, limit: PAGE_SIZE })
+      updateViewMemory(sessionId, { model: next })
     }, [sessionId])
     // Latest detail reading position, mirroring the per-session memory: a
     // newly opened call mounts with the side/format the reader last used.
@@ -478,9 +472,10 @@ export function makeRequestLogView(source: DictSource): (props: { sessionId?: st
       row.focus({ preventScroll: true })
     }, [])
 
-    // Full load: the whole loaded window (initial load, manual refresh,
-    // "Load older" growing the limit). Records settle once and never
-    // change, so identity reuse below keeps React.memo rows inert.
+    // Full load: the WHOLE session, applied one offset page at a time as the
+    // pages land, so the first screen paints while the rest is still coming.
+    // Records settle once and never change, so identity reuse below keeps
+    // React.memo rows inert across every page and every poll.
     React.useEffect(() => {
       let cancelled = false
       // Aborting on cleanup also cancels the in-flight fetch itself (session
@@ -488,13 +483,25 @@ export function makeRequestLogView(source: DictSource): (props: { sessionId?: st
       const abort = new AbortController()
       const load = async (): Promise<void> => {
         try {
-          const page = await fetchWindow(sessionId, limit, model ?? undefined, abort.signal)
-          if (cancelled) return
-          // The API pages newest-first; the ledger renders oldest-first so
-          // the newest call sits at the bottom, like the Trajectory tab.
-          setState(previous => previous.kind === 'ready'
-            ? { kind: 'ready', calls: reconcileCalls(page.calls, previous.calls), total: page.total, storage: page.storage, models: page.models }
-            : { kind: 'ready', calls: reconcileCalls(page.calls, undefined), total: page.total, storage: page.storage, models: page.models })
+          await fetchWindow(sessionId, model ?? undefined, abort.signal, page => {
+            if (cancelled) return
+            // Every page after the first PREPENDS older rows above what the
+            // reader is looking at. Anchor the scroller unless they are
+            // pinned to the newest call, where the pin below already holds
+            // the view still.
+            if (!stickToBottom.current) {
+              const root = scrollRef.current
+              if (root !== null) {
+                const scroller = findScroller(root)
+                prependAnchor.current = { scroller, height: scroller.scrollHeight }
+              }
+            }
+            // The API pages newest-first; the ledger renders oldest-first so
+            // the newest call sits at the bottom, like the Trajectory tab.
+            setState(previous => previous.kind === 'ready'
+              ? { kind: 'ready', calls: reconcileCalls(page.calls, previous.calls), total: page.total, storage: page.storage, models: page.models }
+              : { kind: 'ready', calls: reconcileCalls(page.calls, undefined), total: page.total, storage: page.storage, models: page.models })
+          })
         } catch (error) {
           if (cancelled || abort.signal.aborted) return
           const message = error instanceof ApiError ? error.message : String(error)
@@ -511,12 +518,12 @@ export function makeRequestLogView(source: DictSource): (props: { sessionId?: st
         cancelled = true
         abort.abort()
       }
-    }, [sessionId, tick, limit, model])
+    }, [sessionId, tick, model])
 
     // Auto-refresh probe: fetch only the newest PAGE and splice it into the
     // loaded window — a 3s poll on a session paged in 2000-deep costs one
     // page, not the whole window re-fetched and re-parsed every tick. A full
-    // refresh (manual, limit change) re-syncs whatever this splice misses.
+    // refresh (manual, filter change) re-syncs whatever this splice misses.
     const firstProbe = React.useRef(true)
     React.useEffect(() => {
       if (firstProbe.current) {
@@ -527,7 +534,7 @@ export function makeRequestLogView(source: DictSource): (props: { sessionId?: st
       const abort = new AbortController()
       const probe = async (): Promise<void> => {
         try {
-          const page = await fetchCalls(sessionId, Math.min(PAGE_SIZE, limit), 0, model ?? undefined, abort.signal)
+          const page = await fetchCalls(sessionId, PAGE_SIZE, 0, model ?? undefined, abort.signal)
           if (cancelled) return
           setState(prev => {
             if (prev.kind !== 'ready') {
@@ -554,7 +561,7 @@ export function makeRequestLogView(source: DictSource): (props: { sessionId?: st
         cancelled = true
         abort.abort()
       }
-    }, [sessionId, probeTick, limit, model])
+    }, [sessionId, probeTick, model])
 
     React.useEffect(() => {
       if (!auto || selected !== null) return
@@ -860,22 +867,6 @@ export function makeRequestLogView(source: DictSource): (props: { sessionId?: st
               onSelectCall: locateCall,
             })
           : null,
-      state.calls.length < state.total
-        ? h('div', { className: 'rl-loadmore' },
-            h('button', {
-              className: 'rl-btn',
-              onClick: () => {
-                const root = scrollRef.current
-                if (root !== null) {
-                  const scroller = findScroller(root)
-                  prependAnchor.current = { scroller, height: scroller.scrollHeight }
-                }
-                const next = limit + PAGE_SIZE
-                setLimit(next)
-                updateViewMemory(sessionId, { limit: next })
-              },
-            }, interp(dict.loadMore, { count: state.total - state.calls.length })))
-        : null,
       // The measuring grid sits as a sibling BEFORE the table, so the
       // variable set on the table below never reaches it (its own class
       // resets --rl-tracks anyway — belt and braces).

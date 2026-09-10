@@ -49,31 +49,29 @@ export function fetchCalls(
 const WINDOW_CHUNK = 1000
 
 /**
- * The newest `target` calls, paged on offset until the target is met or the
- * session is exhausted. Records settle once and never change, so pages
- * stitched from separate requests cannot disagree; a call appended between
- * two pages shifts the offset window toward the newer end, which can repeat
- * a record but can never skip one — so the stitch de-duplicates by id.
+ * The WHOLE session, oldest reachable call included, fetched in
+ * WINDOW_CHUNK-sized offset pages. `onPage` receives the newest-first
+ * stitch after every page, so the ledger paints its first screen while the
+ * older pages are still arriving: nothing is held back behind a control the
+ * reader has to notice and press, and no session is partly loaded.
+ *
+ * Records settle once and never change, so pages stitched from separate
+ * requests cannot disagree; a call appended between two pages shifts the
+ * offset window toward the newer end, which can repeat a record but can
+ * never skip one — so the stitch de-duplicates by id.
  */
 export async function fetchWindow(
   sessionId: string,
-  target: number,
   model: string | undefined,
   signal?: AbortSignal,
+  onPage?: (page: CallIndexResponse) => void,
 ): Promise<CallIndexResponse> {
-  const first = await fetchCalls(sessionId, Math.min(target, WINDOW_CHUNK), 0, model, signal)
+  const first = await fetchCalls(sessionId, WINDOW_CHUNK, 0, model, signal)
   const calls = first.calls.slice()
   const seen = new Set(calls.map(call => call.id))
-  while (calls.length < Math.min(target, first.total)) {
-    const page = await fetchCalls(
-      sessionId,
-      Math.min(target - calls.length, WINDOW_CHUNK),
-      calls.length,
-      model,
-      signal,
-    )
-    // A server that cannot advance (an older build, an empty tail) must not
-    // spin this loop: stop the moment a page adds nothing.
+  onPage?.({ ...first, calls: calls.slice() })
+  while (calls.length < first.total) {
+    const page = await fetchCalls(sessionId, WINDOW_CHUNK, calls.length, model, signal)
     let added = 0
     for (const call of page.calls) {
       if (seen.has(call.id)) continue
@@ -81,7 +79,10 @@ export async function fetchWindow(
       calls.push(call)
       added += 1
     }
+    // A server that cannot advance (an older build, an empty tail) must not
+    // spin this loop: stop the moment a page adds nothing.
     if (added === 0) break
+    onPage?.({ ...first, calls: calls.slice() })
   }
   return { ...first, calls }
 }

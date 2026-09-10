@@ -70,7 +70,6 @@ const DICT_EN: ViewDict = {
   sumHitRate: 'Hit rate',
   sumCacheWrite: 'Cache write',
   sumOutput: 'Output',
-  loadMore: 'Load older ({count} more)',
   backToTop: 'Back to top',
   toLatest: 'Jump to the latest call',
   charts: {
@@ -214,7 +213,6 @@ const DICT_ZH: ViewDict = {
   sumHitRate: '命中率',
   sumCacheWrite: '缓存写入',
   sumOutput: '输出',
-  loadMore: '加载更早的调用（还有 {count} 条）',
   backToTop: '回到顶部',
   toLatest: '跳到最新调用',
   charts: {

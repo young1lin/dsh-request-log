@@ -110,7 +110,7 @@ const dict: Dict = {
   sumBilledInput: 'Total in', sumBilledInputHint: '',
   sumInput: 'Input', sumUncached: 'uncached', sumCached: 'cached', sumWritten: 'written', sumHitRate: 'Hit rate',
   sumCacheWrite: 'Cache write', sumOutput: 'Output',
-  sumStorage: 'Disk added', sumStorageHint: '', loadMore: '', backToTop: '', toLatest: '',
+  sumStorage: 'Disk added', sumStorageHint: '', backToTop: '', toLatest: '',
   charts: {
     toggle: 'Charts', toggleHint: '',
     groupHitRate: 'Hit rate', groupTokens: 'Tokens', groupLatency: 'Latency', groupSpeed: 'Speed',

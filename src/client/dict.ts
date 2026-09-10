@@ -196,7 +196,6 @@ export interface ViewDict {
    */
   sumStorageHint: string
   /** Load-older button label; {count} = entries not yet loaded. */
-  loadMore: string
   /** Tooltip of the floating back-to-top button. */
   backToTop: string
   /** Tooltip of the floating jump-to-newest button. */

@@ -222,13 +222,6 @@
 }
 
 /* Load-older strip between the summary and the ledger. */
-.rl-loadmore {
-  display: flex;
-  justify-content: center;
-  gap: 4px;
-  flex: none;
-}
-
 /* Floating scroll pair: ↑ back to the summary, ↓ to the newest call — the
    jump-to-latest affordance dsh's chat carries. Sticky, not fixed: it rides
    whichever box actually scrolls (the root or an ancestor pane) with no JS

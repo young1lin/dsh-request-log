@@ -6,7 +6,6 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
-  PAGE_SIZE,
   clearViewMemory,
   freshViewMemory,
   loadViewMemory,
@@ -40,7 +39,6 @@ describe('fresh defaults', () => {
   it('returns the empty ledger defaults', () => {
     expect(loadViewMemory('s1')).toEqual({
       selected: null,
-      limit: PAGE_SIZE,
       auto: true,
       model: null,
       detail: { side: 'request', format: null },
@@ -53,10 +51,9 @@ describe('in-page round-trip', () => {
   it('keeps an updated selection and prefs per session', () => {
     updateViewMemory('s1', { selected: { id: 'call-7', prevId: 'call-6' } })
     updateViewMemory('s1', { detail: { side: 'response', format: 'openai-responses' } })
-    updateViewMemory('s1', { limit: PAGE_SIZE * 2, auto: false })
+    updateViewMemory('s1', { auto: false })
     expect(loadViewMemory('s1')).toEqual({
       selected: { id: 'call-7', prevId: 'call-6' },
-      limit: PAGE_SIZE * 2,
       auto: false,
       model: null,
       detail: { side: 'response', format: 'openai-responses' },
@@ -97,13 +94,11 @@ describe('sessionStorage write-through', () => {
     // (exactly the state after a refresh).
     store.setItem(KEY, JSON.stringify({
       selected: { id: 'call-1', prevId: 'call-0', step: 4 },
-      limit: 300,
       auto: false,
       detail: { side: 'response', format: 'neutral' },
     }))
     const loaded = loadViewMemory('s1')
     expect(loaded.selected).toEqual({ id: 'call-1', prevId: 'call-0', step: 4 })
-    expect(loaded.limit).toBe(300)
     expect(loaded.auto).toBe(false)
     expect(loaded.detail).toEqual({ side: 'response', format: 'neutral' })
   })
@@ -154,13 +149,11 @@ describe('sessionStorage write-through', () => {
     vi.stubGlobal('sessionStorage', store)
     store.setItem(KEY, JSON.stringify({
       selected: { id: 'ok', prevId: 42 },
-      limit: -5,
       auto: 'yes',
       detail: { side: 'diagonal', format: 'smtp' },
     }))
     expect(loadViewMemory('s1')).toEqual({
       selected: { id: 'ok' },
-      limit: PAGE_SIZE,
       auto: true,
       model: null,
       detail: { side: 'request', format: null },
@@ -244,12 +237,12 @@ describe('clearViewMemory', () => {
     const store = fakeStorage()
     vi.stubGlobal('sessionStorage', store)
     updateViewMemory('s1', { auto: true })
-    updateViewMemory('s2', { auto: false, limit: 300 })
+    updateViewMemory('s2', { auto: false })
     clearViewMemory('s1')
     expect(store.getItem(KEY)).toBeNull()
     expect(store.getItem('dsh-request-log:view:s2')).not.toBeNull()
     expect(loadViewMemory('s1')).toEqual(freshViewMemory())
-    expect(loadViewMemory('s2').limit).toBe(300)
+    expect(loadViewMemory('s2').auto).toBe(false)
   })
 })
 

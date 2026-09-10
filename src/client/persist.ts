@@ -10,7 +10,6 @@
  *
  *   - selected  — the open call detail (with its chained-prev id, if known)
  *   - detail    — the reading position: request/response side + wire format
- *   - limit     — how many older calls "Load older" had paged in
  *   - auto      — the Auto-refresh toggle
  *
  * An in-page Map survives tab switches (the page itself stays alive); a
@@ -63,8 +62,6 @@ export interface ChartsPrefs {
 
 export interface ViewMemory {
   selected: SelectedCall | null
-  /** How many of the newest calls the ledger window covers. */
-  limit: number
   auto: boolean
   /** Model filter chip in force, or null for "all models". */
   model: string | null
@@ -72,7 +69,12 @@ export interface ViewMemory {
   charts: ChartsPrefs
 }
 
-/** Ledger page size: how many of the newest calls a fresh view loads. */
+/**
+ * The refresh probe's page: how many of the NEWEST calls a 3s poll re-reads
+ * and splices in. The ledger itself loads the whole session — this is the
+ * tail the poll has to look at to notice a new one, never a window the
+ * reader can see the edge of.
+ */
 export const PAGE_SIZE = 100
 
 /** In-page sessions kept; the least recently touched fall off first. */
@@ -89,7 +91,6 @@ const VALID_X_MODES: readonly XMode[] = ['time', 'step', 'bucket']
 export function freshViewMemory(): ViewMemory {
   return {
     selected: null,
-    limit: PAGE_SIZE,
     auto: true,
     model: null,
     detail: { side: 'request', format: null },
@@ -164,11 +165,6 @@ function coerceMemory(raw: unknown): ViewMemory | null {
       : typeof formatRaw === 'string' && VALID_FORMATS.includes(formatRaw) ? formatRaw as DetailFormat
         : fresh.detail.format
 
-  const limit = typeof record.limit === 'number' && Number.isInteger(record.limit)
-    && record.limit >= fresh.limit && record.limit <= 1_000_000
-    ? record.limit
-    : fresh.limit
-
   // An empty string is not the name of a model — it is what a cleared chip
   // would serialize to, and it must read back as "all".
   const model = typeof record.model === 'string' && record.model !== '' ? record.model : null
@@ -197,7 +193,6 @@ function coerceMemory(raw: unknown): ViewMemory | null {
 
   return {
     selected,
-    limit,
     auto: typeof record.auto === 'boolean' ? record.auto : fresh.auto,
     model,
     detail: { side, format },
@@ -218,7 +213,6 @@ export function loadViewMemory(sessionId: string): ViewMemory {
   const entry = ensureEntry(sessionId)
   return {
     selected: entry.selected === null ? null : { ...entry.selected },
-    limit: entry.limit,
     auto: entry.auto,
     model: entry.model,
     detail: { ...entry.detail },
@@ -234,7 +228,6 @@ export function updateViewMemory(sessionId: string, patch: Partial<ViewMemory>):
   const entry = ensureEntry(sessionId)
   const next: ViewMemory = {
     selected: patch.selected !== undefined ? patch.selected : entry.selected,
-    limit: patch.limit !== undefined ? patch.limit : entry.limit,
     auto: patch.auto !== undefined ? patch.auto : entry.auto,
     model: patch.model !== undefined ? patch.model : entry.model,
     detail: patch.detail !== undefined ? patch.detail : entry.detail,

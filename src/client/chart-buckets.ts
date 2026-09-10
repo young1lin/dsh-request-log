@@ -14,7 +14,7 @@
  */
 
 import type { CallIndexEntry } from '../shared/types'
-import { TOKENS_STACK_ORDER } from './chart-stats'
+import { tokensGroupShell } from './chart-stats'
 import type { ChartSlot, MetricGroup } from './chart-stats'
 
 /** Bucket sizes offered as chips, in minutes; any other value is custom. */
@@ -44,29 +44,10 @@ export function bucketTokens(
   calls: readonly CallIndexEntry[],
   bucketMinutes: number,
 ): { group: MetricGroup; slots: ChartSlot[] } {
-  const group: MetricGroup = {
-    key: 'tokens',
-    labelKey: 'groupTokens',
-    unit: 'tokens',
-    // The shared token stack order — the buckets must not invent a second
-    // one (same session, same reader, one meaning for the green band).
-    stackOrder: TOKENS_STACK_ORDER,
-    bucketable: true,
-    series: TOKENS_STACK_ORDER.map(key => ({
-      key,
-      labelKey: key === 'in' ? 'colIn'
-        : key === 'cacheRead' ? 'colCacheRead'
-          : key === 'cacheWrite' ? 'colCacheWrite'
-            : key === 'reasoning' ? 'colReasoning'
-              : 'colAnswer',
-      colorRole: key === 'in' ? 'brand'
-        : key === 'cacheRead' ? 'success'
-          : key === 'cacheWrite' ? 'warn'
-            : key === 'reasoning' ? 'reasoning'
-              : 'neutral',
-      points: [],
-    })),
-  }
+  // The shipped token group verbatim — same bands, same order, same colours.
+  // Buckets change what a column MEASURES (a window's sum, not one call), not
+  // what its segments mean.
+  const group: MetricGroup = tokensGroupShell()
   if (calls.length === 0) return { group, slots: [] }
 
   const bucketMs = Math.max(BUCKET_MIN_MINUTES, Math.min(BUCKET_MAX_MINUTES, bucketMinutes)) * 60_000
@@ -77,7 +58,7 @@ export function bucketTokens(
 
   const sums = new Map<number, Record<string, number>>()
   for (let start = first; start <= last; start += bucketMs) {
-    sums.set(start, { cacheRead: 0, in: 0, cacheWrite: 0, reasoning: 0, out: 0 })
+    sums.set(start, { cacheRead: 0, in: 0, cacheWrite: 0, out: 0 })
   }
   // A representative call per bucket, so clicking a bar still locates a row.
   const representative = new Map<number, CallIndexEntry>()
@@ -88,14 +69,12 @@ export function bucketTokens(
     if (!representative.has(start)) representative.set(start, call)
     const usage = call.usage
     if (usage === undefined) continue
-    const reasoning = usage.reasoningTokens ?? 0
     bucket.cacheRead += usage.cacheReadTokens ?? 0
     bucket.in += usage.inputTokens
     bucket.cacheWrite += usage.cacheWriteTokens ?? 0
-    bucket.reasoning += reasoning
-    // The answer band is what is left of the reported output once reasoning
-    // is taken out, never a second count of it.
-    bucket.out += Math.max(0, usage.outputTokens - reasoning)
+    // The whole reported output: reasoning is a subset of it by wire
+    // semantics, and no longer draws a band of its own.
+    bucket.out += usage.outputTokens
   }
 
   const slots: ChartSlot[] = []

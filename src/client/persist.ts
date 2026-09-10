@@ -43,20 +43,21 @@ export interface SelectedCall {
   step?: number
 }
 
-/** 统计 panel reading position: open?, active metric group, token cumulative/stacking. */
+/** 统计 panel reading position: open?, active metric group, x axis, window. */
 export interface ChartsPrefs {
   open: boolean
   group: MetricGroupKey
-  stacks: boolean
-  /** Token group: running-total (Cursor-dashboard style) mode. */
-  cumulative: boolean
   /**
    * Which x axis the panel draws: wall-clock time (the default — it answers
-   * "when did I ask for what"), the numbered conversation step, or token
-   * bars summed per time window (token group only).
+   * "when did I ask for what") or the numbered conversation step.
    */
   xMode: XMode
-  /** Token group, bucket x-mode: the window width in minutes. */
+  /**
+   * Width of one token column on the clock axis, in minutes. Token columns
+   * there are per-window SUMS ("how much between 14:00 and 14:05"), so the
+   * window is what the column measures; the other groups draw lines and never
+   * read this.
+   */
   bucketMinutes: number
 }
 
@@ -86,7 +87,15 @@ const VALID_FORMATS: readonly string[] = ['neutral', ...WIRE_PROTOCOLS.map(entry
 const memory = new Map<string, ViewMemory>()
 
 const VALID_GROUPS: readonly MetricGroupKey[] = ['hitrate', 'tokens', 'latency', 'speed']
-const VALID_X_MODES: readonly XMode[] = ['time', 'step', 'bucket']
+const VALID_X_MODES: readonly XMode[] = ['time', 'step']
+
+/** A stored window width, or the fallback when it is not a usable one. */
+function coerceBucketMinutes(raw: unknown, fallback: number): number {
+  return typeof raw === 'number' && Number.isInteger(raw)
+    && raw >= BUCKET_MIN_MINUTES && raw <= BUCKET_MAX_MINUTES
+    ? raw
+    : fallback
+}
 
 export function freshViewMemory(): ViewMemory {
   return {
@@ -94,7 +103,7 @@ export function freshViewMemory(): ViewMemory {
     auto: true,
     model: null,
     detail: { side: 'request', format: null },
-    charts: { open: true, group: 'hitrate', stacks: false, cumulative: true, xMode: 'time', bucketMinutes: 5 },
+    charts: { open: true, group: 'hitrate', xMode: 'time', bucketMinutes: 5 },
   }
 }
 
@@ -178,17 +187,16 @@ function coerceMemory(raw: unknown): ViewMemory | null {
     group: VALID_GROUPS.includes(groupRaw as MetricGroupKey)
       ? groupRaw as MetricGroupKey
       : fresh.charts.group,
-    stacks: typeof chartsRaw.stacks === 'boolean' ? chartsRaw.stacks : fresh.charts.stacks,
-    cumulative: typeof chartsRaw.cumulative === 'boolean' ? chartsRaw.cumulative : fresh.charts.cumulative,
+    // A memory written by <=0.1.4 can name the retired 'bucket' axis — the
+    // by-window reading is now what the clock axis already does, so that
+    // memory degrades to the default like any other unknown value, and the
+    // retired toggles simply are not read.
     xMode: VALID_X_MODES.includes(chartsRaw.xMode as XMode)
       ? chartsRaw.xMode as XMode
       : fresh.charts.xMode,
-    bucketMinutes: typeof chartsRaw.bucketMinutes === 'number'
-      && Number.isInteger(chartsRaw.bucketMinutes)
-      && chartsRaw.bucketMinutes >= BUCKET_MIN_MINUTES
-      && chartsRaw.bucketMinutes <= BUCKET_MAX_MINUTES
-      ? chartsRaw.bucketMinutes
-      : fresh.charts.bucketMinutes,
+    // Untrusted stored JSON: a window must be a whole number of minutes
+    // inside the range the control offers, or it is not a window.
+    bucketMinutes: coerceBucketMinutes(chartsRaw.bucketMinutes, fresh.charts.bucketMinutes),
   }
 
   return {

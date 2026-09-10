@@ -10,7 +10,7 @@
 import { ErrorBoundary, React, h } from './react'
 import { countToolCalls, type CallRecord } from '../shared/types'
 import { WIRE_PROTOCOLS, detectProtocol, renderWire, responsesChainOf } from '../wire'
-import { ApiError, fetchCall, formatDateTime, formatDuration, formatPct, formatToolDispatches, formatTokens, formatTps, speedReading } from './data'
+import { ApiError, fetchCall, formatDateTime, formatDuration, formatPct, formatToolDispatches, formatTokens, formatTps, showsReasoning, speedReading } from './data'
 import { JsonTree, type JsonLabels, type TreeMode } from './json'
 import { interp } from './dict'
 import type { DetailFormat, DetailPrefs, DetailSide } from './persist'
@@ -301,7 +301,7 @@ export function makeCallDetail(source: DictSource): (props: {
                 h('div', { className: 'rl-token rl-token-out' },
                   h('span', { className: 'rl-token-label' }, d.output),
                   h('span', { className: 'rl-token-value' }, formatTokens(usage.outputTokens))),
-                usage.reasoningTokens === undefined ? null : h('div', { className: 'rl-token' },
+                !showsReasoning(usage.reasoningTokens) ? null : h('div', { className: 'rl-token' },
                   h('span', { className: 'rl-token-label' }, d.reasoning),
                   h('span', { className: 'rl-token-value' }, formatTokens(usage.reasoningTokens))),
                 h('div', { className: 'rl-token rl-token-hit' },

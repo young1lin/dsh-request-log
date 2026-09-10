@@ -290,3 +290,14 @@ export function formatPct(part: number | undefined, base: number | undefined): s
   if (part === undefined || base === undefined || base <= 0) return '\u2013'
   return sig3((part / base) * 100) + '%'
 }
+
+/**
+ * Whether a reported reasoning count earns its row on the usage card. A model
+ * that never thinks reports 0 on every call, and a row that always reads 0 is
+ * noise pinned to every call detail — so 0, a missing count, and a nonsense
+ * negative all mean "nothing to report". The token chart drew the same 0 as a
+ * legend chip and a zero-height band; it no longer decomposes output at all.
+ */
+export function showsReasoning(reasoningTokens: number | undefined): boolean {
+  return reasoningTokens !== undefined && reasoningTokens > 0
+}

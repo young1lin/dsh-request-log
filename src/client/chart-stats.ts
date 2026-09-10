@@ -34,7 +34,7 @@ export interface MetricSeries {
   key: string
   /** Dict key carrying the display label (stats stays i18n-free). */
   labelKey: string
-  colorRole: 'brand' | 'success' | 'warn' | 'error' | 'neutral' | 'reasoning'
+  colorRole: 'brand' | 'success' | 'warn' | 'error' | 'neutral'
   /** Ascending by x; y === null marks a gap slot. */
   points: SeriesPoint[]
 }
@@ -47,12 +47,8 @@ export interface MetricGroup {
   unit: 'percent' | 'tokens' | 'ms' | 'tokps'
   /** Hit-rate group: fixed [0,100] axis, ticks every 25, never auto-scaled. */
   percentAxis?: boolean
-  /** Token group: legend chips may stack the lines per slot (see stackSerieses). */
+  /** Token group: the bottom-to-top order its lines stack in (see stackSerieses). */
   stackOrder?: readonly string[]
-  /** Token group: offers the cumulative (running-total) mode — see cumulateSerieses. */
-  cumulable?: boolean
-  /** Token group: offers the by-time-window bar mode — see chart-buckets. */
-  bucketable?: boolean
   series: MetricSeries[]
 }
 
@@ -78,7 +74,7 @@ export interface ChartSlot {
   purpose?: string
 }
 
-export type XMode = 'step' | 'time' | 'bucket'
+export type XMode = 'step' | 'time'
 
 export interface ChartOptions {
   /**
@@ -102,30 +98,40 @@ const HIT_RATE_GROUP: MetricGroup = {
 }
 
 /**
- * The ONE bottom-to-top segment order of the token stack, shared by the
- * per-step/cumulative modes and the by-window buckets so the same session
- * reads the same in every x position. Cache hits floor the bar — they are
- * the part of the input you did not pay full freight for, so the height
- * above the green band is what the call really cost — and the output band
- * stays decomposed adjacently (reasoning + answer always sum to the
- * reported output, so the stack top stays billed + output).
+ * The ONE bottom-to-top segment order of the token columns, so the same
+ * session reads the same on either x axis. Cache hits floor the stack — they
+ * are the part of the input you did not pay full freight for, so the height
+ * above the green segment is what the call really cost — and output tops it,
+ * leaving the column top at billed + output.
  */
-export const TOKENS_STACK_ORDER: readonly string[] = ['cacheRead', 'in', 'cacheWrite', 'reasoning', 'out']
+export const TOKENS_STACK_ORDER: readonly string[] = ['cacheRead', 'in', 'cacheWrite', 'out']
 
 const TOKENS_GROUP: MetricGroup = {
   key: 'tokens',
   labelKey: 'groupTokens',
   unit: 'tokens',
   stackOrder: TOKENS_STACK_ORDER,
-  cumulable: true,
-  bucketable: true,
   series: [
     { key: 'in', labelKey: 'colIn', colorRole: 'brand', points: [] },
     { key: 'cacheRead', labelKey: 'colCacheRead', colorRole: 'success', points: [] },
     { key: 'cacheWrite', labelKey: 'colCacheWrite', colorRole: 'warn', points: [] },
-    { key: 'reasoning', labelKey: 'colReasoning', colorRole: 'reasoning', points: [] },
-    { key: 'out', labelKey: 'colAnswer', colorRole: 'neutral', points: [] },
+    { key: 'out', labelKey: 'colOut', colorRole: 'neutral', points: [] },
   ],
+}
+
+/** A fresh, empty copy of a group template — points arrays never shared. */
+function cloneGroup(group: MetricGroup): MetricGroup {
+  return { ...group, series: group.series.map(series => ({ ...series, points: [] as SeriesPoint[] })) }
+}
+
+/**
+ * A fresh, empty token group. The ONE definition of which bands exist, what
+ * they are called and what colour they wear — the by-window bucketing builds
+ * its group from this rather than restating the mapping, which is how a
+ * retired band name once survived in the bucket path alone.
+ */
+export function tokensGroupShell(): MetricGroup {
+  return cloneGroup(TOKENS_GROUP)
 }
 
 const LATENCY_GROUP: MetricGroup = {
@@ -165,12 +171,11 @@ function readValue(entry: CallIndexEntry, group: MetricGroupKey, seriesKey: stri
         case 'in': return usage.inputTokens
         case 'cacheRead': return usage.cacheReadTokens ?? 0
         case 'cacheWrite': return usage.cacheWriteTokens ?? 0
-        // Wire semantics (both providers): reasoning ⊆ output. Unreported
-        // reasoning is a REAL zero-height band, not a gap — the model answered
-        // without thinking. A provider overshooting output is clamped so the
-        // two layers sum to the reported output, never past it.
-        case 'reasoning': return Math.min(usage.reasoningTokens ?? 0, usage.outputTokens)
-        case 'out': return Math.max(0, usage.outputTokens - (usage.reasoningTokens ?? 0))
+        // The whole reported output, undecomposed: reasoning ⊆ output by wire
+        // semantics, and splitting it out bought a permanent legend chip that
+        // read 0 for every non-reasoning model. The per-call detail card still
+        // reports reasoning when the provider sends a non-zero count.
+        case 'out': return usage.outputTokens
         default: return null
       }
     case 'latency':
@@ -260,10 +265,7 @@ export function buildChartModel(calls: readonly CallIndexEntry[], xMode: XMode, 
     slots.sort((a, b) => a.x - b.x)
   }
 
-  const groups = [HIT_RATE_GROUP, TOKENS_GROUP, LATENCY_GROUP, SPEED_GROUP].map(group => ({
-    ...group,
-    series: group.series.map(series => ({ ...series, points: [] as SeriesPoint[] })),
-  })) as MetricGroup[]
+  const groups = [HIT_RATE_GROUP, TOKENS_GROUP, LATENCY_GROUP, SPEED_GROUP].map(cloneGroup)
   const plottedSlots: ChartSlot[] = []
   let hasData = false
   let plotted = 0
@@ -297,8 +299,7 @@ export function buildChartModel(calls: readonly CallIndexEntry[], xMode: XMode, 
  * Per-slot stacking of the token group: at each x the layers pile up in
  * stackOrder (in + cacheRead + cacheWrite + out), missing fields counting as
  * 0, while a whole x with NO usage stays a stacked gap (every layer null
- * there). This stacks WITHIN a slot — it never accumulates across xs; for
- * that see cumulateSerieses.
+ * there). This stacks WITHIN a slot — it never accumulates across xs.
  */
 export function stackSerieses(group: MetricGroup): MetricSeries[] {
   const order = group.stackOrder ?? group.series.map(s => s.key)
@@ -332,29 +333,4 @@ export function stackSerieses(group: MetricGroup): MetricSeries[] {
       y: Number.isFinite(value) ? value : null,
     })),
   }))
-}
-
-/**
- * Cumulative (running-total) mode — the Cursor-dashboard form: each point
- * becomes the sum of every value up to that slot, so the lines only climb.
- *
- * Semantics:
- *  - a slot WITH usage adds to the running total;
- *  - a slot WITHOUT usage (error / aborted / in-flight) CARRIES THE PREVIOUS
- *    TOTAL FORWARD — nothing was added, so the total genuinely stands; this
- *    is not a fabricated value the way a fake zero would be, and the
- *    per-step charts keep drawing real gaps there;
- *  - slots before the FIRST finite value stay gaps — no invented zero start.
- */
-export function cumulateSerieses(group: MetricGroup): MetricSeries[] {
-  return group.series.map(series => {
-    let total: number | null = null
-    return {
-      ...series,
-      points: series.points.map(point => {
-        if (point.y !== null && Number.isFinite(point.y)) total = (total ?? 0) + point.y
-        return { x: point.x, y: total === null ? null : total, ...(point.approx === true ? { approx: true } : {}) }
-      }),
-    }
-  })
 }

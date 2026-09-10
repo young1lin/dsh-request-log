@@ -18,6 +18,7 @@ import {
   splitMeasure,
   formatDuration,
   formatPct,
+  showsReasoning,
   formatTime,
   formatTps,
   formatToolDispatches,
@@ -350,5 +351,19 @@ describe('splitMeasure', () => {
     expect(splitMeasure('311.9k')).toEqual({ value: '311.9k' })
     expect(splitMeasure('543')).toEqual({ value: '543' })
     expect(splitMeasure(DASH)).toEqual({ value: DASH })
+  })
+})
+
+describe('showsReasoning', () => {
+  it('keeps the row only when the provider reported thinking that happened', () => {
+    // A non-reasoning model reports 0 every call, which pinned a permanent
+    // "Reasoning 0" row to the usage card; a reasoning model must still get it.
+    expect(showsReasoning(1)).toBe(true)
+    expect(showsReasoning(0)).toBe(false)
+    expect(showsReasoning(undefined)).toBe(false)
+  })
+
+  it('treats a negative count as nothing to report', () => {
+    expect(showsReasoning(-3)).toBe(false)
   })
 })

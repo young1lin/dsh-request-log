@@ -298,12 +298,16 @@
   border-color: var(--dsw-alias-border-l2);
 }
 
-/* Bucket window control: rides the chart tabs row, so it takes the row's
-   own scale (12px) rather than the toolbar's. */
+/* Window-width control: rides the chart tabs row, so it takes the row's own
+   scale (12px) rather than the toolbar's. Rendered only where a token column
+   IS a window — the clock axis — so it never sits inert beside a chart that
+   cannot read it. */
 .rl-bucket-ctrl {
   display: inline-flex;
   align-items: center;
   gap: 6px;
+  flex: none;
+  white-space: nowrap;
 }
 
 .rl-bucket-label {
@@ -798,16 +802,23 @@
   padding: 8px 12px 12px;
 }
 
+ /* The row carries four groups now — metrics, legend, axis, window — and on a
+   narrow pane they will not all fit. Wrapping is the honest answer: without
+   it flex shrinks the items instead, which clips the last chips off the end
+   and breaks a two-word legend label across two lines. Each group is atomic
+   (flex: none) so a wrap falls between groups, never inside one. */
 .rl-chart-tabs {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 8px;
+  gap: 6px 8px;
   min-height: 28px;
 }
 
 .rl-chart-tabs-group {
   display: inline-flex;
   gap: 6px;
+  flex: none;
 }
 
 /* Chart tabs are labels inside an already named analysis panel, so they use
@@ -818,7 +829,11 @@
   padding: 2px 7px;
 }
 
-.rl-chart-tabs-space { flex: 1; }
+ /* Pushes everything after it to the far edge — and on a wrapped row it is
+   the break point, so the legend/axis/window groups land on their own line
+   rather than straggling. */
+.rl-chart-tabs-space { flex: 1 1 0; min-width: 0; }
+
 
 .rl-chart-note {
   font-size: 11px;
@@ -829,6 +844,8 @@
 .rl-chart-legend {
   display: inline-flex;
   gap: 6px;
+  flex: none;
+  flex-wrap: wrap;
 }
 
 .rl-chip {
@@ -837,6 +854,7 @@
   gap: 5px;
   font-size: 11px;
   line-height: 1;
+  white-space: nowrap;
   padding: 4px 8px;
   border-radius: 999px;
   border: 1px solid var(--dsw-alias-border-l1);
@@ -884,7 +902,6 @@
 .rl-ls-warn { stroke: var(--dsw-alias-state-warn-primary); }
 .rl-ls-error { stroke: var(--dsw-alias-state-error-primary); }
 .rl-ls-neutral { stroke: var(--dsw-alias-label-primary); }
-.rl-ls-reasoning { stroke: var(--dsw-alias-state-business-primary, var(--dsw-alias-brand-primary)); }
 
 .rl-line {
   fill: none;
@@ -898,14 +915,15 @@
   fill: currentColor;
 }
 .rl-dot.rl-ls-brand { color: var(--dsw-alias-brand-primary, var(--dsw-alias-label-secondary)); }
-.rl-dot.rl-ls-reasoning, .rl-mark.rl-ls-reasoning, .rl-focus.rl-ls-reasoning { color: var(--dsw-alias-state-business-primary, var(--dsw-alias-brand-primary)); }
 .rl-dot.rl-ls-success, .rl-mark.rl-ls-success, .rl-focus.rl-ls-success { color: var(--dsw-alias-state-success-primary); }
 .rl-dot.rl-ls-warn, .rl-mark.rl-ls-warn, .rl-focus.rl-ls-warn { color: var(--dsw-alias-state-warn-primary); }
 .rl-dot.rl-ls-error, .rl-mark.rl-ls-error, .rl-focus.rl-ls-error { color: var(--dsw-alias-state-error-primary); }
 .rl-dot.rl-ls-neutral, .rl-mark.rl-ls-neutral, .rl-focus.rl-ls-neutral { color: var(--dsw-alias-label-primary); }
 .rl-mark.rl-ls-brand, .rl-focus.rl-ls-brand { color: var(--dsw-alias-brand-primary, var(--dsw-alias-label-secondary)); }
 
-/* Cumulative stacked bars: one column per step, segments per token kind. */
+/* Stacked token columns: one column per call, segments floor-up. crispEdges
+   keeps a 1px sliver in a packed session a solid line rather than a blurred
+   pair of half-pixels. */
 .rl-bar {
   stroke: none;
   fill: currentColor;
@@ -913,27 +931,13 @@
   shape-rendering: crispEdges;
 }
 .rl-bar.rl-ls-brand { color: var(--dsw-alias-brand-primary, var(--dsw-alias-label-secondary)); }
-.rl-bar.rl-ls-reasoning { color: var(--dsw-alias-state-business-primary, var(--dsw-alias-brand-primary)); }
 .rl-bar.rl-ls-success { color: var(--dsw-alias-state-success-primary); }
 .rl-bar.rl-ls-warn { color: var(--dsw-alias-state-warn-primary); }
 .rl-bar.rl-ls-error { color: var(--dsw-alias-state-error-primary); }
 .rl-bar.rl-ls-neutral { color: var(--dsw-alias-label-primary); }
 
-/* Cumulative totals on the clock axis: the continuous form of the columns
-   above. Slightly softer than a bar because neighbouring bands touch. */
-.rl-area {
-  stroke: none;
-  fill: currentColor;
-  fill-opacity: 0.72;
-}
-.rl-area.rl-ls-brand { color: var(--dsw-alias-brand-primary, var(--dsw-alias-label-secondary)); }
-.rl-area.rl-ls-reasoning { color: var(--dsw-alias-state-business-primary, var(--dsw-alias-brand-primary)); }
-.rl-area.rl-ls-success { color: var(--dsw-alias-state-success-primary); }
-.rl-area.rl-ls-warn { color: var(--dsw-alias-state-warn-primary); }
-.rl-area.rl-ls-error { color: var(--dsw-alias-state-error-primary); }
-.rl-area.rl-ls-neutral { color: var(--dsw-alias-label-primary); }
-
-/* Wide translucent wash over the hovered column (bars have no dot tops). */
+/* Hovered column: columns have no dot tops to light up, so the whole column
+   takes a wash. */
 .rl-bar-hover {
   fill: var(--dsw-alias-label-foreground);
   opacity: 0.07;
@@ -986,7 +990,6 @@
   background: currentColor;
 }
 .rl-tip-swatch.rl-ls-brand { background: var(--dsw-alias-brand-primary, var(--dsw-alias-label-secondary)); }
-.rl-tip-swatch.rl-ls-reasoning { background: var(--dsw-alias-state-business-primary, var(--dsw-alias-brand-primary)); }
 .rl-tip-swatch.rl-ls-success { background: var(--dsw-alias-state-success-primary); }
 .rl-tip-swatch.rl-ls-warn { background: var(--dsw-alias-state-warn-primary); }
 .rl-tip-swatch.rl-ls-error { background: var(--dsw-alias-state-error-primary); }
@@ -997,13 +1000,6 @@
 .rl-tip-value {
   color: var(--dsw-alias-label-primary);
   font-variant-numeric: tabular-nums;
-}
-
-/* Cumulative mode: what the hovered step itself added. */
-.rl-tip-delta {
-  color: var(--dsw-alias-label-tertiary);
-  font-variant-numeric: tabular-nums;
-  font-size: 10px;
 }
 
 .rl-tip-note {

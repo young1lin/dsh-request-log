@@ -42,7 +42,7 @@ describe('fresh defaults', () => {
       auto: true,
       model: null,
       detail: { side: 'request', format: null },
-      charts: { open: true, group: 'hitrate', stacks: false, cumulative: true, xMode: 'time', bucketMinutes: 5 },
+      charts: { open: true, group: 'hitrate', xMode: 'time', bucketMinutes: 5 },
     })
   })
 })
@@ -57,7 +57,7 @@ describe('in-page round-trip', () => {
       auto: false,
       model: null,
       detail: { side: 'response', format: 'openai-responses' },
-      charts: { open: true, group: 'hitrate', stacks: false, cumulative: true, xMode: 'time', bucketMinutes: 5 },
+      charts: { open: true, group: 'hitrate', xMode: 'time', bucketMinutes: 5 },
     })
     expect(loadViewMemory('s2')).toEqual(freshViewMemory())
   })
@@ -157,45 +157,41 @@ describe('sessionStorage write-through', () => {
       auto: true,
       model: null,
       detail: { side: 'request', format: null },
-      charts: { open: true, group: 'hitrate', stacks: false, cumulative: true, xMode: 'time', bucketMinutes: 5 },
+      charts: { open: true, group: 'hitrate', xMode: 'time', bucketMinutes: 5 },
     })
   })
 
-  it('remembers the bucket size and clamps a hostile one', () => {
+  it('degrades a memory left behind by the three-axis charts', () => {
     const store = fakeStorage()
     vi.stubGlobal('sessionStorage', store)
-    updateViewMemory('s3', { charts: { ...loadViewMemory('s3').charts, xMode: 'bucket', bucketMinutes: 10 } })
-    const back = loadViewMemory('s3').charts
-    expect(back.xMode).toBe('bucket')
-    expect(back.bucketMinutes).toBe(10)
-    // A seeded page per id: zero, negative, absurd and non-integer windows
-    // all fall back to the default — the control must never divide by a
-    // hostile bucket.
-    for (const [id, minutes] of [['b0', 0], ['bneg', -5], ['bbig', 99_999], ['btext', '5']] as const) {
-      store.setItem('dsh-request-log:view:' + id, JSON.stringify({
-        charts: { xMode: 'bucket', bucketMinutes: minutes },
-      }))
-      expect(loadViewMemory(id).charts.bucketMinutes).toBe(5)
-      expect(loadViewMemory(id).charts.xMode).toBe('bucket')
-    }
+    // Written by <=0.1.4: a bucket axis plus the stacking and cumulative
+    // toggles. The axis name is retired — the by-window reading is what the
+    // clock axis now draws — so it falls back to the default rather than
+    // leaving the panel on a mode it cannot name. The window width it stored
+    // is still a window width and survives; the retired toggles are not read.
+    store.setItem('dsh-request-log:view:old', JSON.stringify({
+      charts: { open: true, group: 'tokens', xMode: 'bucket', bucketMinutes: 10, stacks: true, cumulative: true },
+    }))
+    expect(loadViewMemory('old').charts)
+      .toEqual({ open: true, group: 'tokens', xMode: 'time', bucketMinutes: 10 })
   })
 
   it('coerces chart prefs narrowly and keeps valid ones', () => {
     const store = fakeStorage()
     vi.stubGlobal('sessionStorage', store)
     store.setItem(KEY, JSON.stringify({
-      charts: { open: false, group: 'tokens', stacks: 3, cumulative: 'nope', xMode: 'sideways' },
+      charts: { open: false, group: 'tokens', xMode: 'sideways' },
     }))
     const loaded = loadViewMemory('s1')
-    expect(loaded.charts).toEqual({ open: false, group: 'tokens', stacks: false, cumulative: true, xMode: 'time', bucketMinutes: 5 })
+    expect(loaded.charts).toEqual({ open: false, group: 'tokens', xMode: 'time', bucketMinutes: 5 })
     store.setItem('dsh-request-log:view:s2', JSON.stringify({
       charts: { open: true, group: 'galaxy' },
     }))
     // An uncached session id reads through to storage; s1 stays in-page.
-    expect(loadViewMemory('s2').charts).toEqual({ open: true, group: 'hitrate', stacks: false, cumulative: true, xMode: 'time', bucketMinutes: 5 })
+    expect(loadViewMemory('s2').charts).toEqual({ open: true, group: 'hitrate', xMode: 'time', bucketMinutes: 5 })
     // A partial patch rides the merge without dropping untouched fields.
-    updateViewMemory('s1', { charts: { group: 'latency', open: false, stacks: false, cumulative: false, xMode: 'step', bucketMinutes: 5 } })
-    expect(loadViewMemory('s1').charts).toEqual({ open: false, group: 'latency', stacks: false, cumulative: false, xMode: 'step', bucketMinutes: 5 })
+    updateViewMemory('s1', { charts: { group: 'latency', open: false, xMode: 'step', bucketMinutes: 5 } })
+    expect(loadViewMemory('s1').charts).toEqual({ open: false, group: 'latency', xMode: 'step', bucketMinutes: 5 })
   })
 
   it('drops a selection whose id is not a string', () => {
@@ -243,6 +239,35 @@ describe('clearViewMemory', () => {
     expect(store.getItem('dsh-request-log:view:s2')).not.toBeNull()
     expect(loadViewMemory('s1')).toEqual(freshViewMemory())
     expect(loadViewMemory('s2').auto).toBe(false)
+  })
+})
+
+describe('charts window memory', () => {
+  it('rejects a stored window that is not a whole number of minutes in range', () => {
+    const store = fakeStorage()
+    vi.stubGlobal('sessionStorage', store)
+    const seed = (id: string, bucketMinutes: unknown): void => {
+      store.setItem('dsh-request-log:view:' + id, JSON.stringify({
+        charts: { open: true, group: 'tokens', xMode: 'time', bucketMinutes },
+      }))
+    }
+    // A window is a count of minutes: zero and negative name no window, a
+    // fraction is not a wall-clock boundary, a day is the ceiling, and a
+    // string is not a number however numeric it looks.
+    seed('zero', 0)
+    expect(loadViewMemory('zero').charts.bucketMinutes).toBe(5)
+    seed('neg', -10)
+    expect(loadViewMemory('neg').charts.bucketMinutes).toBe(5)
+    seed('frac', 2.5)
+    expect(loadViewMemory('frac').charts.bucketMinutes).toBe(5)
+    seed('huge', 10_000)
+    expect(loadViewMemory('huge').charts.bucketMinutes).toBe(5)
+    seed('text', '10')
+    expect(loadViewMemory('text').charts.bucketMinutes).toBe(5)
+    seed('ok', 30)
+    expect(loadViewMemory('ok').charts.bucketMinutes).toBe(30)
+    seed('day', 1440)
+    expect(loadViewMemory('day').charts.bucketMinutes).toBe(1440)
   })
 })
 

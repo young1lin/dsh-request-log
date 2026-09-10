@@ -29,9 +29,11 @@ describe('bucketTokens', () => {
     expect(y('in')).toEqual([150])
     expect(y('cacheRead')).toEqual([900])
     expect(y('cacheWrite')).toEqual([5])
-    // Output decomposes: reasoning + answer always sums to reported output.
-    expect(y('reasoning')).toEqual([4])
-    expect(y('out')).toEqual([26])
+    // The whole reported output, undecomposed — reasoning is a subset of it
+    // by wire semantics and no longer earns a band of its own.
+    expect(y('out')).toEqual([30])
+    // Legend order (declaration order); the floor-up draw order is stackOrder.
+    expect(group.series.map(series => series.key)).toEqual(['in', 'cacheRead', 'cacheWrite', 'out'])
   })
 
   it('renders an idle window as an empty bucket, not as a missing one', () => {

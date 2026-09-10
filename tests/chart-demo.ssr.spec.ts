@@ -17,6 +17,7 @@ const { renderToStaticMarkup } = await import('react-dom/server')
 const { StatsPanel } = await import('../src/client/chart.tsx')
 type Entry = import('../src/shared/types').CallIndexEntry
 type Dict = import('../src/client/dict').ViewDict
+import { demoDict } from './dict-fixture'
 
 let fixtureSeq = 0
 
@@ -96,49 +97,7 @@ calls.push(entryOf({
   usage: { inputTokens: 61_000, outputTokens: 3_100 },
 }))
 
-const dict: Dict = {
-  tab: 'Requests', empty: '', emptyHint: '', error: '', retry: '',
-  stepHint: '', stale: '', refresh: 'Refresh', refreshHint: '', auto: 'Auto', autoHint: '',
-  time: 'Time', model: 'Model', modelAll: 'All models', modelFilterHint: '', ttft: 'TTFT', totalTime: 'Total',
-  colSpeed: 'Speed', speedHint: '', colBilledInput: 'Total in', colIn: 'In',
-  colCacheRead: 'Cache hit', hitRateHint: '', colHitRate: 'Hit %',
-  colCacheWrite: 'Cache write', colOut: 'Out', colReasoning: 'Reasoning', colAnswer: 'Answer',
-  size: 'Msg/Calls', sizeHint: '',
-  retryOf: '', sumCalls: 'Calls', sumCallsOf: 'of {total} calls',
-  sumFailed: 'Failed', sumFailedHint: '{errors} errors · {aborts} aborted',
-  sumRetried: 'Retried', sumRetriedHint: '',
-  sumBilledInput: 'Total in', sumBilledInputHint: '',
-  sumInput: 'Input', sumUncached: 'uncached', sumCached: 'cached', sumWritten: 'written', sumHitRate: 'Hit rate',
-  sumCacheWrite: 'Cache write', sumOutput: 'Output',
-  sumStorage: 'Disk added', sumStorageHint: '', backToTop: '', toLatest: '',
-  charts: {
-    toggle: 'Charts', toggleHint: '',
-    groupHitRate: 'Hit rate', groupTokens: 'Tokens', groupLatency: 'Latency', groupSpeed: 'Speed',
-    stacks: 'Stacked', stacksHint: '',
-    cumulative: 'Cumulative', cumulativeHint: '',
-    xAxisToStep: 'By step', xAxisToTime: 'By time', xAxisToBucket: 'By bucket', xAxisHint: '',
-    bucketSize: 'Window', bucketCustom: 'Custom', bucketHint: '',
-    emptyTitle: 'Nothing to plot yet', emptyHint: '', allNull: '',
-    speedApproxHint: 'Approximate.',
-    excludedShort: '{count} aux',
-    excludedHint: '{count} auxiliary calls are not on the numbered step axis.',
-  },
-  detail: {
-    back: '', step: '', timingCard: '', startedAt: '', waitPhase: '', waitHint: '',
-    streamPhase: '', streamHint: '', totalPhase: '', usageCard: '', usageNone: '',
-    input: '', cacheRead: '', cacheWrite: '', output: '', reasoning: '', hitRate: '',
-    billedInput: '', outSpeed: '', outSpeedHint: '', callCard: '', provider: '', model: '',
-    effort: '', attempt: '', retryOf: '', finish: '', size: '', msgs: '', callsLabel: '',
-    callsHint: '', request: '', response: '', neutral: '', reconstructed: '',
-    expandAll: '', expandHint: '', collapseAll: '', collapseHint: '',
-    chainOn: '', chainOff: '', copy: '', copied: '', copyFailed: '', loadError: '',
-    jsonCollapse: '', jsonExpand: '', jsonChars: '', jsonViewAsJson: '', jsonViewAsText: '',
-    jsonViewAsJsonTitle: '', jsonViewAsTextTitle: '', jsonCollapseStringTitle: '',
-    jsonOpenString: '', jsonOpenStringTitle: '', jsonChip: '', jsonTruncated: '',
-    jsonItems: '', jsonKeys: '', jsonNodeBudget: '', jsonDepthBudget: '',
-    renderError: '', renderRetry: '',
-  },
-}
+const dict: Dict = demoDict
 
 const css = readFileSync(join(import.meta.dirname, '..', 'src', 'client', 'styles.css'), 'utf8')
 
@@ -172,23 +131,15 @@ describe('stats panel screenshot fixtures', () => {
   it('renders every metric group to .tmp/*.html', () => {
     mkdirSync('.tmp', { recursive: true })
     const variants: { name: string; prefs: import('../src/client/persist').ChartsPrefs }[] = [
-      { name: 'hitrate', prefs: { open: true, group: 'hitrate', stacks: false, cumulative: true, xMode: 'step', bucketMinutes: 5 } },
-      { name: 'tokens-lines', prefs: { open: true, group: 'tokens', stacks: false, cumulative: false, xMode: 'step', bucketMinutes: 5 } },
-      { name: 'tokens-cumulative', prefs: { open: true, group: 'tokens', stacks: false, cumulative: true, xMode: 'step', bucketMinutes: 5 } },
-      { name: 'tokens-cumulative-stacked', prefs: { open: true, group: 'tokens', stacks: true, cumulative: true, xMode: 'step', bucketMinutes: 5 } },
-      { name: 'tokens-stacked', prefs: { open: true, group: 'tokens', stacks: true, cumulative: false, xMode: 'step', bucketMinutes: 5 } },
-      { name: 'latency', prefs: { open: true, group: 'latency', stacks: false, cumulative: true, xMode: 'step', bucketMinutes: 5 } },
-      { name: 'speed', prefs: { open: true, group: 'speed', stacks: false, cumulative: true, xMode: 'step', bucketMinutes: 5 } },
-      // The clock axis: idle gaps become distance, cumulative becomes an area.
-      { name: 'time-hitrate', prefs: { open: true, group: 'hitrate', stacks: false, cumulative: true, xMode: 'time', bucketMinutes: 5 } },
-      { name: 'time-tokens-lines', prefs: { open: true, group: 'tokens', stacks: false, cumulative: false, xMode: 'time', bucketMinutes: 5 } },
-      { name: 'time-tokens-area', prefs: { open: true, group: 'tokens', stacks: false, cumulative: true, xMode: 'time', bucketMinutes: 5 } },
-      { name: 'time-latency', prefs: { open: true, group: 'latency', stacks: false, cumulative: true, xMode: 'time', bucketMinutes: 5 } },
-      // Bucket mode: per-window stacked columns; a stored bucket choice on a
-      // non-token group renders as by-time without losing the stored mode.
-      { name: 'tokens-bucket', prefs: { open: true, group: 'tokens', stacks: false, cumulative: true, xMode: 'bucket', bucketMinutes: 5 } },
-      { name: 'tokens-bucket-hour', prefs: { open: true, group: 'tokens', stacks: false, cumulative: false, xMode: 'bucket', bucketMinutes: 30 } },
-      { name: 'latency-bucket-falls-back', prefs: { open: true, group: 'latency', stacks: false, cumulative: true, xMode: 'bucket', bucketMinutes: 5 } },
+      // The numbered axis: every turn equal width, retries collapsed into it.
+      { name: 'hitrate', prefs: { open: true, group: 'hitrate', xMode: 'step', bucketMinutes: 5 } },
+      { name: 'tokens', prefs: { open: true, group: 'tokens', xMode: 'step', bucketMinutes: 5 } },
+      { name: 'latency', prefs: { open: true, group: 'latency', xMode: 'step', bucketMinutes: 5 } },
+      { name: 'speed', prefs: { open: true, group: 'speed', xMode: 'step', bucketMinutes: 5 } },
+      // The clock axis: idle gaps become real distance, aux calls join in.
+      { name: 'time-hitrate', prefs: { open: true, group: 'hitrate', xMode: 'time', bucketMinutes: 5 } },
+      { name: 'time-tokens', prefs: { open: true, group: 'tokens', xMode: 'time', bucketMinutes: 5 } },
+      { name: 'time-latency', prefs: { open: true, group: 'latency', xMode: 'time', bucketMinutes: 5 } },
     ]
     for (const variant of variants) {
       const html = page(variant.name, renderToStaticMarkup(

@@ -90,21 +90,14 @@ export interface ChartsDict {
   groupTokens: string
   groupLatency: string
   groupSpeed: string
-  /** Token-group stack toggle + its tooltip. */
-  stacks: string
-  stacksHint: string
-  /** Token-group cumulative (running-total) toggle + its tooltip. */
-  cumulative: string
-  cumulativeHint: string
-  /** Label of the x-axis toggle: names the axis you switch TO. */
-  xAxisToStep: string
-  xAxisToTime: string
+  /** Axis segments: each names the axis it DRAWS, the lit one being current. */
+  xAxisTime: string
+  xAxisStep: string
   xAxisHint: string
-  /** X-axis toggle: the third position, and the bucket-size control. */
-  xAxisToBucket: string
+  /** Token column width on the clock axis: label, tooltip, custom-minutes field. */
   bucketSize: string
-  bucketCustom: string
   bucketHint: string
+  bucketCustom: string
   /** Shown when no plotted value exists anywhere. */
   emptyTitle: string
   emptyHint: string
@@ -154,10 +147,6 @@ export interface ViewDict {
   colHitRate: string
   colCacheWrite: string
   colOut: string
-  /** Token-chart series labels: reasoning is a subset of output, so the
-   *  chart's output band decomposes into these two, never three totals. */
-  colReasoning: string
-  colAnswer: string
   size: string
   sizeHint: string
   retryOf: string

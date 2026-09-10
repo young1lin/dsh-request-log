@@ -4,7 +4,7 @@
  */
 
 import { describe, expect, it } from 'vitest'
-import { buildChartModel, cumulateSerieses, stackSerieses } from '../src/client/chart-stats'
+import { buildChartModel, stackSerieses } from '../src/client/chart-stats'
 import type { CallIndexEntry } from '../src/shared/types'
 
 function entryOf(overrides: Partial<CallIndexEntry> & { id: string }): CallIndexEntry {
@@ -122,35 +122,30 @@ describe('buildChartModel slots', () => {
   })
 })
 
-describe('tokens reasoning decomposition', () => {
-  it('splits the output band into reasoning + answer, keeping the stack sum invariant', () => {
-    // step 1: out 10 of which 4 reasoning → answer 6; step 2: out 7, none reported.
+describe('tokens output band', () => {
+  it('plots the WHOLE reported output, whatever reasoning the provider declares', () => {
+    // Reasoning is no longer split out of the band: an unreported reasoning
+    // count and a large one must both leave the output band at the reported
+    // output, so the stack top stays billed + output.
     const group = buildChartModel([
       entryOf({ id: 'a', step: 1, usage: { inputTokens: 10, outputTokens: 10, reasoningTokens: 4 } }),
       entryOf({ id: 'b', step: 2, usage: usage(100, 0, undefined, 7) }),
     ], 'step').groups.find(g => g.key === 'tokens')!
     const byKey = new Map(group.series.map(s => [s.key, s]))
-    // Unreported reasoning is a REAL zero band, not a gap.
-    expect(byKey.get('reasoning')!.points.map(p => p.y)).toEqual([4, 0])
-    expect(byKey.get('out')!.points.map(p => p.y)).toEqual([6, 7])
-    // The decomposition sits inside the old output band: the stacked top of
-    // step 1 is still billed + OUTPUT (10 + 10), not billed + output + reasoning.
+    expect(byKey.get('out')!.points.map(p => p.y)).toEqual([10, 7])
     const stacked = stackSerieses(group)
     const top = stacked[stacked.length - 1]!
     expect(top.key).toBe('out')
-    expect(top.points[0]!.y).toBe(20)
-    expect(top.points[1]!.y).toBe(107)
+    expect(top.points.map(p => p.y)).toEqual([20, 107])
   })
 
-  it('clamps reasoning to the reported output, so answer never goes negative', () => {
-    // Wire semantics say reasoning ⊆ output; a provider violating that must
-    // not produce a negative answer layer — reasoning caps at output.
+  it('carries no reasoning series at all', () => {
     const group = buildChartModel([
-      entryOf({ id: 'weird', step: 1, usage: { inputTokens: 5, outputTokens: 3, reasoningTokens: 9 } }),
+      entryOf({ id: 'a', step: 1, usage: { inputTokens: 5, outputTokens: 3, reasoningTokens: 9 } }),
     ], 'step').groups.find(g => g.key === 'tokens')!
-    const byKey = new Map(group.series.map(s => [s.key, s]))
-    expect(byKey.get('reasoning')!.points[0]!.y).toBe(3)
-    expect(byKey.get('out')!.points[0]!.y).toBe(0)
+    expect(group.series.map(s => s.key)).toEqual(['in', 'cacheRead', 'cacheWrite', 'out'])
+    // A provider overshooting output cannot distort the band any more.
+    expect(group.series.find(s => s.key === 'out')!.points[0]!.y).toBe(3)
   })
 })
 
@@ -177,10 +172,10 @@ describe('stackSerieses', () => {
     const group = tokenGroup()
     const stacked = stackSerieses(group)
     // One order for every x position of the token group: the series pile up
-    // bottom-to-top cacheRead, in, cacheWrite, reasoning, out — exactly the
-    // bucket group's order, because both read one shared constant.
-    expect(stacked.map(series => series.key)).toEqual(['cacheRead', 'in', 'cacheWrite', 'reasoning', 'out'])
-    expect(group.stackOrder).toEqual(['cacheRead', 'in', 'cacheWrite', 'reasoning', 'out'])
+    // bottom-to-top cacheRead, in, cacheWrite, out — cache hits floor the
+    // stack, so the height above the green band is what the call really cost.
+    expect(stacked.map(series => series.key)).toEqual(['cacheRead', 'in', 'cacheWrite', 'out'])
+    expect(group.stackOrder).toEqual(['cacheRead', 'in', 'cacheWrite', 'out'])
   })
 
 
@@ -189,52 +184,6 @@ describe('stackSerieses', () => {
     for (const series of group.series) series.points.push({ x: 3, y: null })
     const stacked = stackSerieses(group)
     for (const series of stacked) expect(series.points[2]!.y).toBeNull()
-  })
-})
-
-describe('cumulateSerieses', () => {
-  function tokenGroup() {
-    // step 1: in 10 / cacheRead 20 / cacheWrite 5 / out 3
-    // step 2: in 100 / out 7   step 3: ERROR (no usage at all).
-    return buildChartModel([
-      entryOf({ id: 'a', step: 1, usage: usage(10, 20, 5, 3) }),
-      entryOf({ id: 'b', step: 2, usage: usage(100, 0, undefined, 7) }),
-      entryOf({ id: 'err', step: 3, status: 'error' }),
-    ], 'step').groups.find(group => group.key === 'tokens')!
-  }
-
-  it('turns each series into a running total across steps', () => {
-    const byKey = new Map(cumulateSerieses(tokenGroup()).map(s => [s.key, s]))
-    expect(byKey.get('in')!.points.map(p => p.y)).toEqual([10, 110, 110])
-    expect(byKey.get('out')!.points.map(p => p.y)).toEqual([3, 10, 10])
-  })
-
-  it('carries the total forward over a usage-less slot instead of drawing a gap', () => {
-    // Step 3 errored: nothing was added, so the running total genuinely stands.
-    const inputs = cumulateSerieses(tokenGroup()).find(s => s.key === 'in')!
-    expect(inputs.points[2]!.y).toBe(110)
-  })
-
-  it('keeps LEADING slots gap — no invented zero start', () => {
-    const group = buildChartModel([
-      entryOf({ id: 'err', step: 1, status: 'error' }),
-      entryOf({ id: 'ok', step: 2, usage: usage(10) }),
-    ], 'step').groups.find(g => g.key === 'tokens')!
-    const inputs = cumulateSerieses(group).find(s => s.key === 'in')!
-    expect(inputs.points.map(p => p.y)).toEqual([null, 10])
-  })
-
-  it('stacks on top of cumulated layers into a grand cumulative total', () => {
-    const cumulated = cumulateSerieses(tokenGroup())
-    const stacked = stackSerieses({ ...tokenGroup(), series: cumulated })
-    const byKey = new Map(stacked.map(s => [s.key, s]))
-    // The out layer tops at the grand cumulative total: 38 = 10+20+5+3,
-    // 145 = (10+100)+(20+0)+(5+0)+(3+7), then flat 145 over the error slot.
-    expect(byKey.get('out')!.points.map(p => p.y)).toEqual([38, 145, 145])
-    // The floor band is the cumulated cache hits alone; the input band tops
-    // above it — the same bands the by-step stack draws, in the same order.
-    expect(byKey.get('cacheRead')!.points.map(p => p.y)).toEqual([20, 20, 20])
-    expect(byKey.get('in')!.points.map(p => p.y)).toEqual([30, 130, 130])
   })
 })
 
@@ -340,17 +289,5 @@ describe('buildChartModel time mode', () => {
     ], 'time')
     const xs = model.groups[0]!.series[0]!.points.map(p => p.x)
     expect(xs).toEqual([at(9, 0), at(11, 0)])
-  })
-
-  it('accumulates cumulative totals across time slots, gaps carrying forward', () => {
-    const model = buildChartModel([
-      entryOf({ id: 'a', step: 1, startedAt: at(9, 0), usage: usage(100, 0, 0, 10) }),
-      entryOf({ id: 'b', step: 2, startedAt: at(9, 30), status: 'error' }),
-      entryOf({ id: 'c', step: 3, startedAt: at(10, 0), usage: usage(300, 0, 0, 30) }),
-    ], 'time')
-    const tokens = model.groups.find(g => g.key === 'tokens')!
-    const out = cumulateSerieses(tokens).find(s => s.key === 'out')!
-    // The error step reported nothing: the running total carries, never dips.
-    expect(out.points.map(p => p.y)).toEqual([10, 10, 40])
   })
 })

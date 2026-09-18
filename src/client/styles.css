@@ -371,7 +371,10 @@
      no measurement (first paint, or an effect that never ran) the table
      sizes itself exactly as it did before, across every row. */
   grid-template-columns: var(--rl-tracks, repeat(12, max-content));
-  column-gap: 10px;
+  /* dsh tables use 16px horizontal cell padding. The same interval here keeps
+     adjacent compact figures (notably Total + a three-digit Speed) from
+     reading as one run without inflating any content-derived track. */
+  column-gap: 16px;
   width: fit-content;
   max-width: 100%;
   margin-inline: auto;
@@ -384,12 +387,12 @@
 
 .rl-row {
   display: grid;
-  /* Tracks belong to .rl-table; the row adopts them (and its gaps) verbatim,
-     so every row's columns align by construction, not by a shared px list.
-     The same explicit list every row over aligns them just as well; the
-     fallback is the subgrid that aligned them when the table itself was
-     measuring max-content. */
+  /* Tracks belong to .rl-table. The same explicit list on every row aligns
+     them by construction; the fallback is the subgrid used while the table
+     is still measuring max-content. Once --rl-tracks resolves to pixels the
+     row is no longer a subgrid, so its gap must inherit separately. */
   grid-template-columns: var(--rl-tracks, subgrid);
+  column-gap: inherit;
   grid-column: 1 / -1;
   align-items: center;
   box-sizing: border-box;

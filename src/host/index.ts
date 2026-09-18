@@ -22,7 +22,7 @@ import { errorTextOf } from './errtext'
 
 export const name = 'dsh-request-log'
 
-export const VERSION = '0.1.7'
+export const VERSION = '0.1.8'
 
 export interface Config {
   /** Root directory for the per-session JSONL files. */
